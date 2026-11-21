@@ -5562,3 +5562,26 @@ So TI Revive's limit at Play (E572) is the original's too; a pre-roll is the doc
 - **Method:** static analysis (REA), documentation search (pdftotext)
 - **Confidence:** MEDIUM (read path HIGH from the code; behaviour after the burst open)
 - **Hardware:** no
+
+### E574
+
+Pre-shift at Play (#37, commit 6a192f0): TimelineFollow::play_started(from_stop) measures the burst of a Play from a
+stop (the most-ahead error over a second, counted without the follower's own moves, against the error's low before
+Play) and at the next Play from a stop returns it as a shift back before the burst; while the burst eats it nothing
+moves and process() skips its 8192-frame re-anchor (expects()); a burst smaller or larger than learned is fixed by a
+jump and learned anew; the "burst never ends" limit is now SETTLE or 16 blocks (at block 2048 SETTLE alone ended
+Logic's burst after one block, E570); loop restarts and jumps while playing never shift (TransportWatch::from_stop).
+Unit tests 874 pass (7 new for the shift, 1 for from_stop), ctest 7/7. TI2 A/B (Linux, nativehost --block 2048, Play at
+8 s and again at 20 s, 263 ms burst each; work/repro-37b): rc2 3 jumps and 12 pulled-back blocks at both Plays; new
+build: first Play as rc2, second Play one shift of 11607 frames, 0 jumps, 0 pull-backs. The note exactly at Play is
+about 260 ms late in both (the DAW renders that spot before the Virus has the note; unavoidable, E572/E573);
+the notes from Play + 1 s on are exact. scripts/hil.sh on it: ALL PASS (work/hil-0.8.44-preshift). User's REAPER test
+(Linux, pw-jack, 48 kHz, TI2 Desktop, plug-in ce68817b, 2026-11-21 22:00-22:02): buffer 256, 7 Plays after the
+first each 'timeline back by 3840 frames' (= the reported latency), no jump, no pull-back - heard: perfect; buffer
+2048, 4 Plays each back by 6112-6144, no jump, no pull-back - heard: ok, smaller buffers better.
+
+- **Date:** 2026-11-21
+- **Pointer:** native/src/device/timelinefollow.h (play_started, expects, settle), native/src/device/transport.h (from_stop), native/plugin/source/virusplugin.cpp process(); native/tests/test_timelinefollow.cpp, test_transport.cpp; scripts/playstart_check.py; issue #37
+- **Method:** unit tests, nativehost A/B on the TI2, hil.sh, user's REAPER listening test + diag.log
+- **Confidence:** MEDIUM (REAPER on Linux and the model run; Logic not tested by us)
+- **Hardware:** yes (our TI2 Desktop, Linux)
