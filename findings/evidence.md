@@ -5500,3 +5500,22 @@ Catalina behaves like REAPER or like the nativehost burst.
 - **Method:** port of E351, unit tests, hardware A/B (nativehost), user's REAPER check
 - **Confidence:** LOW (whether it helps Logic: the model run at block 2048 is slightly worse)
 - **Hardware:** yes (our TI2 Desktop, Linux: nativehost A/B and the user's REAPER)
+
+### E571
+
+rc2 (d8ba24d, the E351 port of E570) in Logic on Catalina (#37 reporter's TI2, log 2026-11-21 22:47, 5 plug-in opens
+with rc2 next to earlier rc1 opens in the same log): no change at Play. Each Play at block 2048 gives a 10 s stats
+window with host frames 11608 above the Virus' (about 263 ms ahead), 3 anchors, err down to -5703/-6144 and 12 blocks
+pulled back (largest 3584); rc1 in the same log: +11608, 3 anchors, 13 blocks. The next windows are calm (anchors 0, no
+pull-back). Windows at block 128 (`largest 128`, presumably the selected track in Logic, not tested) are clean. The
+reporter: starting 1-2 bars before the notes avoids the offset and the crackle, starting on the notes does not; the
+buffer setting changes nothing. The user: REAPER shows the same at the start, and the port trades the short crackle
+for notes missing at the start. So a jump after the burst cannot cover a burst longer than the read margin; the
+remaining options are a larger buffer (more latency) or holding notes until the burst ends, planned as an opt-in
+option for such DAWs (user's decision 2026-11-21).
+
+- **Date:** 2026-11-21
+- **Pointer:** issue #37 (issuecomment-7068606152); work/issue37-rc2 (git-ignored log)
+- **Method:** field log (stats lines), reporter's and user's listening tests
+- **Confidence:** MEDIUM (the burst size and its effect; that small blocks are clean comes from the log, not a test)
+- **Hardware:** yes (reporter's TI2, Logic on Catalina; user's REAPER on Linux)
