@@ -320,6 +320,18 @@ int DeviceOut::start_audio()
     return r;
 }
 
+
+void DeviceOut::note_timeline(const TimelineNote &n)
+{
+    const size_t w = tl_w_.load(std::memory_order_relaxed);
+    if (w - tl_r_.load(std::memory_order_acquire) >= TL_NOTES) { // the worker is behind: counted, logged by it
+        tl_lost_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    tl_notes_[w % TL_NOTES] = n;
+    tl_w_.store(w + 1, std::memory_order_release);
+}
+
 bool DeviceOut::send_rt(const uint8_t *msg, size_t n, int64_t stamp, bool live)
 {
     if (blocked_to_virus(msg, n)) { // rule 2 (sendguard.h); counted here, logged off the audio thread
@@ -990,6 +1002,18 @@ void DeviceOut::run()
                 b - blocked_logged_);
             blocked_logged_ = b;
         }
+        for (size_t r = tl_r_.load(std::memory_order_relaxed); r != tl_w_.load(std::memory_order_acquire); r++) {
+            const TimelineNote &n = tl_notes_[r % TL_NOTES];
+            if (n.what[0] == 'j')
+                log("timeline jump: err %lld by %lld block %d\n", (long long)n.err, (long long)n.value, n.block);
+            else
+                log("timeline %s: err %lld newest %lld block %d\n", n.what, (long long)n.err, (long long)n.value, n.block);
+            tl_r_.store(r + 1, std::memory_order_release);
+        }
+        if (int lost = tl_lost_.load(std::memory_order_relaxed); lost != tl_lost_logged_) {
+            log("timeline: %d anchor/jump line(s) not logged, the worker was behind\n", lost - tl_lost_logged_);
+            tl_lost_logged_ = lost;
+        }
         if (int lost = rt_lost_.load(std::memory_order_relaxed); lost != rt_lost_logged_) {
             log("Virus TI native: %d event(s) lost, the queue from process() was full\n", lost - rt_lost_logged_);
             rt_lost_logged_ = lost;
@@ -1489,6 +1513,8 @@ tresult PLUGIN_API VirusPlugin::setActive(TBool state)
 {
     if (state && out_)
         out_->start(); // the first activation connects to the Virus (a plug-in scan never gets here)
+    if (state)
+        reactivated_.store(true, std::memory_order_relaxed); // REAPER: before every Play, then its burst (E351)
     if (out_)
         out_->log("Virus TI native: setActive(%d), state loaded %d\n", (int)state, (int)state_loaded_);
     if (!state && out_ && out_->connected()) { // nothing keeps sounding after the plug-in stops (removed, closed):
@@ -1967,6 +1993,9 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         bool resync = tl_valid_ && !anchor_now && !out_->calibrating() && !env_no_ping() && resync_.due(newest, quiet);
         if (resync)
             anchor_now = true;
+        // setActive(1) counts from this block on, whichever way it goes: REAPER's Play block can be an anchor block (E351)
+        if (reactivated_.exchange(false, std::memory_order_relaxed))
+            tl_follow_.activated();
         if (anchor_now) {
             if (env_stats() || resync)
                 fprintf(stderr, "timeline %s: err %lld newest %lld block %d\n",
@@ -1977,7 +2006,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             next_tick_ = (double)tl_;
             transport_.reset(); // the new F8 grid is off the beat: the next playing block restarts on a tick (E505)
             restart_.clear();
-            tl_follow_.reset();
+            tl_follow_.anchor();
             bool new_stream = !tl_valid_;
             if (new_stream)
                 marker_retries_ = 0; // a new stream (start, the Virus came back)
@@ -1997,6 +2026,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             next_tick_ += (double)mv.delta;
             restart_.shift(mv.delta);
             if (mv.jump) {
+                if (env_stats())
+                    out_->note_timeline({"jump", err, mv.delta, data.numSamples});
                 out_->anchors.fetch_add(1, std::memory_order_relaxed);
                 // the resampled output (host rate != 44.1 kHz) jumps too: steering at 0.2 % took >10 s for the
                 // ~1000 frames after a render in REAPER - notes late, then catching up (user, L3; E279)
@@ -2055,6 +2086,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             const int64_t at_tick = tl_ + (int64_t)std::lround(st.offset);
             restart_.arm(st, at_tick); // goes out with the block that holds its tick (PendingRestart)
             next_tick_ = (double)at_tick;
+            tl_follow_.play_started(); // a DAW's burst ahead after Play: jump back at once, not after 0.5 s (E351)
         } else if (ev == TransportWatch::Stop) {
             restart_.clear();
             add(tl_, &TRANSPORT_STOP, 1);

@@ -5478,3 +5478,25 @@ reporter. The instances take the Virus by USB order ("no serial match"); no erro
 - **Method:** user logs
 - **Confidence:** HIGH (#37 marker found, #50 cache) / LOW (#37 remaining error = the Play burst)
 - **Hardware:** yes (users' TI on Catalina and two TI2 Desktops on macOS)
+
+### E570
+
+The Play-burst jump of E351 (TimelineFollow::play_started/activated, reverted in round 0.8.34) brought back in round
+0.8.44 for #37 (E569: Logic's first seconds after Play, err to -1901, pulled back up to 3584 frames). Ported from the
+local branch round-0.8.34-reaper-timeline (8106379, 40f6294, f87c0aa) onto the current process(): activated() before
+the anchor branch, anchor() instead of reset() at an anchor, play_started() at a Transport Start next to the restart's
+tick; the anchor/jump notes go to the worker log (note_timeline). Built on Linux, ctest 7/7 (vtitests incl. the 19
+model tests of E351). Repro on our TI2 Desktop (Linux, nativehost --rate 44100 --block 2048 --transport 8 --ahead
+113@8 --ahead 113@18 --notes, Logic-like block and a ~5000-frame burst; work/repro-37): rc1 (99345e2) err -4127 /
+-4796, 3 + 1 anchors, pulled back 11 blocks (largest 1567) and 2 (3559), 1 of 20 notes lost, 1 off the grid; with the
+port: jumps -1988 at the first Play block, then -2946 and -4155 (the burst spans ~2.4 blocks of 2048, the "err no
+longer falls" test ends it too early), pulled back 10 and 11 blocks, 2 of 23 lost, 2 off the grid, the rest within
+0.70 ms. scripts/hil.sh with the port (work/hil-0.8.44-e351): ALL PASS (H1, H2 x2, H3, H6; max 0.46-1.35 ms, drift +2..+41 ppm). So at block 2048 the port is not better in the model run. User's REAPER on Linux (2026-11-21, pw-jack, TI2
+Desktop): no crackle. Sent to the #37 reporter as an experimental build (user's decision) to see whether Logic on
+Catalina behaves like REAPER or like the nativehost burst.
+
+- **Date:** 2026-11-21
+- **Pointer:** native/src/device/timelinefollow.h (play_started, activated, anchor), native/plugin/source/virusplugin.cpp process(), native/tests/test_timelinefollow.cpp; issue #37
+- **Method:** port of E351, unit tests, hardware A/B (nativehost), user's REAPER check
+- **Confidence:** LOW (whether it helps Logic: the model run at block 2048 is slightly worse)
+- **Hardware:** yes (our TI2 Desktop, Linux: nativehost A/B and the user's REAPER)
