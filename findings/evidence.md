@@ -5519,3 +5519,21 @@ option for such DAWs (user's decision 2026-11-21).
 - **Method:** field log (stats lines), reporter's and user's listening tests
 - **Confidence:** MEDIUM (the burst size and its effect; that small blocks are clean comes from the log, not a test)
 - **Hardware:** yes (reporter's TI2, Logic on Catalina; user's REAPER on Linux)
+
+### E572
+
+REAPER's Play burst against the block size (user, Linux, pw-jack, TI2 Desktop, dev build 69779ebc = rc2 code, 48 kHz,
+2026-11-21 21:26). Block 256 (reported latency 3840): two Plays in one 10 s window, host frames +7680 above the
+Virus' (about 3840 per Play = the reported latency), 4 anchors, 200 blocks pulled back (largest 1663); heard: a short
+metallic crackle at the start. Block 2048 (latency 5632): two Plays, +17601 (about 8800 per Play), 5 anchors, 7 blocks
+pulled back (largest 3584); heard: a glitch, the start not right. Earlier today at 44.1 kHz/2048 (VTI_NATIVE_STATS):
+each Play two jumps (about -1900 then -4200/-4380), +11658 for one Play. So the burst is not a fixed number of blocks:
+it is at least the latency the plug-in reports (as E351 already suspected: delay compensation rendered at once at
+Play), in Logic (E571, 11608 at latency 5632) about twice. A larger reported latency (option (a) of E571) would make
+the burst larger by the same amount, so it cannot cover it.
+
+- **Date:** 2026-11-21
+- **Pointer:** ~/.local/share/virus-ti-native/diag.log (local, 21:26-21:27); E351, E571
+- **Method:** user's listening test + stats lines
+- **Confidence:** MEDIUM (two runs, two Plays each; the per-Play split of a 10 s window is inferred)
+- **Hardware:** yes (our TI2 Desktop, Linux, REAPER)
