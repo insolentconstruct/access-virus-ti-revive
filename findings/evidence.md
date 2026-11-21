@@ -5537,3 +5537,28 @@ the burst larger by the same amount, so it cannot cover it.
 - **Method:** user's listening test + stats lines
 - **Confidence:** MEDIUM (two runs, two Plays each; the per-Play split of a 10 s window is inferred)
 - **Hardware:** yes (our TI2 Desktop, Linux, REAPER)
+
+### E573
+
+What the original does when the DAW reads ahead at Play (#37, E571/E572; static REA/Ghidra 12.1.4 on the user's
+Virus Control.dll 5.1.7 x64, sha256 a622f9a2.., bounded search, nothing run) and what Access advises. (1) The host-side
+process (0x1800aa7c0) reads each output channel from a CSampleRateConverter (vtable 0x180158208) with slot +0x90
+(0x180025910): a ring of 65536 frames (+0x40040), a fractional read position (+0x40048) that advances by the
+converter's rate per output sample and wraps; the write position (+0x40044) is NOT checked inside the loop, so a read
+past the newest frame takes whatever the ring still holds from about 1.5 s earlier. Afterwards it returns the fill
+(write - read - a target at +0x18) and counts a read that passed the writer (+0x40050). Once per device block the
+process feeds that fill into a slow rate correction (factor 1e-8, slots +0x38 rate, +0x40) - no jump, no re-sync, no
+silence. Without the converter (+0x08 clear) slot +0x98 (0x180025ae0) copies the frames straight from the read
+position, also without a check against the writer. So in a DAW's Play burst the original plays stale ring audio too.
+How the read position gets back behind the writer after a burst in the copy path was not found (the device callback
+0x1800a8f60 not read for this). (2) Access' own documentation (Virus Control Tutorial, General Hints and Tips,
+"Pre-roll"; the Ableton Live and Cubase tutorials for bouncing) advises, in our words, two bars of silence before
+the first notes so they always play right, and a pre-roll of at least two bars when bouncing so everything can sync.
+So TI Revive's limit at Play (E572) is the original's too; a pre-roll is the documented answer, a clean start
+(silence instead of repeated frames, E572) would be better than the original.
+
+- **Date:** 2026-11-21
+- **Pointer:** Virus Control.dll 0x1800aa7c0, 0x180025910, 0x180025ae0, vtable 0x180158208; Access documentation (user's installer, local: work/mac/payload/.../Documentation)
+- **Method:** static analysis (REA), documentation search (pdftotext)
+- **Confidence:** MEDIUM (read path HIGH from the code; behaviour after the burst open)
+- **Hardware:** no
