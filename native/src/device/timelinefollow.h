@@ -18,7 +18,7 @@ public:
     static constexpr int64_t AT_ONCE = 4096; // ...at once beyond this: no jitter comes near (E337: 852), REAPER ahead does
     static constexpr int64_t STEP = 256; // drift: start stepping when the mean error is beyond this...
     static constexpr int64_t HOLD = 128; // ...and step until it is back inside this
-    static constexpr int64_t SETTLE = 2048; // after Play: ahead this long = REAPER's burst (7 x 256) is over, at the latest
+    static constexpr int64_t SETTLE = 2048; // after Play: ahead this long (and 16 blocks) = the burst is over, at the latest
     static constexpr int64_t CALM = 1024; // ...and only if err spread less than this before Play (REAPER ~480)
 
     struct Move {
@@ -51,13 +51,30 @@ public:
     // Play, only ahead, and only after a calm cadence: in a rough one (E337) the most-ahead error is jitter, and
     // jumping by it moved the band past AT_ONCE - back and forth (device, --rough + --transport). There everything
     // stays as without Play. No block since the anchor: the cadence is unknown, so not calm either
-    void play_started()
+    // Returns a shift for the timeline (<= 0, see below). `from_stop`: a real Play, not a loop restart or a jump while
+    // playing (those have no burst).
+    // #37 (E571-E573): the burst is at least the latency the plug-in reports (the host renders its delay compensation
+    // at once: REAPER ~1 x, Logic ~2 x) and the host stays that far ahead, so a jump after it made the burst's notes
+    // late by its size. A Play from a stop measures its burst (the most-ahead error over a second, without our own
+    // moves); the next one returns it as a shift back BEFORE the burst: its reads then hit frames that are there
+    // (the quiet before Play), nothing jumps afterwards, and only notes inside the burst play at once instead of on
+    // time. A burst larger or smaller than learned leaves the rest to the jumps below and is learned anew
+    int64_t play_started(bool from_stop = false)
     {
         const int64_t lo = cur_min_ < prev_min_ ? cur_min_ : prev_min_, hi = cur_max_ > prev_max_ ? cur_max_ : prev_max_;
         const bool calm = hi >= lo && hi - lo < CALM; // hi < lo: no err in either bucket
         play_left_ = calm || fresh_left_ > 0 ? 2 * window_ : 0;
         play_frames_ = 0, play_min_ = 0;
+        const bool learn = from_stop && play_left_ > 0;
+        shift_ = learn && learned_ > JUMP ? learned_ : 0;
+        learn_left_ = learn ? 2 * window_ : 0;
+        learn_sum_ = -shift_, learn_min_ = 0;
+        base_ = hi >= lo && lo < 0 ? lo : 0; // the error's normal low before Play: the cadence, not the burst
+        return -shift_;
     }
+
+    // process() re-anchors on abs(err) > 8192: while a pre-shift is being eaten by the burst, this err is expected
+    bool expects(int64_t err) const { return shift_ > 0 && err >= -JUMP && err <= shift_ + JUMP; }
 
     // a new anchor: the timeline starts afresh, and so does the error's range - it was measured against the old
     // timeline. An activation stays: REAPER's Play block can be an anchor block (E351)
@@ -65,6 +82,7 @@ public:
     {
         restart();
         last_err_ = 0;
+        learn_left_ = 0, shift_ = 0; // the learned burst stays: it belongs to the host, not to this timeline
         cur_frames_ = 0, cur_min_ = INT64_MAX, cur_max_ = INT64_MIN, prev_min_ = INT64_MAX, prev_max_ = INT64_MIN;
     }
 
@@ -77,10 +95,22 @@ public:
         last_err_ = err;
         if (fresh_left_ > 0)
             fresh_left_ -= frames;
-        if (marker && (err > AT_ONCE || err < -AT_ONCE)) { // REAPER processing ahead after Play (up to -8548): no waiting
-            restart();
-            return {err, true};
+        if (learn_left_ > 0) {
+            learn_left_ -= frames;
+            const int64_t raw = err + learn_sum_; // the error as if we had not moved since Play
+            learn_min_ = raw < learn_min_ ? raw : learn_min_;
+            if (learn_left_ <= 0) {
+                const int64_t burst = base_ - learn_min_;
+                learned_ = burst > JUMP ? (burst < 2 * window_ ? burst : 2 * window_) : 0;
+                const bool shifted = shift_ > 0;
+                shift_ = 0;
+                if (shifted && marker && err > JUMP) // the burst was smaller than the shift: forward by the rest now
+                    return jumped(err);
+            } else if (shift_ > 0 && err >= -JUMP)
+                return {0, false}; // pre-shifted: the burst eats the shift, no move meanwhile
         }
+        if (marker && (err > AT_ONCE || err < -AT_ONCE)) // REAPER processing ahead after Play (up to -8548): no waiting
+            return jumped(err);
         if (play_left_ > 0) {
             play_left_ -= frames;
             if (marker && err < -JUMP) {
@@ -88,10 +118,8 @@ public:
                 play_frames_ += frames;
                 // in the burst the ring does not move (microseconds per block): err falls by each whole block; the
                 // first block where it does not fall = the burst is over. SETTLE: in case it never seems to end
-                if ((play_frames_ > frames && err >= last) || play_frames_ >= SETTLE) {
-                    const int64_t d = play_min_;
-                    restart();
-                    return {d, true};
+                if ((play_frames_ > frames && err >= last) || play_frames_ >= settle(frames)) {
+                    return jumped(play_min_);
                 }
             } else
                 play_frames_ = 0, play_min_ = 0;
@@ -102,9 +130,7 @@ public:
                 far_side_ = side, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
             far_frames_ += frames, far_sum_ += err, far_n_++;
             if (far_frames_ >= window_) { // beyond JUMP on one side for half a second: a real offset
-                const int64_t d = far_sum_ / far_n_;
-                restart();
-                return {d, true};
+                return jumped(far_sum_ / far_n_);
             }
         } else
             far_side_ = 0, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
@@ -113,10 +139,8 @@ public:
         if (mean_frames_ >= 4 * window_) {
             const int64_t mean = mean_sum_ / mean_n_;
             mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0;
-            if (marker && (mean > JUMP || mean < -JUMP)) { // an offset hidden in a rough cadence
-                restart();
-                return {mean, true};
-            }
+            if (marker && (mean > JUMP || mean < -JUMP)) // an offset hidden in a rough cadence
+                return jumped(mean);
             owed_ = mean > STEP ? mean - HOLD : mean < -STEP ? mean + HOLD : 0;
         }
         if (owed_ != 0) {
@@ -128,6 +152,17 @@ public:
     }
 
 private:
+    // a burst that never seems to end jumps after this: SETTLE, but at least 16 blocks - at block 2048 SETTLE alone ended
+    // Logic's burst of ~6 blocks after the first one (E570, #37)
+    static int64_t settle(int64_t frames) { return SETTLE > 16 * frames ? SETTLE : 16 * frames; }
+
+    Move jumped(int64_t d)
+    {
+        restart();
+        learn_sum_ += d; // the burst is still measured from Play on
+        return {d, true};
+    }
+
     // after a jump: the windows start afresh and a Play's jump is used up; the error's range stays (each Play's own
     // jump is in it, E351)
     void restart()
@@ -154,6 +189,9 @@ private:
     int64_t play_left_ = 0, play_frames_ = 0, play_min_ = 0;
     int64_t fresh_left_ = 0;
     int64_t last_err_ = 0; // the previous block's err
+    int64_t learned_ = 0;  // the last Play's burst (frames), at most a second
+    int64_t shift_ = 0;    // the pre-shift of this Play while its burst eats it
+    int64_t learn_left_ = 0, learn_sum_ = 0, learn_min_ = 0, base_ = 0;
     int64_t cur_frames_ = 0, cur_min_ = INT64_MAX, cur_max_ = INT64_MIN, prev_min_ = INT64_MAX, prev_max_ = INT64_MIN;
 };
 

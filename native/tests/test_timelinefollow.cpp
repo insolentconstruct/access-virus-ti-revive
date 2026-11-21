@@ -39,12 +39,13 @@ struct Result {
     int jumps = 0, steps = 0;
     std::vector<int64_t> jump_at, jump_by;
     std::vector<int64_t> t, err;
+    std::vector<int64_t> shift_at, shift_by; // pre-shifts at Play (from a stop, a burst learned before)
 };
 
 // `plays`: host times of Play starts; as in process(), the block that sees Play tells the follower after its update.
 // `activated`: each Play comes right after setActive(1) (REAPER), seen by process() before the Play block's update
 Result run(const std::vector<int64_t> &calls, const Ring &ring, bool marker = true,
-           const std::vector<int64_t> &plays = {}, bool activated = false)
+           const std::vector<int64_t> &plays = {}, bool activated = false, bool from_stop = false)
 {
     TimelineFollow f;
     f.set_window(RATE / 2);
@@ -61,8 +62,13 @@ Result run(const std::vector<int64_t> &calls, const Ring &ring, bool marker = tr
             r.jumps++, r.jump_at.push_back(c), r.jump_by.push_back(m.delta);
         else if (m.delta != 0)
             r.steps++;
-        if (next_play < plays.size() && c >= plays[next_play])
-            f.play_started(), next_play++;
+        if (next_play < plays.size() && c >= plays[next_play]) {
+            const int64_t s = f.play_started(from_stop);
+            if (s != 0)
+                r.shift_at.push_back(c), r.shift_by.push_back(s);
+            tl += s;
+            next_play++;
+        }
         tl += m.delta + BLOCK;
     }
     return r;
@@ -70,7 +76,8 @@ Result run(const std::vector<int64_t> &calls, const Ring &ring, bool marker = tr
 
 // steady, and at each Play REAPER's burst (diag.log 2026-10-24 21:08-21:18: 1792 host frames more than the Virus made
 // in the 10 s with each Play, block 256): `extra` blocks at once, after which the host stays that far ahead
-std::vector<int64_t> steady_with_plays(int seconds, const std::vector<int64_t> &plays, int extra = 7)
+std::vector<int64_t> steady_with_plays(int seconds, const std::vector<int64_t> &plays, int extra = 7,
+                                       const std::vector<int> &extras = {})
 {
     std::vector<int64_t> c;
     size_t p = 0;
@@ -78,7 +85,7 @@ std::vector<int64_t> steady_with_plays(int seconds, const std::vector<int64_t> &
         const int64_t t = i * BLOCK + 50;
         c.push_back(t);
         if (p < plays.size() && t >= plays[p]) {
-            for (int k = 0; k < extra; k++)
+            for (int k = 0; k < (p < extras.size() ? extras[p] : extra); k++)
                 c.push_back(t);
             p++;
         }
@@ -484,7 +491,8 @@ TEST(timeline_play_burst_without_marker_waits_for_it)
 
 TEST(timeline_play_burst_that_never_ends_jumps_after_settle)
 {
-    // err falls a little every block, never stops: SETTLE frames ahead at the latest, by the most-ahead error
+    // err falls a little every block, never stops: SETTLE frames (and 16 blocks) ahead at the latest, by the most-ahead
+    // error
     TimelineFollow f;
     f.set_window(RATE / 2);
     feed(f, 0, RATE / BLOCK);
@@ -493,6 +501,133 @@ TEST(timeline_play_burst_that_never_ends_jumps_after_settle)
     for (int i = 0; i < 20 && r.at < 0; i++)
         if (const TimelineFollow::Move m = f.update(-600 - i * 50, BLOCK, true); m.jump)
             r.by = m.delta, r.at = i;
-    CHECK(r.at == TimelineFollow::SETTLE / BLOCK - 1);
+    CHECK(r.at == 16 - 1); // 16 blocks of 256 > SETTLE (2048)
     CHECK(r.by == -600 - r.at * 50);
+}
+
+// #37 (E571-E573): the burst at Play is at least the latency the plug-in reports (delay compensation rendered at once:
+// REAPER ~1 x, Logic ~2 x), so after it the host stays that far ahead and a jump back made the burst's notes late
+// (user, REAPER; rc2). A Play from a stop learns the burst; the next one moves the timeline back by it before the
+// burst, so the burst's reads hit frames that are there and nothing jumps afterwards
+
+namespace {
+// the error from the Play's first second on, for 5 s (before the next Play): in sync (no read ahead, not behind)
+bool in_sync_after(const Result &r, int64_t play)
+{
+    for (size_t i = 0; i < r.t.size(); i++)
+        if (r.t[i] > play + RATE + 4 * BLOCK && r.t[i] < play + 6 * RATE && (r.err[i] < -400 || r.err[i] > TimelineFollow::JUMP))
+            return false;
+    return true;
+}
+int jumps_between(const Result &r, int64_t a, int64_t b)
+{
+    int n = 0;
+    for (int64_t t : r.jump_at)
+        n += t >= a && t < b;
+    return n;
+}
+} // namespace
+
+TEST(timeline_learned_burst_preshifts_the_next_play)
+{
+    const std::vector<int64_t> plays = {5 * RATE, 12 * RATE};
+    const Result r = run(steady_with_plays(18, plays, 22), Ring{}, true, plays, false, true); // 22 x 256 = 5632
+    CHECK(jumps_between(r, plays[0], plays[0] + RATE) >= 1); // the first Play: nothing learned yet, it jumps
+    CHECK(r.shift_at.size() == 1);
+    if (r.shift_at.size() == 1) {
+        CHECK(r.shift_at[0] >= plays[1] && r.shift_at[0] < plays[1] + BLOCK);
+        CHECK(r.shift_by[0] <= -22 * BLOCK + 441 && r.shift_by[0] >= -22 * BLOCK - 441);
+    }
+    CHECK(jumps_between(r, plays[1], plays[1] + 3 * RATE) == 0); // nothing jumps after the burst
+    for (size_t i = 0; i < r.t.size(); i++)
+        if (r.t[i] >= plays[1] && r.t[i] < plays[1] + RATE)
+            CHECK(r.err[i] > -400); // no read past the newest frame in the burst
+    CHECK(in_sync_after(r, plays[1]));
+}
+
+TEST(timeline_learned_burst_too_large_jumps_forward_and_learns_less)
+{
+    // the next burst is smaller (12 blocks instead of 22): the timeline is behind by the rest, a jump forward fixes
+    // it, and the third Play shifts by the new size
+    const std::vector<int64_t> plays = {5 * RATE, 12 * RATE, 19 * RATE};
+    const Result r = run(steady_with_plays(25, plays, 0, {22, 12, 12}), Ring{}, true, plays, false, true);
+    CHECK(r.shift_by.size() == 2);
+    if (r.shift_by.size() == 2)
+        CHECK(r.shift_by[1] <= -12 * BLOCK + 441 && r.shift_by[1] >= -12 * BLOCK - 441);
+    CHECK(in_sync_after(r, plays[1]));
+    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE) == 0);
+}
+
+TEST(timeline_learned_burst_too_small_jumps_the_rest_and_learns_more)
+{
+    const std::vector<int64_t> plays = {5 * RATE, 12 * RATE, 19 * RATE};
+    const Result r = run(steady_with_plays(25, plays, 0, {10, 22, 22}), Ring{}, true, plays, false, true);
+    CHECK(r.shift_by.size() == 2);
+    if (r.shift_by.size() == 2)
+        CHECK(r.shift_by[1] <= -22 * BLOCK + 441 && r.shift_by[1] >= -22 * BLOCK - 441);
+    CHECK(in_sync_after(r, plays[1]));
+    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE) == 0);
+}
+
+TEST(timeline_loop_restart_never_preshifts)
+{
+    // a loop restart or a jump while playing has no burst (the host keeps processing): no pre-shift
+    const std::vector<int64_t> plays = {5 * RATE, 12 * RATE};
+    const Result r = run(steady_with_plays(18, plays, 22), Ring{}, true, plays, false, false);
+    CHECK(r.shift_at.empty());
+}
+
+namespace {
+// the follower with its moves applied: the host `ahead` frames past real time, err = -ahead - what the timeline moved
+struct Model {
+    TimelineFollow f;
+    int64_t ahead = 0, moved = 0;
+    Model() { f.set_window(RATE / 2); }
+    void blocks(int n, int64_t grow = 0) // n calls; in a burst the ring stands still, so each call is `grow` ahead
+    {
+        for (int i = 0; i < n; i++) {
+            ahead += grow;
+            moved += f.update(err(), BLOCK, true).delta;
+        }
+    }
+    int64_t play()
+    {
+        const int64_t s = f.play_started(true);
+        moved += s;
+        return s;
+    }
+    int64_t err() const { return -ahead - moved; }
+};
+} // namespace
+
+TEST(timeline_preshift_window_expects_the_offset)
+{
+    // process() re-anchors when abs(err) > 8192; while the burst eats a pre-shift (Logic: 11608) that offset is expected
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(46, BLOCK); // 46 x 256 = 11776: the burst
+    m.blocks(2 * RATE / BLOCK);
+    CHECK(!m.f.expects(12000));
+    CHECK(m.play() <= -11776 + 441);
+    CHECK(m.f.expects(m.err()));
+    CHECK(m.f.expects(-300));
+    CHECK(!m.f.expects(11776 + 2 * TimelineFollow::JUMP));
+    m.blocks(46, BLOCK);
+    CHECK(m.err() > -400 && m.err() < TimelineFollow::JUMP); // the burst ate the shift
+    TimelineFollow g;
+    g.set_window(RATE / 2);
+    CHECK(!g.expects(9000)); // nothing pre-shifted
+}
+
+TEST(timeline_anchor_keeps_the_learned_burst)
+{
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(22, BLOCK);
+    m.blocks(2 * RATE / BLOCK);
+    m.f.anchor(); // a re-anchor (resync ping) between two Plays
+    m.blocks(RATE / BLOCK);
+    CHECK(m.play() < -20 * BLOCK);
 }

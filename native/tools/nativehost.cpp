@@ -250,7 +250,7 @@ int main(int argc, char **argv)
     double transport_at = -1, loop_bars = 0; // --transport / --loop: a playing DAW transport for process()
     double count_in_bars = 0; // --count-in: with --transport, play from -4 x N quarters through 0 (Logic, #30)
     bool list_params = false;
-    double stop_at = 1e9;
+    double stop_at = 1e9, play_again = -1;
     double duplicate = 0; // --duplicate T: remove the first of two instances after T s
     double sc_sine = 0; // --sidechain-sine HZ: a sine (-6 dBFS) on the Sidechain bus (input bus 1)
     std::vector<std::pair<double, double>> aheads; // (at s, ms)
@@ -302,6 +302,8 @@ int main(int argc, char **argv)
             count_in_bars = atof(argv[++i]);
         else if (!strcmp(argv[i], "--stop-at") && i + 1 < argc) // with --transport: stop playing at T s (FC, E505)
             stop_at = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--play-again") && i + 1 < argc) // with --stop-at: Play again from bar 1 at T s (#37)
+            play_again = atof(argv[++i]);
         else if (!strcmp(argv[i], "--list-params")) // id, title and part of every parameter, then exit (no activation)
             list_params = true;
         else if (!strcmp(argv[i], "--notes"))
@@ -669,13 +671,14 @@ int main(int argc, char **argv)
             pctx.sampleRate = clk.rate;
             pctx.tempo = 120.0;
             pctx.state = ProcessContext::kTempoValid | ProcessContext::kProjectTimeMusicValid;
-            double qn = t >= transport_at ? (t - transport_at) * 2.0 : 0.0;
+            const double from = play_again >= 0 && t >= play_again ? play_again : transport_at;
+            double qn = t >= from ? (t - from) * 2.0 : 0.0;
             if (loop_bars > 0)
                 qn = std::fmod(qn, loop_bars * 4.0);
             qn -= 4.0 * count_in_bars; // a count-in runs on through 0, as a DAW's playing pre-roll
             pctx.projectTimeMusic = qn;
             pctx.projectTimeSamples = (TSamples)std::llround(qn / 2.0 * clk.rate); // 120 BPM: 2 quarters a second
-            if (t >= transport_at && t < stop_at)
+            if ((t >= transport_at && t < stop_at) || (play_again >= 0 && t >= play_again))
                 pctx.state |= ProcessContext::kPlaying;
             data.processContext = &pctx;
         }

@@ -34,10 +34,16 @@ public:
             const double dq = ppq - next_;
             const int64_t ds = samples - next_samples_;
             const bool jump = std::fabs(dq) > 0.05 || ((ds > 128 || ds < -128) && std::fabs(dq) * 24.0 >= 1.0);
-            if (!was_ || jump || ppq < last_)
+            if (!was_ || jump || ppq < last_) {
                 e = Start;
-        } else if (was_)
-            e = Stop;
+                from_stop_ = stopped_;
+                stopped_ = false;
+            }
+        } else {
+            if (was_)
+                e = Stop;
+            stopped_ = true;
+        }
         was_ = playing;
         last_ = ppq;
         next_ = ppq + len_qn;
@@ -46,9 +52,11 @@ public:
     }
     // a new timeline (re-anchor): the F8 grid lost the beat, so the next playing block restarts; no Stop for it
     void reset() { was_ = false; }
+    // the last Start came from a stop (a real Play: the DAW's burst follows, #37), not from a loop, jump or reset
+    bool from_stop() const { return from_stop_; }
 
 private:
-    bool was_ = false;
+    bool was_ = false, stopped_ = true, from_stop_ = false;
     double last_ = 0, next_ = 0;
     int64_t next_samples_ = 0;
 };

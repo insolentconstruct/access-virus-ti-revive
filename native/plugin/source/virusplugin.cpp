@@ -1006,6 +1006,9 @@ void DeviceOut::run()
             const TimelineNote &n = tl_notes_[r % TL_NOTES];
             if (n.what[0] == 'j')
                 log("timeline jump: err %lld by %lld block %d\n", (long long)n.err, (long long)n.value, n.block);
+            else if (n.what[0] == 'p')
+                log("Virus TI native: Play: timeline back by %lld frames for the DAW's burst (#37), err %lld block %d\n",
+                    (long long)-n.value, (long long)n.err, n.block);
             else
                 log("timeline %s: err %lld newest %lld block %d\n", n.what, (long long)n.err, (long long)n.value, n.block);
             tl_r_.store(r + 1, std::memory_order_release);
@@ -1981,7 +1984,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         // found (at most 6 s later; without a marker the stamps stay relative to the ring)
         bool quiet = out_->last_sound.load() < newest - vrate;
         bool anchor_now = !tl_valid_ ? newest - stream_start_ > vrate / 2 && (quiet || newest - stream_start_ > 6 * vrate)
-                                     : std::llabs(err) > 8192;
+                                     : std::llabs(err) > 8192 && !tl_follow_.expects(err); // not a pre-shift (#37)
         // no marker (the Virus was not silent): ping again once it is quiet and the host is not playing (3 tries)
         if (tl_valid_ && !anchor_now && out_->marker.load() == -2 && !out_->calibrating() && marker_retries_ < 3 && quiet &&
             now_ms() - last_play_ms_.load(std::memory_order_relaxed) > 2000 && !env_no_ping()) {
@@ -2082,11 +2085,18 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         const auto ev = transport_.update(playing, ppq, (double)block_frames / vrate * tempo / 60.0,
                                           (int64_t)data.processContext->projectTimeSamples, data.numSamples);
         if (ev == TransportWatch::Start) {
+            // a Play from a stop: back by the last Play's burst before this one comes, so its reads hit frames that
+            // are there and nothing jumps after it (#37, E573; TimelineFollow::play_started)
+            if (const int64_t pre = tl_follow_.play_started(transport_.from_stop()); pre != 0) {
+                tl_ += pre;
+                restart_.shift(pre);
+                rs_valid_ = false;
+                out_->note_timeline({"preshift", tl_valid_ ? ring_newest() - S - tl_ : 0, pre, data.numSamples});
+            }
             const TransportStart st = transport_start(ppq, per_tick);
             const int64_t at_tick = tl_ + (int64_t)std::lround(st.offset);
             restart_.arm(st, at_tick); // goes out with the block that holds its tick (PendingRestart)
             next_tick_ = (double)at_tick;
-            tl_follow_.play_started(); // a DAW's burst ahead after Play: jump back at once, not after 0.5 s (E351)
         } else if (ev == TransportWatch::Stop) {
             restart_.clear();
             add(tl_, &TRANSPORT_STOP, 1);
