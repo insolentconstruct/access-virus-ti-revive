@@ -5454,3 +5454,27 @@ shown.
 - **Method:** user log + code reading, unit test, hardware A/B (nativehost)
 - **Confidence:** MED (cause from the log + code) / HIGH (marker found while USB 1 plays, TI2 A/B)
 - **Hardware:** yes (user's TI, Catalina: the bug; our TI2 Desktop, Linux: the A/B)
+
+### E569
+
+rc1 in the field (v0.8.44-rc1, 99345e2e). Issue #37 (user, Catalina, Logic Pro, libusb package, TI with OS 5.0.8,
+44.1 kHz block 2048; log TI-Revive-logs-2026-11-21-1930.txt, 5 rc1 sessions 1795276412-1795276842): "slightly
+better", still out of sync and a little crackle at the first Play after loading or reopening, back to normal after
+a few seconds; waiting 5-10 s before Play changes little. The marker fix of E568 works: every session finds the sync
+marker 1-6 s after "Virus ready" (ping to marker 753-5846 frames), against 50-70 s or none before. What is left: the
+first 10 s window after the marker has err down to -1048..-1901 frames (the timeline up to ~43 ms off), the next
+windows -177..-252 to +260; windows where Logic processes ahead of the Virus (host frames 452608-464896 / virus
+441000) have 3-5 anchors, err to -6000 and "pulled back 13-17 blocks, largest 3143-3584 frames". Reading (LOW, not
+reproduced, code not checked): the start-of-Play burst of E341 (REAPER, timeline ahead of the ring; its fix was
+reverted in 0.8.34), now in Logic. Asked whether a start a bar or two before the notes (count-in) avoids it
+(issuecomment-7066234256).
+Issue #50 (user, macOS, two TI2 Desktops, rc1; log TI-Revive-logs-2026-11-21-1555.txt): the first rc1 open read
+Virus 2's banks into its own folder ("RAM cache: Virus 2's own folder", 4 x 128 fetched, bank sync 515.5 s); every
+reopen after that loads both folders (4 of 4 banks each, 0 fetched, ~3.4 s) - the per-Virus cache works for the
+reporter. The instances take the Virus by USB order ("no serial match"); no errors, no drops.
+
+- **Date:** 2026-11-21
+- **Pointer:** issues #37 and #50 (logs above); native/src/device/markerscan.h, native/plugin/source/virusplugin.cpp process() / TimelineFollow
+- **Method:** user logs
+- **Confidence:** HIGH (#37 marker found, #50 cache) / LOW (#37 remaining error = the Play burst)
+- **Hardware:** yes (users' TI on Catalina and two TI2 Desktops on macOS)
