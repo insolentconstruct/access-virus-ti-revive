@@ -776,3 +776,140 @@ TEST(timeline_late_anchor_block_leaves_room_below)
     CHECK_EQ(w.pulls, 0);
     CHECK_EQ(w.steps, 0);
 }
+
+namespace {
+
+// REAPER on PipeWire at 48 kHz (user diag.log 2026-11-22; our TI2 under nativehost the same): the ring seen in 512-frame
+// steps, so err cycles -96..352 at blocks of 64 and 128 (mean 128 = HOLD) and nothing moves
+struct Hiccup {
+    int block = 64;
+    int64_t dip = 0, dip_blocks = 0; // at 10 s the ring is seen `dip` frames late for N blocks (a late USB delivery)
+    int64_t xrun = 0;                // at 10 s the host drops this many blocks (REAPER xrun): the ring runs on, we do not
+    int64_t at_ms = 10000;           // when the dip or the xrun comes (10 s: where a 2 s mean window starts)
+    int64_t lost = 0;                // an xrun of any size: from then on the ring is this many frames further
+};
+
+struct Moves {
+    int jumps = 0, fwd = 0, back = 0, fades = 0; // jumps: hard ones only
+    int64_t faded = 0;                           // the crossfaded catch-ups' frames
+};
+
+Moves pipewire(const Hiccup &c, int seconds = 60)
+{
+    constexpr int64_t rate = 48000, chunk = 512;
+    const int64_t at = c.at_ms * rate / 1000;
+    TimelineFollow f;
+    f.set_window(rate / 2);
+    f.set_margin(MARGIN);
+    Moves r;
+    int64_t tl = 96 - chunk + c.block; // err = newest - tl: -96..352
+    for (int64_t t = 0; t < seconds * rate; t += c.block) {
+        if (t >= at && t < at + c.xrun * c.block)
+            continue; // a dropped host cycle: process() is not called
+        const int64_t newest = t / chunk * chunk - (t >= at && t < at + c.dip_blocks * c.block ? c.dip : 0) +
+                               (t >= at ? c.lost : 0);
+        const TimelineFollow::Move m = f.update(newest - tl, c.block, true);
+        if (m.fade)
+            r.fades++, r.faded += m.delta;
+        else if (m.jump)
+            r.jumps++;
+        else if (m.delta > 0)
+            r.fwd++;
+        else if (m.delta < 0)
+            r.back++;
+        tl += m.delta + c.block;
+    }
+    return r;
+}
+
+} // namespace
+
+TEST(timeline_one_late_delivery_does_not_lift_and_step_back)
+{
+    // one late USB delivery under a steady cadence: the window's low end passed 3/4 of the margin, the #51 guard lifted
+    // the band (one-frame steps back) - so far that the lifted mean was past STEP, and the next window stepped it
+    // down again: out and back, 280-384 one-frame skips for one hiccup that needed nothing
+    for (const Hiccup &c : {Hiccup{64, 300, 20}, Hiccup{256, 400, 4}, Hiccup{256, 300, 1}}) {
+        const Moves m = pipewire(c);
+        CHECK_EQ(m.jumps, 0);
+        CHECK_EQ(m.fwd + m.back, 0);
+    }
+}
+
+TEST(timeline_skewed_cadence_does_not_hunt)
+{
+    // err mostly at +200 and every 10th block at -400 (a periodic late delivery): the low end is real (10 % of the
+    // blocks) but no position fits both it and the band - lifted to -256 the mean was 284, past STEP, so each window
+    // lifted it and the next stepped it down: ~4500 one-frame skips a minute (fd33fc4). The low end needs nothing: -400
+    // is inside the margin
+    TimelineFollow f;
+    f.set_window(48000 / 2);
+    f.set_margin(MARGIN);
+    int steps = 0, jumps = 0;
+    int64_t off = 0;
+    for (int64_t k = 0; k < 60LL * 48000 / 128; k++) {
+        const TimelineFollow::Move m = f.update((k % 10 ? 200 : -400) + off, 128, true);
+        jumps += m.jump, steps += !m.jump && m.delta != 0;
+        off -= m.delta;
+    }
+    CHECK_EQ(jumps, 0);
+    CHECK_EQ(steps, 0);
+}
+
+TEST(timeline_xrun_catches_up_in_one_crossfade)
+{
+    // REAPER on Linux drops host cycles (an xrun): the ring runs on, the timeline does not - 256-384 frames behind for
+    // good. Paid back in one-frame steps that was one skip per block for a second (~375 a second at block 128: a short
+    // metallic sound); now one crossfaded jump by the offset, no steps
+    // anywhere in the 2 s mean window: the catch-up is the offset of the window's last half second, not its diluted
+    // mean (on the TI2 a fade of 380 for a 513-frame xrun left 173 one-frame steps for the next window)
+    for (int64_t xrun : {2, 3})
+        for (int block : {64, 128})
+            for (int64_t at_ms : {10000, 10600, 11000, 11400}) {
+                Hiccup c;
+                c.block = block, c.xrun = xrun * 128 / block, c.at_ms = at_ms;
+                const Moves m = pipewire(c);
+                CHECK_EQ(m.jumps, 0);
+                CHECK_EQ(m.fades, 1);
+                CHECK(m.faded >= xrun * 128 - 64 && m.faded <= xrun * 128 + 64);
+                CHECK_EQ(m.fwd + m.back, 0);
+            }
+}
+
+TEST(timeline_large_xrun_catches_up_in_one_crossfade)
+{
+    // the user's case is a loss of 4 blocks of 128 = 512 frames: on the TI2 one of 513 passed JUMP and took the hard
+    // jump of a lasting offset (a click). Those offset jumps (half a second beyond JUMP, the 2 s mean beyond it) are
+    // crossfaded too; the read path falls back to the hard jump only where the old frames are not in the ring
+    for (int64_t lost : {512, 513, 700, 1024, 2048})
+        for (int64_t at_ms : {10000, 10600, 11000, 11400}) {
+            Hiccup c;
+            c.block = 128, c.lost = lost, c.at_ms = at_ms;
+            const Moves m = pipewire(c);
+            CHECK_EQ(m.jumps, 0);
+            CHECK_EQ(m.fades, 1);
+            CHECK(m.faded >= lost - 64 && m.faded <= lost + 192);
+            CHECK_EQ(m.fwd + m.back, 0);
+        }
+}
+
+TEST(timeline_drift_never_crossfades)
+{
+    // clock drift up to 500 ppm passes STEP by at most ~48 frames a 2 s window: its owed amount stays below the fade
+    // threshold, so it keeps its sparse one-frame steps
+    for (double ppm : {-500.0, -200.0, 200.0, 500.0}) {
+        Clocks c;
+        c.ppm = ppm, c.jitter = 0;
+        TimelineFollow f;
+        f.set_window(c.rate / 2);
+        int64_t tl = 0;
+        int fades = 0;
+        for (int64_t k = 0; k < 120LL * c.rate / c.block; k++) {
+            const int64_t t = k * c.block, newest = (int64_t)((double)t * (1.0 + ppm * 1e-6)) / 48 * 48;
+            const TimelineFollow::Move m = f.update(newest - tl, c.block, true);
+            fades += m.fade;
+            tl += m.delta + c.block;
+        }
+        CHECK_EQ(fades, 0);
+    }
+}

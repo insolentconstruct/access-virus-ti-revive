@@ -360,7 +360,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--stress-params")) // only the automation of --stress
             stress = true, stress_notes = false;
         else if (!strcmp(argv[i], "--ahead") && i + 1 < argc) { // --ahead MS@T: from T s on process MS ms ahead of
-            // real time in a burst, like REAPER's anticipative FX processing after a playback start
+            // real time in a burst, like REAPER's anticipative FX processing after a playback start; MS < 0: that much
+            // behind for good, like a host xrun (cycles lost, the plug-in's timeline behind the ring, E579)
             double ms = 0, t = 0;
             sscanf(argv[++i], "%lf@%lf", &ms, &t);
             aheads.push_back({t, ms});
@@ -898,7 +899,7 @@ int main(int argc, char **argv)
         // frames / 48 kHz (666 instead of 666.667 us), which the plug-in then steered out in lumps (simulator S082)
         t_next += std::chrono::nanoseconds(std::llround(block * 1e9 / clk.rate / (1 + ppm * 1e-6)));
         for (auto &ah : aheads)
-            if (ah.second > 0 && clk.seconds(b) >= ah.first) {
+            if (ah.second != 0 && clk.seconds(b) >= ah.first) {
                 t_next -= std::chrono::microseconds((long long)(ah.second * 1000));
                 printf("ahead %.0f ms at %.1f s\n", ah.second, ah.first);
                 ah.second = 0;

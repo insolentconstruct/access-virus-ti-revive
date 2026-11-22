@@ -39,6 +39,7 @@
 #include "device/heldnotes.h"
 #include "device/outputdelay.h"
 #include "device/timelinefollow.h"
+#include "device/crossfade.h"
 #include "device/presencewatch.h"
 #include "device/stallwatch.h"
 #include "model/bankdrop.h"
@@ -203,15 +204,15 @@ public:
     // the newest ring frame that had sound on USB 1 / USB 2 (the ping waits for 1 s of silence, like the original)
     std::atomic<int64_t> last_sound{-1};
     // R5 diagnostics (VTI_NATIVE_STATS, every 10 s): stamp-aligned reads, their smallest distance to the newest frame,
-    // timeline drift steps
-    std::atomic<int64_t> aligned_blocks{0}, read_margin_min{INT64_MAX}, tl_steps{0};
+    // timeline drift steps, crossfaded catch-ups (after a host xrun, E579) and those cut to a hard jump (old audio gone)
+    std::atomic<int64_t> aligned_blocks{0}, read_margin_min{INT64_MAX}, tl_steps{0}, tl_fades{0}, tl_fades_cut{0};
     PullStats pulls; // reads pulled back because the host ran ahead of the Virus' audio (E490), per stats window
     // process() calls/samples and timeline events (anticipative hosts call in bursts ahead of real time)
     std::atomic<int64_t> host_frames{0}, anchors{0}, err_min{INT64_MAX}, err_max{INT64_MIN};
     // the timeline's anchors and jumps for the VTI_NATIVE_STATS log: process() notes them, the worker prints them (no
     // stdio on the audio thread). `value`: the newest ring frame (anchor) or the jump
     struct TimelineNote {
-        const char *what; // "anchor", "re-anchor" or "jump" (string literals)
+        const char *what; // "anchor", "re-anchor", "jump", "fade" or "preshift" (string literals)
         int64_t err, value;
         int block;
     };
@@ -860,6 +861,8 @@ private:
     double stat_acc_ = 0; // the same for the host-frames statistic
     int64_t stream_start_ = -1;
     TimelineFollow tl_follow_; // after the anchor: jumps and drift steps from the error over time, not per block (E337)
+    vti::Crossfade xfade_;     // a fade move of tl_follow_ (host xrun, E579): the reads fade from the old position
+    float xfade_buf_[6][vti::Crossfade::LEN]; // the old position's frames during it (all six output channels)
     std::atomic<bool> reactivated_{false}; // setActive(1) -> the next process(): a Play then is a fresh start (E351)
     // offline render (export, freeze): each block waits for the Virus' audio; the worker logs mode changes and timeouts
     OfflinePacer pacer_;

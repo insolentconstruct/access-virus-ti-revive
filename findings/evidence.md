@@ -5655,3 +5655,33 @@ shows no regression but does not prove the fix. Not tested with a second interfa
 - **Method:** model unit tests, TI2 nativehost runs, hil.sh ALL PASS (work/hil/20261122-140302)
 - **Confidence:** MED (mechanism HIGH from E564; fix shown in the model only)
 - **Hardware:** yes (TI2 no-regression runs only; the two-clock case not on hardware)
+
+### E579
+
+Short metallic sound after REAPER xruns (Linux, pw-jack 48 kHz, block 128, user diag.log 2026-11-22): the 10 s windows
+with hundreds of timeline steps have 3746 of 3750 process calls, i.e. the host dropped cycles (4 blocks = 512 frames).
+The ring runs on, the stamp-aligned timeline does not: it is 256-512 frames behind for good, and TimelineFollow paid
+that back with one 1-frame skip per block (owed = mean - HOLD up to ~384: ~375 skips a second for ~1 s, the pitch
++0.8 % and a skip every 2.7 ms = the sound). Separate, open: one 6022 us process() of ours at block 64 during the RAM
+bank sync in the same log (a cause of xruns of its own). Two bugs of the #51 guard (E578) were fixed on the way: one late
+USB delivery lowered a window's low end and the guard lifted the band (now only when more than 1/16 of the blocks
+passed 3/4 of the margin), and a lift past STEP was stepped back down by the next window, out and back, 280-384
+skips per hiccup and ~4500 a minute on a skewed cadence in the model (now only if the lifted mean stays inside STEP). Fix: a catch-up
+is one crossfaded jump (Move::fade): at a window end where the step rule owes something and the last half second's mean
+(the 2 s mean is diluted by an xrun inside the window) owes more than FADE = 192 frames (drift up to 500 ppm owes at
+most ~176), and the two lasting-offset jumps outside Play (half a second beyond JUMP, the 2 s mean beyond JUMP) are
+crossfaded too; Play burst, pre-shift, AT_ONCE, anchor and slip stay hard. The read path (direct and resampled, all
+output channels) reads the first 128 frames once more at the old position and fades raised-cosine from it to the new
+one (crossfade.h, no allocation); where the old frames are not in the ring (past the newest, or older than
+VTI_AUDIO_RING - 1024) it jumps hard, counted as "cut". TI2 with nativehost --ahead -MS@T (dropped cycles), block 128,
+48 kHz, 4 Plays + --reactivate, 180 s each: fade from the full 2 s mean: fades 223/380/222/209 frames, then 130-173
+one-frame steps in the next window (period track of the WAV: bursts of ~0.3 s at +0.8 % pitch); with the tail mean:
+3 fades (351/224/255), 0 steps after the anchor, one hard jump by 608 for a 513-frame loss; with the offset jumps faded
+(xruns of 512 and 1024 frames): 5 fades (253/1123/352/1118/352), 0 cut, 0 hard jumps, 0 steps, no burst in the WAV. 96 kHz
+host (resampled path), block 256, 60 s: 1 fade, 0 steps (WAV not checked: the period track does not work there).
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (FADE, tail_sum_, faded(), the #51 guard), native/src/device/crossfade.h, virusplugin.cpp process() and read_resampled (xfade_, "timeline caught up by N frames (crossfaded)", stats "fades N (M cut)"); native/tests/test_timelinefollow.cpp (xrun, large xrun, drift, one late delivery, skewed cadence), native/tests/test_crossfade.cpp; nativehost --ahead -MS@T
+- **Method:** user diag.log, unit tests failing before / passing after, TI2 nativehost runs with WAV period tracking, hil.sh
+- **Confidence:** HIGH (cause from the log and reproduced on the TI2; the fix on the TI2), not yet heard by the user in REAPER
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in REAPER)

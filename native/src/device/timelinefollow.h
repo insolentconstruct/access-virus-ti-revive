@@ -20,10 +20,14 @@ public:
     static constexpr int64_t HOLD = 128; // ...and step until it is back inside this
     static constexpr int64_t SETTLE = AT_ONCE; // after Play: ahead this long (and 16 blocks) = the burst is over, at the latest
     static constexpr int64_t CALM = 1024; // ...and only if err spread less than this before Play (REAPER ~480)
+    // a catch-up beyond this at a window end: one crossfaded jump, not a one-frame step per block. Drift up to 500 ppm
+    // passes STEP by at most ~48 frames a 2 s window (owed <= STEP - HOLD + 48 = 176); a host xrun leaves 256+ (E579)
+    static constexpr int64_t FADE = 192;
 
     struct Move {
         int64_t delta; // added to the timeline: 0, +-1 (a drift step) or the jump
         bool jump;
+        bool fade = false; // a jump the read path crossfades (crossfade.h): the catch-up after a host xrun
     };
 
     // `frames`: the Virus frames of half a second (the jump window; the mean window is four of them). A new rate starts
@@ -133,25 +137,40 @@ public:
             if (side != far_side_)
                 far_side_ = side, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
             far_frames_ += frames, far_sum_ += err, far_n_++;
-            if (far_frames_ >= window_) { // beyond JUMP on one side for half a second: a real offset
-                return jumped(far_sum_ / far_n_);
-            }
+            if (far_frames_ >= window_) // beyond JUMP on one side for half a second: a real offset (an xrun of
+                return faded(far_sum_ / far_n_); // 512+ frames too, E579: crossfaded)
         } else
             far_side_ = 0, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
 
         const int64_t paid = err - owed_; // err once the owed steps are paid: a window during a payback must not count it twice
         mean_frames_ += frames, mean_sum_ += paid, mean_n_++;
         mean_lo_ = paid < mean_lo_ ? paid : mean_lo_, mean_hi_ = paid > mean_hi_ ? paid : mean_hi_;
+        mean_low_n_ += paid < -3 * margin_ / 4;
+        if (mean_frames_ > 3 * window_) // the window's last half second: where the error is now, for a catch-up
+            tail_sum_ += paid, tail_n_++;
         if (mean_frames_ >= 4 * window_) {
             const int64_t mean = mean_sum_ / mean_n_, lo = mean_lo_, hi = mean_hi_;
-            mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN;
-            if (marker && (mean > JUMP || mean < -JUMP)) // an offset hidden in a rough cadence
-                return jumped(mean);
+            const bool low = mean_low_n_ * 16 > mean_n_; // the band's low end, not one late delivery
+            const int64_t tail = tail_n_ > 0 ? tail_sum_ / tail_n_ : mean;
+            tail_sum_ = 0, tail_n_ = 0;
+            mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN, mean_low_n_ = 0;
+            if (marker && (mean > JUMP || mean < -JUMP)) // an offset hidden in a rough cadence (or an xrun, E579)
+                return faded(mean);
             owed_ = mean > STEP ? mean - HOLD : mean < -STEP ? mean + HOLD : 0;
+            // a host xrun (REAPER on Linux drops cycles): the ring ran on, the timeline did not. One frame per block
+            // was ~375 skips a second for a second at block 128, a short metallic sound (E579): one crossfade instead,
+            // by the last half second's offset (an xrun inside the window dilutes its mean: the rest became steps).
+            // The #51 lift below keeps its steps (its tests: two clocks, a late anchor)
+            const int64_t catchup = tail > STEP ? tail - HOLD : tail < -STEP ? tail + HOLD : 0;
+            if (marker && owed_ != 0 && (catchup > FADE || catchup < -FADE) && (catchup > 0) == (owed_ > 0))
+                return faded(catchup);
             // #51 (E564): two clocks park the mean at the band's edge and delivery jitter then takes err past -margin
             // (the read is pulled back: a click). A window whose low end passed 3/4 of the margin is lifted back to
-            // half of it, if its whole range fits 1.5 margins; a wider one (rough cadence, E337) no position fits
-            if (lo < -3 * margin_ / 4 && hi - lo < 3 * margin_ / 2 && lo + margin_ / 2 < owed_)
+            // half of it, if its whole range fits 1.5 margins; a wider one (rough cadence, E337) no position fits.
+            // Only a low end passed in more than 1/16 of its blocks (one late USB delivery's dip lifted the band), and
+            // only if the lifted mean stays inside STEP: past it the next window stepped the band back down, out and
+            // back, hundreds of one-frame skips for nothing (E579)
+            if (low && hi - lo < 3 * margin_ / 2 && lo + margin_ / 2 < owed_ && mean - (lo + margin_ / 2) <= STEP)
                 owed_ = lo + margin_ / 2;
         }
         if (owed_ != 0) {
@@ -176,12 +195,21 @@ private:
         return {d, true};
     }
 
+    // a lasting offset outside Play (host xrun, E579): the same jump, which the read path crossfades (crossfade.h)
+    Move faded(int64_t d)
+    {
+        Move m = jumped(d);
+        m.fade = true;
+        return m;
+    }
+
     // after a jump: the windows start afresh and a Play's jump is used up; the error's range stays (each Play's own
     // jump is in it, E351)
     void restart()
     {
         far_side_ = 0, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
-        mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN;
+        mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN, mean_low_n_ = 0;
+        tail_sum_ = 0, tail_n_ = 0;
         owed_ = 0;
         play_left_ = 0, play_frames_ = 0, play_min_ = 0;
     }
@@ -197,7 +225,8 @@ private:
     int64_t window_ = 22050;
     int far_side_ = 0;
     int64_t far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
-    int64_t mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN;
+    int64_t mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN, mean_low_n_ = 0;
+    int64_t tail_sum_ = 0, tail_n_ = 0; // the mean window's last half second
     int64_t owed_ = 0;
     int64_t margin_ = 512; // virusplugin.h timing_m()
     int64_t play_left_ = 0, play_frames_ = 0, play_min_ = 0;

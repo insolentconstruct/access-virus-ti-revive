@@ -20,6 +20,7 @@ extern "C" {
 }
 #include "model/state.h"
 #include "ratesw.h"
+#include "vtiaudioshm.h" // VTI_AUDIO_RING: how far back a crossfade may read (crossfade.h)
 #include "pluginterfaces/base/ibstream.h"
 #include "public.sdk/source/main/moduleinit.h"
 #include "public.sdk/source/main/pluginfactory.h"
@@ -962,13 +963,14 @@ void DeviceOut::run()
             stats_next_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             int64_t newest = audio_ok() ? audio_.newest_frame() : -1, pos = audio_ok() ? audio_.position() : -1;
             log("stats: audio %d drops %lld filled %lld distance %lld queued %d | marker %lld aligned blocks %lld, read "
-                "margin min %lld, timeline steps %lld, last sound %lld frames ago | host frames %lld / virus frames "
-                "%lld, anchors %lld, err %lld..%lld | Virus %d\n", // which instance: its Virus (#45, 0 = none yet)
+                "margin min %lld, timeline steps %lld, fades %lld (%lld cut), last sound %lld frames ago | host frames "
+                "%lld / virus frames %lld, anchors %lld, err %lld..%lld | Virus %d\n", // which instance: its Virus (#45, 0 = none yet)
                 (int)audio_ok(), (long long)(audio_ok() ? audio_.drops() : -1),
                 (long long)(audio_ok() ? audio_.filled() : -1),
                 (long long)(newest >= 0 && pos >= 0 ? newest - pos : -1), queued_.load(), (long long)marker.load(),
                 (long long)aligned_blocks.exchange(0), (long long)read_margin_min.exchange(INT64_MAX),
-                (long long)tl_steps.exchange(0), (long long)(newest - last_sound.load()), (long long)host_frames.exchange(0),
+                (long long)tl_steps.exchange(0), (long long)tl_fades.exchange(0), (long long)tl_fades_cut.exchange(0),
+                (long long)(newest - last_sound.load()), (long long)host_frames.exchange(0),
                 (long long)(stats_newest_ >= 0 ? newest - stats_newest_ : -1), (long long)anchors.exchange(0),
                 (long long)err_min.exchange(INT64_MAX), (long long)err_max.exchange(INT64_MIN), slot_.load());
             stats_newest_ = newest;
@@ -1006,6 +1008,9 @@ void DeviceOut::run()
             const TimelineNote &n = tl_notes_[r % TL_NOTES];
             if (n.what[0] == 'j')
                 log("timeline jump: err %lld by %lld block %d\n", (long long)n.err, (long long)n.value, n.block);
+            else if (n.what[0] == 'f')
+                log("timeline caught up by %lld frames (crossfaded), err %lld block %d\n", (long long)n.value,
+                    (long long)n.err, n.block);
             else if (n.what[0] == 'p')
                 log("Virus TI native: Play: timeline back by %lld frames for the DAW's burst (#37), err %lld block %d\n",
                     (long long)-n.value, (long long)n.err, n.block);
@@ -2011,6 +2016,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             transport_.reset(); // the new F8 grid is off the beat: the next playing block restarts on a tick (E505)
             restart_.clear();
             tl_follow_.anchor();
+            xfade_.stop();
             bool new_stream = !tl_valid_;
             if (new_stream)
                 marker_retries_ = 0; // a new stream (start, the Virus came back)
@@ -2029,7 +2035,13 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             tl_ += mv.delta;
             next_tick_ += (double)mv.delta;
             restart_.shift(mv.delta);
-            if (mv.jump) {
+            if (mv.fade) { // a host xrun's catch-up: the reads below fade from the old position (E579)
+                xfade_.start(mv.delta);
+                out_->tl_fades.fetch_add(1, std::memory_order_relaxed);
+                out_->note_timeline({"fade", err, mv.delta, data.numSamples});
+                rs_valid_ = false; // the resampled read jumps to the new position too, and fades the same way
+            } else if (mv.jump) {
+                xfade_.stop();
                 if (env_stats())
                     out_->note_timeline({"jump", err, mv.delta, data.numSamples});
                 out_->anchors.fetch_add(1, std::memory_order_relaxed);
@@ -2092,6 +2104,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                 tl_ += pre;
                 restart_.shift(pre);
                 rs_valid_ = false;
+                xfade_.stop(); // a hard move: the old position of a fade is no longer pos - delta
                 out_->note_timeline({"preshift", tl_valid_ ? ring_newest() - S - tl_ : 0, pre, data.numSamples});
             }
             const TransportStart st = transport_start(ppq, per_tick);
@@ -2297,6 +2310,21 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                     out_->generation.fetch_add(1, std::memory_order_relaxed);
                 }
                 out_->audio().read_at(o1[0], o1[1], o2[0], o2[1], data.numSamples, pos, l3, r3);
+                if (const int k = xfade_.frames(data.numSamples)) { // a catch-up: fade in from the old position
+                    const int64_t old = pos - xfade_.delta();
+                    if (pulled_back || !Crossfade::readable(old, k, avail, VTI_AUDIO_RING)) {
+                        xfade_.stop(); // the old audio is not in the ring (or this read is not the timeline's): hard
+                        out_->tl_fades_cut.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else {
+                        float(*b)[Crossfade::LEN] = xfade_buf_;
+                        out_->audio().read_at(b[0], b[1], b[2], b[3], k, old, l3 ? b[4] : nullptr, l3 ? b[5] : nullptr);
+                        float *dst[6] = {o1[0], o1[1], o2[0], o2[1], l3, r3};
+                        for (int c = 0; c < (l3 ? 6 : 4); c++)
+                            xfade_.mix(dst[c], b[c], k);
+                        xfade_.advance(k);
+                    }
+                }
                 int64_t margin = avail - (pos + data.numSamples); // < 0: frames not there yet (silence)
                 if (margin < out_->read_margin_min.load(std::memory_order_relaxed))
                     out_->read_margin_min.store(margin, std::memory_order_relaxed);
@@ -2535,6 +2563,25 @@ void VirusPlugin::read_resampled(float **o1, float **o2, float **o3, int n, doub
     float *dst[6] = {o1[0], o1[1], o2[0], o2[1], o3 ? o3[0] : nullptr, o3 ? o3[1] : nullptr};
     for (int c = 0; c < (o3 ? 6 : 4); c++)
         resampler_[vidx(vrate_seen_)].process(rs_src_[c].data(), first, rs_pos_, step, dst[c], n);
+    if (const int k = xfade_.frames(n)) { // a catch-up (E579): fade in from the old position, resampled the same way
+        const double old = rs_pos_ - (double)xfade_.delta();
+        int64_t f;
+        int c2;
+        Resampler::frames_needed(old, step, k, f, c2);
+        if (c2 > (int)rs_src_[0].size() || !Crossfade::readable(f, c2, newest, VTI_AUDIO_RING)) {
+            xfade_.stop(); // the old audio is not in the ring: a hard jump
+            out_->tl_fades_cut.fetch_add(1, std::memory_order_relaxed);
+        }
+        else {
+            out_->audio().read_at(rs_src_[0].data(), rs_src_[1].data(), rs_src_[2].data(), rs_src_[3].data(), c2, f,
+                                  o3 ? rs_src_[4].data() : nullptr, o3 ? rs_src_[5].data() : nullptr);
+            for (int c = 0; c < (o3 ? 6 : 4); c++) {
+                resampler_[vidx(vrate_seen_)].process(rs_src_[c].data(), f, old, step, xfade_buf_[c], k);
+                xfade_.mix(dst[c], xfade_buf_[c], k);
+            }
+            xfade_.advance(k);
+        }
+    }
     int64_t margin = newest - (int64_t)std::ceil(rs_pos_ + (n - 1) * step + Resampler::HALF);
     if (margin < out_->read_margin_min.load(std::memory_order_relaxed))
         out_->read_margin_min.store(margin, std::memory_order_relaxed);

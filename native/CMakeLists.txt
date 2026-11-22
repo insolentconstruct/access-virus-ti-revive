@@ -190,7 +190,7 @@ add_executable(vtitests tests/main.cpp tests/test_usbmidi.cpp tests/test_state.c
                tests/test_offlinepace.cpp tests/test_syncalert.cpp tests/test_patchhistory.cpp tests/test_stallwatch.cpp tests/test_noteprobe.cpp tests/test_liverule.cpp tests/test_directmon.cpp tests/test_setuptips.cpp
                tests/test_presencewatch.cpp tests/test_keepalive.cpp tests/test_sendbudget.cpp tests/test_writeretry.cpp
                tests/test_stamprule.cpp tests/test_hostclock.cpp tests/test_midiin.cpp tests/test_sendguard.cpp tests/test_cablerule.cpp tests/test_dumppacer.cpp tests/test_startprogress.cpp tests/test_userrom.cpp tests/test_transport.cpp
-               tests/test_gapfill.cpp tests/test_audiogate.cpp tests/test_dragsend.cpp tests/test_hostmidi.cpp tests/test_textfield.cpp
+               tests/test_gapfill.cpp tests/test_crossfade.cpp tests/test_audiogate.cpp tests/test_dragsend.cpp tests/test_hostmidi.cpp tests/test_textfield.cpp
                tests/test_bankdrop.cpp tests/test_hostgestures.cpp tests/test_editgestures.cpp tests/test_ratesw.cpp tests/test_timelinefollow.cpp
                tests/test_blockevents.cpp tests/test_outputdelay.cpp tests/test_lcdhover.cpp
                tests/test_heldnotes.cpp tests/test_factoryorder.cpp tests/test_ratemeter.cpp tests/test_sectionlock.cpp tests/test_resync.cpp tests/test_slipwatch.cpp tests/test_freezewatch.cpp
