@@ -5615,3 +5615,43 @@ menu and Create Empty Library logged to stderr only). Suggested fix `chmod -R -N
 - **Method:** reporter's ls -leO@ and touch output
 - **Confidence:** HIGH (ACL, touch test, fix confirmed by the reporter, Time Machine copy confirmed)
 - **Hardware:** no (reporter's Mac, Snow, Logic)
+
+### E577
+
+Jumps at the first Play at small blocks (REAPER on Linux, pw-jack 48 kHz, block 128, dev build f47d3e8, user
+diag.log 2026-11-22): the window with the first three Plays had "pulled back 202 blocks, largest 1855 frames, err
+-2495"; at block 256 the first Play only 14 (the learning Play, E574). Reproduced on our TI2 with nativehost (local
+--play A:B repeatable + --reactivate = REAPER's setActive cycle at Play, burst ~ the latency, 6 Plays): block 128 Play 1
+202 pulled back + 2 jumps every run, Plays 2-6 clean (the learned pre-shift is right); the parent of 6a192f0 (before the
+pre-shift) has the 202 + 2 jumps at EVERY Play, so the pre-shift did not make 128 worse. Cause (code, HIGH): the "burst
+never ends" limit settle() = max(SETTLE 2048, 16 blocks) (timelinefollow.h) ended REAPER's burst (latency 3712 at block
+128) half way; the jump restarted the Play window and the rest of the burst waited for the half-second rule. Below
+~240-frame blocks only; at 256 the limit is 4096 > burst. Fix: SETTLE = AT_ONCE (4096); TI2 with the fix: block 128 / 64
+/ 256 Play 1 one jump inside the burst, Plays 2-6 clean. Not fixed: a burst beyond ~4100 frames (Logic ~2x latency at
+small blocks) still jumps at AT_ONCE mid-burst at the first Play.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (SETTLE, settle()); native/tests/test_timelinefollow.cpp timeline_first_play_burst_at_block_128_jumps_once; native/tools/nativehost.cpp --play/--reactivate; work/repro-128
+- **Method:** user diag.log, nativehost A/B on the TI2 (8 runs), unit test failing before / passing after
+- **Confidence:** HIGH (cause and fix on the TI2), user REAPER retest pending
+- **Hardware:** yes (our TI2 Desktop, Linux)
+
+### E578
+
+#51 fix (two clocks, E564), model: with drift the 2 s mean of TimelineFollow parks at the STEP/HOLD band edge (-256..-128)
+on the side where the Virus is slower than the sound card, and delivery jitter then takes single blocks past the read
+margin (pulled back = click); the other sign only uses stamp lead. Also in the model: an anchor block that sees the ring
+~200 frames early leaves the mean inside the band for good. Fix: the follower knows the margin (set_margin(timing_m()),
+VTI_NATIVE_MARGIN honoured); the mean counts err after the owed steps; a window whose lowest err passed 3/4 of the margin
+and whose range fits 1.5 margins is lifted so its low sits at half the margin; wider windows (rough cadence E337, Play
+bursts) unchanged; reported latency, stamps and jump paths unchanged. Unit tests (90/200 ppm, +-300 jitter, blocks
+32-2048, late anchor): today 1190-49203 pulled-back blocks, fixed 0; step count within ~3 % of the drift's need, E337
+rough-cadence steps 184. TI2 with nativehost --ppm (new option) 5 min each at block 256, fixed build only: -100 ppm
+margin 512 / 384 and +100 ppm margin 384: 0 pulled back, 0 jumps - Linux jitter does not provoke the defect, so this
+shows no regression but does not prove the fix. Not tested with a second interface or by the reporter.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (set_margin, mean_lo_/mean_hi_, update), virusplugin.cpp process() set_margin; native/tests/test_timelinefollow.cpp (two_clocks tests, late_anchor); nativehost --ppm; issue #51
+- **Method:** model unit tests, TI2 nativehost runs, hil.sh ALL PASS (work/hil/20261122-140302)
+- **Confidence:** MED (mechanism HIGH from E564; fix shown in the model only)
+- **Hardware:** yes (TI2 no-regression runs only; the two-clock case not on hardware)

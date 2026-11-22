@@ -18,7 +18,7 @@ public:
     static constexpr int64_t AT_ONCE = 4096; // ...at once beyond this: no jitter comes near (E337: 852), REAPER ahead does
     static constexpr int64_t STEP = 256; // drift: start stepping when the mean error is beyond this...
     static constexpr int64_t HOLD = 128; // ...and step until it is back inside this
-    static constexpr int64_t SETTLE = 2048; // after Play: ahead this long (and 16 blocks) = the burst is over, at the latest
+    static constexpr int64_t SETTLE = AT_ONCE; // after Play: ahead this long (and 16 blocks) = the burst is over, at the latest
     static constexpr int64_t CALM = 1024; // ...and only if err spread less than this before Play (REAPER ~480)
 
     struct Move {
@@ -41,6 +41,10 @@ public:
     // before it says nothing - without this, fast restarts never looked calm (each Play's own jump is in the range),
     // waited the half second each and piled up (user, err -4320, 16 late events)
     void activated() { fresh_left_ = 2 * window_; }
+
+    // the stamp-aligned read's margin behind the newest frame (virusplugin.h timing_m(), VTI_NATIVE_MARGIN): a block
+    // with err below -margin reads frames that are not there yet and is pulled back (#51)
+    void set_margin(int64_t m) { margin_ = m > 0 ? m : 512; }
 
     // Play (or a loop restart): REAPER then processes 7 blocks ahead at once and stays ahead (Linux, 1792 frames at
     // block 256, also with anticipative FX off). The timeline is then ahead of the ring and each block reads at its
@@ -135,13 +139,20 @@ public:
         } else
             far_side_ = 0, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
 
-        mean_frames_ += frames, mean_sum_ += err, mean_n_++;
+        const int64_t paid = err - owed_; // err once the owed steps are paid: a window during a payback must not count it twice
+        mean_frames_ += frames, mean_sum_ += paid, mean_n_++;
+        mean_lo_ = paid < mean_lo_ ? paid : mean_lo_, mean_hi_ = paid > mean_hi_ ? paid : mean_hi_;
         if (mean_frames_ >= 4 * window_) {
-            const int64_t mean = mean_sum_ / mean_n_;
-            mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0;
+            const int64_t mean = mean_sum_ / mean_n_, lo = mean_lo_, hi = mean_hi_;
+            mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN;
             if (marker && (mean > JUMP || mean < -JUMP)) // an offset hidden in a rough cadence
                 return jumped(mean);
             owed_ = mean > STEP ? mean - HOLD : mean < -STEP ? mean + HOLD : 0;
+            // #51 (E564): two clocks park the mean at the band's edge and delivery jitter then takes err past -margin
+            // (the read is pulled back: a click). A window whose low end passed 3/4 of the margin is lifted back to
+            // half of it, if its whole range fits 1.5 margins; a wider one (rough cadence, E337) no position fits
+            if (lo < -3 * margin_ / 4 && hi - lo < 3 * margin_ / 2 && lo + margin_ / 2 < owed_)
+                owed_ = lo + margin_ / 2;
         }
         if (owed_ != 0) {
             const int64_t d = owed_ > 0 ? 1 : -1;
@@ -153,7 +164,9 @@ public:
 
 private:
     // a burst that never seems to end jumps after this: SETTLE, but at least 16 blocks - at block 2048 SETTLE alone ended
-    // Logic's burst of ~6 blocks after the first one (E570, #37)
+    // Logic's burst of ~6 blocks after the first one (E570, #37). SETTLE = AT_ONCE: a burst at least the latency
+    // (3584 + block, E574) ran into 2048 mid-way at blocks below ~240 (REAPER at 128: the rest waited half a second,
+    // 202 reads pulled back); a burst that keeps falling block by block reaches AT_ONCE first anyway
     static int64_t settle(int64_t frames) { return SETTLE > 16 * frames ? SETTLE : 16 * frames; }
 
     Move jumped(int64_t d)
@@ -168,7 +181,7 @@ private:
     void restart()
     {
         far_side_ = 0, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
-        mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0;
+        mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN;
         owed_ = 0;
         play_left_ = 0, play_frames_ = 0, play_min_ = 0;
     }
@@ -184,8 +197,9 @@ private:
     int64_t window_ = 22050;
     int far_side_ = 0;
     int64_t far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
-    int64_t mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0;
+    int64_t mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN;
     int64_t owed_ = 0;
+    int64_t margin_ = 512; // virusplugin.h timing_m()
     int64_t play_left_ = 0, play_frames_ = 0, play_min_ = 0;
     int64_t fresh_left_ = 0;
     int64_t last_err_ = 0; // the previous block's err

@@ -16,7 +16,7 @@ Last update: 2026-11-22: HANDOFF trimmed to the current state (0.8.42/0.8.43 rel
 - Our TI2 Desktop: on Linux (back from the win11 VM 2026-11-21, broker socket active). Back from a VM:
   VM=win11 scripts/vm.sh detach, then systemctl --user start tirevive-broker.socket. User flashed ROM Z
   on it in early November (E500).
-- Linux: DEV build of round-0.8.44 at f47d3e8 in ~/.vst3 (plug-in 79dd2443) for the library-save smoke test
+- Linux: DEV build of round-0.8.44 with E577/E578 in ~/.vst3 (plug-in 2b2cd1e3; before 79dd2443 at f47d3e8) for the library-save smoke test
   (eb55734), WAITING ON THE USER. Previous plug-in ce68817b (rc3 code) backed up in work/plugin-backup-ce68817b,
   My Patches.mid backup in work/lib-test; rc2 backup work/rc2-plugin-backup.
 - win11 VM: 0.8.43 release (setup /quiet exit 0, VST3 e36f8e6c), shut down (use Stop-Computer: virsh shutdown is
@@ -88,8 +88,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    (unavoidable, Access docs: 2 bars pre-roll, E573). #37 AU cache installer step if the reporter confirms the stale
    AU cache. Not done: rc1/rc3 on the win11 VM and the Mac.
 3. Release text: 0.8.44 "New in" in build.yml + What's New (infopage.h) written 2026-11-22 (marker, Play pre-shift, library saves, Ventura confirmed); update the library line after the smoke test and add anything later in the round.
-4. #51 (E564): keep the timeline drift away from the read margin with two clocks (TimelineFollow STEP/HOLD vs
-   timing_m 512; unit test first); resampler drift-follow is the long-term option. Not started.
+4. #51 (E564) FIX in code (E578, model: 0 pull-backs; TI2 --ppm runs no regression, two-clock case not on hardware) + first-Play jumps at block < 240 FIXED (E577, SETTLE = AT_ONCE, TI2 A/B). hil.sh ALL PASS (work/hil/20261122-140302), 879 tests. Installed in ~/.vst3 for the user's REAPER retest at 128 + 256 (first Play after load). Then: release text line, ask #51 reporter to test the rc. Worktrees work/wt128-head, work/wt128-pre to remove.
 5. Issues: quiet-close candidates #38 (11-17) and #43 (11-17) from 2026-11-24, in a joint check; #32: look up its
    date first. Still to read: replies from #45 (two real Viruses: first real-world test), #42 (snow-idle-slow CPU),
    #44 (recall), #47, #43, #37.

@@ -1951,6 +1951,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         sc_[vidx(vrate)].reset();
         fe_.set_rate(vrate);
         tl_follow_.set_window(vrate / 2);
+        tl_follow_.set_margin(timing_m()); // the pull-back guard of #51 knows the read margin (VTI_NATIVE_MARGIN)
     }
     int64_t newest = ring_newest();
     if (out_ && out_->generation.load() != generation_seen_) { // the Virus came back: a new audio stream

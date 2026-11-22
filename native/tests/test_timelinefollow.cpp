@@ -214,8 +214,8 @@ TEST(timeline_without_marker_only_steps)
 
 TEST(timeline_follows_clock_drift)
 {
-    // the Virus' clock against the sound card's: one-frame steps keep the error inside the read margin (pos is
-    // block + 640 frames behind; below err -640 a block would read frames that are not there yet)
+    // the Virus' clock against the sound card's: one-frame steps keep the error inside the read margin (the read ends
+    // 512 frames behind the newest, timing_m(); below err -512 a block would read frames that are not there yet, #51)
     for (double ppm : {-200.0, 200.0}) {
         Ring ring;
         ring.ppm = ppm;
@@ -223,7 +223,7 @@ TEST(timeline_follows_clock_drift)
         CHECK(r.jumps == 0);
         CHECK(r.steps > 100); // 200 ppm = 529 frames a minute, part of it inside the band
         for (size_t i = 3000; i < r.err.size(); i++)
-            CHECK(r.err[i] > -600 && r.err[i] < 600);
+            CHECK(r.err[i] > -512 && r.err[i] < 600);
     }
 }
 
@@ -499,10 +499,42 @@ TEST(timeline_play_burst_that_never_ends_jumps_after_settle)
     f.play_started();
     Fed r;
     for (int i = 0; i < 20 && r.at < 0; i++)
-        if (const TimelineFollow::Move m = f.update(-600 - i * 50, BLOCK, true); m.jump)
+        if (const TimelineFollow::Move m = f.update(-600 - i * 50, 2 * BLOCK, true); m.jump)
             r.by = m.delta, r.at = i;
-    CHECK(r.at == 16 - 1); // 16 blocks of 256 > SETTLE (2048)
+    CHECK(r.at == 16 - 1); // 16 blocks of 512 > SETTLE (4096)
     CHECK(r.by == -600 - r.at * 50);
+}
+
+TEST(timeline_first_play_burst_at_block_128_jumps_once)
+{
+    // REAPER at block 128 (Linux, pw-jack, 48 kHz; user diag.log 2026-11-22, TI2 repro): the burst is the reported
+    // latency (3712 = 29 blocks of 128) and nothing is learned yet. 16 blocks (2048 frames) into it the "never ends"
+    // limit jumped by what it had seen; the rest of the burst waited for the half-second rule: 202 blocks read pulled
+    // back (stutter on the first note) and a second jump. One jump when the burst is over, nothing ahead after it
+    for (const int64_t b : {32, 64, 128}) {
+        const int64_t burst = 3072 + b + 512; // the latency: A + block + margin (stamprule.h)
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        int64_t ahead = 0, moved = 0, worst = 0;
+        int jumps = 0;
+        auto call = [&](int64_t grow) { // one block; in a burst the ring stands still, so each call is `grow` ahead
+            ahead += grow;
+            const TimelineFollow::Move m = f.update(-ahead - moved, b, true);
+            moved += m.delta, jumps += m.jump;
+            return -ahead - moved; // err after the move
+        };
+        for (int i = 0; i < RATE / b; i++)
+            call(0);
+        f.play_started(true);
+        for (int64_t done = 0; done < burst; done += b)
+            call(b);
+        for (int i = 0; i < RATE / b; i++) {
+            const int64_t e = call(0);
+            worst = e < worst ? e : worst;
+        }
+        CHECK(jumps == 1);
+        CHECK(worst > -TimelineFollow::JUMP); // no read past the newest frame after the burst (margin 512)
+    }
 }
 
 // #37 (E571-E573): the burst at Play is at least the latency the plug-in reports (delay compensation rendered at once:
@@ -630,4 +662,117 @@ TEST(timeline_anchor_keeps_the_learned_burst)
     m.f.anchor(); // a re-anchor (resync ping) between two Plays
     m.blocks(RATE / BLOCK);
     CHECK(m.play() < -20 * BLOCK);
+}
+
+// #51 (E564): two clocks (48 kHz, 1 ms USB chunks, delivery jitter per block). process() reads the block ending at
+// newest - margin - err with the timeline AFTER this block's move (virusplugin.cpp stamp-aligned read), so a block with
+// err - delta < -margin is pulled back to avail - n: the click of #51.
+namespace {
+
+constexpr int64_t MARGIN = 512; // virusplugin.h timing_m()
+
+struct Jitter { // deterministic, uniform +-amp
+    uint64_t s;
+    int64_t amp;
+    int64_t next()
+    {
+        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+        return amp > 0 ? (int64_t)((s >> 33) % (uint64_t)(2 * amp + 1)) - amp : 0;
+    }
+};
+
+struct Clocks {
+    int rate = 48000, block = 256;
+    double ppm = 0;          // < 0: the Virus slower than the sound card (the err falls: the side the margin guards)
+    int64_t jitter = 300;    // the ring seen up to this many frames early or late per block (#51: err spread ~630)
+    int64_t anchor_late = 0; // the anchor block sees the ring this much further than its average (an unlucky anchor)
+    int64_t margin = 0;      // set_margin() if > 0
+    uint64_t seed = 1;
+};
+
+struct Drift {
+    int jumps = 0, steps = 0, pulls = 0; // pulls: blocks past -MARGIN after `from` (each one a click)
+    int64_t err_min = INT64_MAX, err_max = INT64_MIN;
+};
+
+Drift two_clocks(const Clocks &c, int seconds, int from_seconds)
+{
+    TimelineFollow f;
+    f.set_window(c.rate / 2);
+    if (c.margin > 0)
+        f.set_margin(c.margin);
+    Jitter j{c.seed, c.jitter};
+    const int chunk = c.rate / 1000;
+    auto newest = [&](int64_t t) { return ((int64_t)((double)t * (1.0 + c.ppm * 1e-6)) + j.next()) / chunk * chunk; };
+    Drift d;
+    int64_t tl = c.anchor_late ? c.anchor_late : newest(0); // anchored at the first block
+    const int64_t m_limit = c.margin > 0 ? c.margin : MARGIN;
+    for (int64_t k = 0; k < (int64_t)seconds * c.rate / c.block; k++) {
+        const int64_t t = k * c.block, err = newest(t) - tl;
+        const TimelineFollow::Move m = f.update(err, c.block, true);
+        if (m.jump)
+            d.jumps++;
+        else if (m.delta != 0)
+            d.steps++;
+        tl += m.delta;
+        const int64_t read = err - m.delta;
+        if (t >= (int64_t)from_seconds * c.rate) {
+            d.err_min = read < d.err_min ? read : d.err_min, d.err_max = read > d.err_max ? read : d.err_max;
+            if (read < -m_limit)
+                d.pulls++;
+        }
+        tl += c.block;
+    }
+    return d;
+}
+
+} // namespace
+
+TEST(timeline_two_clocks_stay_inside_the_read_margin)
+{
+    // #51: Apollo ASIO 48 kHz / 256 and the Virus ~90 ppm apart, Windows delivery jitter. Before: the 2 s mean parked
+    // at the band's edge (-256..-265) and the jitter took err to ~-590: thousands of pulled-back blocks in 30 min
+    for (double ppm : {-90.0, -200.0, 90.0})
+        for (uint64_t seed = 1; seed <= 3; seed++) {
+            Clocks c;
+            c.ppm = ppm, c.seed = seed;
+            const Drift d = two_clocks(c, 30 * 60, 4);
+            CHECK(d.jumps == 0);
+            CHECK_EQ(d.pulls, 0);
+            CHECK(d.err_min > -MARGIN);
+            CHECK(d.err_max < 2 * MARGIN); // the other side only costs stamp lead (A = 3072): bounded, no jump
+            // the steps are what the drift needs (|ppm| * 48 frames a second), not hunting on the jitter
+            const int64_t need = (int64_t)(std::abs(ppm) * 1e-6 * c.rate * 30 * 60);
+            CHECK(d.steps < need + 1000);
+        }
+}
+
+TEST(timeline_two_clocks_large_blocks_stay_inside_the_read_margin)
+{
+    // the same at block 2048 (one step per block = 23 frames a second: the first lift takes longer) and at 44.1 kHz
+    for (int block : {32, 2048})
+        for (int rate : {44100, 48000}) {
+            Clocks c;
+            c.block = block, c.rate = rate, c.ppm = -90;
+            const Drift d = two_clocks(c, 30 * 60, block >= 2048 ? 30 : 4);
+            CHECK(d.jumps == 0);
+            CHECK_EQ(d.pulls, 0);
+        }
+}
+
+TEST(timeline_late_anchor_block_leaves_room_below)
+{
+    // one clock (no drift), but the anchor block saw the ring 200 frames further than its average: the mean sits at
+    // about -224, inside the +-256 band, so before nothing moved it and the jitter's low end (~-548) was pulled back for good
+    Clocks c;
+    c.anchor_late = 200;
+    const Drift d = two_clocks(c, 10 * 60, 4);
+    CHECK(d.jumps == 0);
+    CHECK_EQ(d.pulls, 0);
+    CHECK(d.steps < 600); // one lift, then quiet
+    // a wider margin (VTI_NATIVE_MARGIN=1024, the #51 workaround) has room for it: nothing moves
+    c.margin = 1024;
+    const Drift w = two_clocks(c, 10 * 60, 4);
+    CHECK_EQ(w.pulls, 0);
+    CHECK_EQ(w.steps, 0);
 }
