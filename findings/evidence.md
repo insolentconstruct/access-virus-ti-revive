@@ -5595,3 +5595,23 @@ Issue #41: keeping the Virus' own Multi mode (splits / key zones) while the plug
 - **Method:** static (REA), vtimodel init / value list from the user's own files, simulator run
 - **Confidence:** HIGH (1), MED (2), MED (3: model, one image, stored-multi reload open)
 - **Hardware:** no
+
+### E576
+
+Issue #41: a personal library on macOS could not be saved and no new library could be created, while the plug-in
+still listed the libraries. Reporter's `ls -leO@` of ~/Documents/Access Music/Virus TI/Patches (2026-11-22): every
+file has the ACL `0: group:everyone deny write,delete,append,writeattr,writeextattr,chown`, every subfolder
+`0: group:everyone deny add_file,delete,add_subdirectory,delete_child,writeattr,writeextattr,chown`; the subfolders
+carry the xattr `com.apple.timemachine.private.directorycompletiondate` and all date from 15 Nov 10:50; owner is the
+user (not root, so not E182). A Terminal `touch` of a new file in Patches gives "Permission denied", so the folder
+itself has the same deny ACL and every process is blocked, not only Logic's AU. This deny-everyone ACL is the one
+macOS puts on items inside a Time Machine backup; inferred (MED): the folder was copied back out of a backup and
+kept it. Reads keep working, so the plug-in lists libraries but every save fails (before eb55734 silently: the SAVE
+menu and Create Empty Library logged to stderr only). Suggested fix `chmod -R -N ~/Documents/"Access Music"`
+(removes ACLs only); its result not yet reported.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/access/library.cpp save_library/commit_library; native/plugin/source/virusplugin.cpp library_saved; issue #41 (issuecomment-7078878581); E182
+- **Method:** reporter's ls -leO@ and touch output
+- **Confidence:** HIGH (ACL blocks writes, touch test), MED (Time Machine origin)
+- **Hardware:** no (reporter's Mac, Snow, Logic)
