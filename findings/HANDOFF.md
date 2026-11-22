@@ -5,7 +5,7 @@ NEXT. At most 150 lines; the Stop hook (`.claude/hooks/handoff-check.sh`) refuse
 how goes into the dated log [`log/2026-11.md`](log/2026-11.md) (newest first); older logs are in [`log/`](log/).
 Device/protocol knowledge goes into [`evidence.md`](evidence.md). Update this file in the same commit as the work._
 
-Last update: 2026-11-21: **0.8.43 RELEASED** (Latest, release job green, site rebuilt); round 0.8.44 started (branch round-0.8.44). Mac release push pending (Mac asleep).
+Last update: 2026-11-22: joint issue check: #41 Multi-mode wish answered (REA + sim static), sim run requested, #30 closed; 0.8.43 Latest, round 0.8.44 on round-0.8.44 (rc3 waits on #37).
 
 ## Where things stand
 
@@ -53,13 +53,12 @@ Last update: 2026-11-21: **0.8.43 RELEASED** (Latest, release job green, site re
 
 | Issue | Topic | Waits on | Last from us |
 |---|---|---|---|
-| #30 | knob automation in Logic fixed in rc2 (E542, confirmed); REOPENED audio 5.6 ms early in Logic (E540, E541, E545) SOLVED by rc3 per #41 (his log: Logic read 3085, re-announced 2816, 269 samples = 5.6 ms at 48k) | reporter, see #41; close #30 and #41 with the user once #41 is answered | 2026-11-15 |
 | #32 | (no change since 11-10) | reporter | before 11-10 |
 | #47 | NEW 2026-11-18: Snow "connected but not found" in Ableton; form says Windows 11 / TI Desktop, text macOS 27.0.1 / Snow; no logs, no version (E134 or E115 pattern?) | reporter: platform, model, version, Access/AURA, diag.log, broker log, ioreg, MIDI Drivers ls (issuecomment-7003657269) | 2026-11-19 |
 | #37 | libusb pkg on Catalina (E561). Marker fixed in rc1 (E568/E569). Play burst: rc2 no help (E571); burst >= reported latency (E572); original same, Access docs 2 bars pre-roll (E573); rc3 = PRE-SHIFT at Play (E574: REAPER 256 perfect, 2048 ok), posted 2026-11-21 (issuecomment-7069327555) | reporter: rc3 test (Play twice, small + large buffer, log) | 2026-11-21 |
 | #38 | macOS 27 Live: AU/editor crash = SOLVED by the reporter (Access .pkg was missing; plug-in opens; Virus not connected yet) | reporter: note after connecting the Virus, then close (issuecomment-6948868845) | 2026-11-17 |
 | #40 | (ours) macOS libusb audio as an option? | #39 reporter; #37 = first real data point (works) | 2026-11-13 |
-| #41 | (the #30 reporter, Snow, Logic) rc3 on the grid; 2026-11-21 new question: stack two parts (lead on ch 1+2) as in the original. Ours like the original: part n on channel n (E321); original editor.xml has no part MIDI channel control. Our answer: two Logic tracks, or part 2 to ch 1 on the Virus (neither tested), asked how he did it (issuecomment-7065190813) | reporter: steps from the original | 2026-11-21 |
+| #41 | (the #30 reporter, Snow, Logic) rc3 on the grid; #30 CLOSED 2026-11-22 (joint). 2026-11-22 wish: keep the hardware Multi mode (splits/zones) while the plug-in is open. REA 2026-11-22 (0x180070520): the original sends GlobalInit unconditionally (first 73 00 7A 03 = Master Mode MIDI REMOTE; value list SINGLE/MULTI/SEQ MODE/MIDI REMOTE), a fixed 267-byte multi dump, part n = channel n; close sets SINGLE (E391/E395). Sim (static): only a 7A write switches the mode; Multi entry may reset zones (FUN_66ca, guess); Mode 1 would likely survive power-off; plug-in outside REMOTE unknown. Ideas: option to keep the Virus multi, or per-part channel/key range. Answer posted (issuecomment-7075376655), asked how he plays splits. Sim run REQUESTED 2026-11-22 (7A 1->3->1 dumps, start-up with 7A=1, without the multi dump); write the E entry from its result | reporter: how he plays splits; sim: run results | 2026-11-22 |
 | #43 | original TI, OS 5.1.7, macOS: `tirevive-cc restore` stops at a fixed slot ("another patch after the restore"). CAUSE (E549): byte 10 (patch flags, E156) is not kept by the Virus on a RAM store, the read-back compared it; Rom A slot 7 = 0x76. FIX on round-0.8.42 (controlcenter.cpp patch_difference: byte 10 left out, a real mismatch names the byte; 3 new tests); original checked with REA (stores byte 10 unchanged, no read-back). Not run on hardware. rc6 RELEASED (pre-release, tag e84ded1, CI 44121551201 all 9 jobs green, 7 assets, 20:45 UTC); reply posted. Mutation on controlcenter.cpp not done (the copy ../tirevive-mut fails unmutated, rebuild there) | reporter: test rc6 (posted issuecomment-6960600649) | 2026-11-17 |
 | #42 | Snow, M4 Pro, macOS 15.8.2: vtibroker ~33 % CPU idle; cause E547 (Snow idle stream on bulk EP 0x85, ~3300/s). rc5 TESTED by the reporter (E550): ~830/s, 15-19 %, knobs fine; 33 sync reports in 6 min (asked if audible). Reply with why + how the original does it (E548) posted (issuecomment-6957394873). NEW (user 2026-11-17): option snow-idle-slow (off by default, Control Center Options; 4 ms after 1 s quiet; broker reads the flag file every 2 s; tests first; not run on a Snow). Sim confirmed from the Snow's USB chip code (E551, S147): idle packet armed on every read, no command switches it off 2026-11-18 reporter: no dropouts or timing problems in a quick Ableton test | reporter: 0.8.42 with the option on, CPU (issuecomment-7020102746) | 2026-11-19 |
 | #52 | Intel iMac 2017, Ventura 13.7.8, Ableton 12 Suite, TI2 Desktop: the Ventura package WORKS (E567, diag.log clean); README + site say so (round-0.8.44). Thanked, timing check offered, no reply needed (issuecomment-7063380386) | could be closed with the user | 2026-11-21 |
@@ -111,7 +110,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    rename; live site still says "looks and works like" until rebuilt); final CI from the round head; merge, tag, release
    (first run of the fixed release job), site rebuild on main.
 1. Mac: the 0.8.42 release push is obsolete (the Mac has the 0.8.43 test package, pkg 22ae6de3).
-2. Quiet issues #26 #31 #33 #36 CLOSED 2026-11-21 (joint check, standard message); next: #30 together with #41 (#41 replied 11-21, no quiet-close) (its last request 11-15); #32 #40 are ours. Still to read:
+2. Quiet issues #26 #31 #33 #36 CLOSED 2026-11-21 (joint check, standard message); #30 closed 2026-11-22; quiet-close candidates now #38 (11-17) and #43 (11-17); #32 #40 are ours. Still to read:
    replies from #45 (two real Viruses: first real-world test), #42 (snow-idle-slow CPU), #44 (recall), #47, #43, #37.
 3. Round 0.8.43 (started): the fixed release job (9049eec) runs for the first time at its tag - check it; rest of
    the round to discuss with the user (Windows MIDI ports, test automation, Linux MIDI with the sim's Keyboard).
