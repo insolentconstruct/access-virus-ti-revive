@@ -1070,7 +1070,7 @@ Entries: 573. Marks after an entry: its lowest confidence level when below HIGH,
 - [E572](evidence.md#e572) REAPER's Play burst against the block size (user, Linux, pw-jack, TI2 Desktop, dev build 69779ebc = rc2 code, ... (MED)
 - [E573](evidence.md#e573) What the original does when the DAW reads ahead at Play (#37, E571/E572; static REA/Ghidra 12.1.4 on the ... (MED; open; not on hardware)
 - [E575](evidence.md#e575) Issue #41: keeping the Virus' own Multi mode (splits / key zones) while the plug-in is open (MED; open; not on hardware)
-- [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (MED; not on hardware)
+- [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (not on hardware)
 
 ## Access software (Virus Control, Control Center, installer) (231)
 
@@ -1725,7 +1725,7 @@ Entries: 573. Marks after an entry: its lowest confidence level when below HIGH,
 - [E571](evidence.md#e571) rc2 (d8ba24d, the E351 port of E570) in Logic on Catalina (#37 reporter's TI2, log 2026-11-21 22:47, 5 ... (MED)
 - [E572](evidence.md#e572) REAPER's Play burst against the block size (user, Linux, pw-jack, TI2 Desktop, dev build 69779ebc = rc2 code, ... (MED)
 - [E574](evidence.md#e574) Pre-shift at Play (#37, commit 6a192f0): TimelineFollow::play_started(from_stop) measures the burst of a Play ... (MED)
-- [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (MED; not on hardware)
+- [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (not on hardware)
 
 ## Linux (230)
 
@@ -2638,7 +2638,7 @@ Entries: 573. Marks after an entry: its lowest confidence level when below HIGH,
 - [E573](evidence.md#e573) What the original does when the DAW reads ahead at Play (#37, E571/E572; static REA/Ghidra 12.1.4 on the ... (MED; open; not on hardware)
 - [E574](evidence.md#e574) Pre-shift at Play (#37, commit 6a192f0): TimelineFollow::play_started(from_stop) measures the burst of a Play ... (MED)
 - [E575](evidence.md#e575) Issue #41: keeping the Virus' own Multi mode (splits / key zones) while the plug-in is open (MED; open; not on hardware)
-- [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (MED; not on hardware)
+- [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (not on hardware)
 
 ## Safety (rule 2): sends that can hurt the Virus (64)
 
