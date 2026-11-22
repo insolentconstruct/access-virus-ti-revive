@@ -1590,9 +1590,9 @@ void VirusPlugin::check_latency()
             out_->log("Virus TI native: latency now %lld samples, the host last read %lld - announced again\n",
                       (long long)now, (long long)read);
         componentHandler->restartComponent(kLatencyChanged);
-    } else if (latency_watch_.nudge(active_.load(), read) && componentHandler) {
+    } else if (latency_watch_.nudge(active_.load(), out_ && out_->audio_ready(), read, now) && componentHandler) {
         if (out_)
-            out_->log("Virus TI native: latency %lld samples announced once more after activation (host read %lld)\n",
+            out_->log("Virus TI native: latency %lld samples announced once more after the latency settled (host read %lld)\n",
                       (long long)now, (long long)read);
         componentHandler->restartComponent(kLatencyChanged);
     }
