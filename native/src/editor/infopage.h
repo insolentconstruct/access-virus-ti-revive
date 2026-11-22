@@ -59,6 +59,14 @@ struct ChangeNote {
 inline const std::vector<ChangeNote> &changelog()
 {
     static const std::vector<ChangeNote> notes = {
+        {"0.8.44",
+         {"Sync at the start (#37): TI Revive finds the Virus' sync marker also while the Virus already plays, so a "
+          "project that plays right after opening gets its timing at once (before, only after the music paused).",
+          "Play from stop (#37): when the DAW reads ahead at Play, TI Revive learns how far and at the next Play "
+          "shifts back by that much, so the audio no longer jumps after Play (tested in REAPER on Linux, not in "
+          "Logic). The note exactly at Play still comes late: leave two bars of silence before the first notes.",
+          "Library saves (#41): a change is kept only when its file was written, every save goes into the log, and "
+          "a failed one shows \"Library not saved:\" on the plug-in display (before, it failed silently)."}},
         {"0.8.43",
          {"New names: the plug-in is \"TI Revive\" (before \"TI Revive Virus Control\"), the Windows ASIO driver \"TI "
           "Revive Audio\" and the MIDI inputs \"TI Revive Synth\" and \"TI Revive MIDI\". Projects open as before; if a "
