@@ -328,6 +328,17 @@ std::string xdg_documents_dir(const std::string &home, const std::string &user_d
     return {};
 }
 
+bool commit_library(const PatchLibrary &lib, std::vector<std::vector<uint8_t>> &cur,
+                    const std::vector<std::vector<uint8_t>> &after, std::string &error)
+{
+    PatchLibrary out = lib;
+    out.dumps = after;
+    if (!save_library(out, error))
+        return false;
+    cur = after;
+    return true;
+}
+
 std::string library_dir()
 {
     const std::string tail = "/Access Music/Virus TI/Patches";

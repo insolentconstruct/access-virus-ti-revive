@@ -27,6 +27,10 @@ std::vector<PatchLibrary> load_libraries(const std::string &dir, const std::vect
 // writes `lib.dumps` to `lib.path` in the original's file layout (SMF type 0, one track, a SysEx per patch with
 // delta 120, bank byte 1, program = position, division 96); gaps are left out
 bool save_library(const PatchLibrary &lib, std::string &error);
+// a library change kept only when its file was written (#41): `after` goes to lib.path (lib.dumps is ignored); true and
+// `cur` = `after` when written, else `cur` stays as it was (the browser then shows what the file holds) and `error` says why
+bool commit_library(const PatchLibrary &lib, std::vector<std::vector<uint8_t>> &cur,
+                    const std::vector<std::vector<uint8_t>> &after, std::string &error);
 // the original's "Create Empty Library" (E217): the name chosen in its save dialog ends in ".mid" (".midi" loses the
 // "i", any other name gets ".mid"; case-sensitive like the original)
 std::string library_file_name(const std::string &chosen);

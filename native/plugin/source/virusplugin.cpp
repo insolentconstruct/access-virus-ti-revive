@@ -4201,6 +4201,9 @@ bool VirusPlugin::save_library_file(int library)
 bool VirusPlugin::edit_library(int library, const char *what,
                                const std::function<LibraryEdit::Lib(const LibraryEdit::Lib &)> &op)
 {
+    PatchLibrary lib;
+    std::string err;
+    bool ok;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
         if (library < 0 || library >= (int)lib_paths_.size())
@@ -4212,12 +4215,13 @@ bool VirusPlugin::edit_library(int library, const char *what,
                 out_->log("Virus TI native: %s in library %d refused\n", what, library + 1);
             return false;
         }
-        drop_.remember_library(library, cur, after);
-        cur = std::move(after);
+        lib.name = lib_names_[library], lib.path = lib_paths_[library];
+        const LibraryEdit::Lib before = cur;
+        ok = commit_library(lib, cur, after, err); // #41: kept only when the file was written
+        if (ok)
+            drop_.remember_library(library, before, after);
     }
-    if (out_)
-        out_->log("Virus TI native: %s in library %d\n", what, library + 1);
-    bool ok = save_library_file(library);
+    library_saved(ok, lib.name, err, what); // outside banks_mu_: it takes values_mu_
     ui_dirty_ = true;
     return ok;
 }
@@ -4527,9 +4531,10 @@ bool VirusPlugin::create_library(const std::string &chosen)
     const std::string path = library_file_name(chosen);
     std::string err;
     if (!write_empty_library(path, err)) {
-        fprintf(stderr, "Virus TI native: %s\n", err.c_str());
+        library_saved(false, vti::u8str(vti::u8path(path).stem()), err, "");
         return false;
     }
+    library_saved(true, vti::u8str(vti::u8path(path).stem()), err, "created (" + path + ")");
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
         auto it = std::find(lib_paths_.begin(), lib_paths_.end(), path);
@@ -4633,6 +4638,8 @@ bool VirusPlugin::store_to_library(int part, int library, int slot)
     if (d.empty())
         return false;
     PatchLibrary lib;
+    std::string err;
+    bool ok;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
         if (library < 0 || library >= (int)lib_paths_.size())
@@ -4640,19 +4647,29 @@ bool VirusPlugin::store_to_library(int part, int library, int slot)
         auto &b = banks_[LIB_BASE + library];
         if (slot < 0 || slot > (int)b.size() || slot >= 128)
             return false;
-        if (slot == (int)b.size())
-            b.push_back(d);
+        std::vector<std::vector<uint8_t>> after = b;
+        if (slot == (int)after.size())
+            after.push_back(d);
         else
-            b[slot] = d;
-        drop_.forget(); // an undo of an earlier operation must not write over this SAVE
-        lib.name = lib_names_[library], lib.path = lib_paths_[library], lib.dumps = b;
+            after[slot] = d;
+        lib.name = lib_names_[library], lib.path = lib_paths_[library];
+        ok = commit_library(lib, b, after, err); // #41: kept only when the file was written
+        if (ok)
+            drop_.forget(); // an undo of an earlier operation must not write over this SAVE
     }
-    std::string err;
-    bool ok = save_library(lib, err);
-    if (!ok)
-        fprintf(stderr, "Virus TI native: %s\n", err.c_str());
+    library_saved(ok, lib.name, err, "patch saved to slot " + std::to_string(slot + 1));
     ui_dirty_ = true;
     return ok;
+}
+
+// one log line per library write, and a failed one on the Virus display too (#41: failures went to stderr only)
+void VirusPlugin::library_saved(bool ok, const std::string &name, const std::string &err, const std::string &what)
+{
+    if (out_)
+        out_->log(ok ? "Virus TI native: library %s: %s\n" : "Virus TI native: library %s NOT saved: %s\n",
+                  name.c_str(), ok ? what.c_str() : err.c_str());
+    if (!ok)
+        lcd_message("Library not saved:", name);
 }
 
 int VirusPlugin::tick_meters(int step)

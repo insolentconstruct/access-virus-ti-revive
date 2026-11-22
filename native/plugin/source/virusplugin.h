@@ -505,6 +505,7 @@ public:
     LibraryImport import_library_file(const std::string &src, int &library);
     // a short note in the LCD (two lines, no part, no [stored value]) - e.g. what a file drop did
     void lcd_message(const std::string &line1, const std::string &line2);
+    void library_saved(bool ok, const std::string &name, const std::string &err, const std::string &what);
     // a hint while a file is dragged over the browser: on saves the LCD, off restores it (unless a message came)
     void lcd_hint(bool on, const std::string &line1 = {}, const std::string &line2 = {});
     // does a stored patch have category `cat` (filter menu index, 0 = any) and contain `q` in its name?

@@ -147,6 +147,29 @@ TEST(library_edge_cases)
     fs::remove_all(dir);
 }
 
+// #41: a library change stays in memory only when its file was written - a failed save (folder not writable) left the
+// patch in the browser until the project was reopened, with no message
+TEST(library_commit_keeps_memory_and_file_alike)
+{
+    fs::path dir = fs::temp_directory_path() / "vti_libcommit_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::vector<Dump> cur = {single(1)}, after = {single(1), single(2)};
+    std::string err;
+    PatchLibrary lib;
+    lib.name = "Mine";
+    lib.path = (dir / "no-such-folder" / "Mine.mid").string();
+    CHECK(!commit_library(lib, cur, after, err) && !err.empty());
+    CHECK(cur.size() == 1 && same_patch(cur[0], single(1))); // unchanged: the browser shows what the file holds
+    lib.path = (dir / "Mine.mid").string();
+    err.clear();
+    CHECK(commit_library(lib, cur, after, err) && err.empty());
+    CHECK(cur.size() == 2 && same_patch(cur[1], single(2)));
+    PatchLibrary back;
+    CHECK(load_library_file(lib.path, back) && back.dumps.size() == 2 && same_patch(back.dumps[1], single(2)));
+    fs::remove_all(dir);
+}
+
 #ifndef _WIN32
 #include <unistd.h>
 // Linux: the documents folder from the XDG user dirs (localized, e.g. ~/Dokumente), an existing ~/Documents library
