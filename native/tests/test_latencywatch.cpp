@@ -35,3 +35,33 @@ TEST(latencywatch_logs_each_new_value_the_host_read)
     CHECK(!w.read_changed(4096));
     CHECK(w.read_changed(5632));
 }
+
+// #41 (E546): Logic kept an old latency after opening the project although the value it read matched the current one
+// (32 ms early at I/O buffer 32); a buffer change fixed it. About 1 s after the first activation the latency is
+// announced once more, even when the host's value looks right - once per instance, so a host that re-activates on
+// the announcement cannot loop
+TEST(latencywatch_nudges_once_about_a_second_after_the_first_activation)
+{
+    LatencyWatch w;
+    for (int i = 1; i < LatencyWatch::kNudgeTicks; i++)
+        CHECK(!w.nudge(true, 5632)); // not before ~1 s of active ticks
+    CHECK(w.nudge(true, 5632));      // then once, although the host read the current value
+    for (int i = 0; i < 100; i++)
+        CHECK(!w.nudge(true, 5632)); // never again
+    for (int i = 0; i < 10; i++)
+        CHECK(!w.nudge(false, 5632)); // deactivated ...
+    for (int i = 0; i < 100; i++)
+        CHECK(!w.nudge(true, 5632)); // ... and activated again: still not
+}
+
+TEST(latencywatch_nudge_waits_for_activation_and_a_host_read)
+{
+    LatencyWatch w;
+    for (int i = 0; i < 3 * LatencyWatch::kNudgeTicks; i++) {
+        CHECK(!w.nudge(false, 5632)); // inactive: no count
+        CHECK(!w.nudge(true, -1));    // the host never read a value: no count
+    }
+    for (int i = 1; i < LatencyWatch::kNudgeTicks; i++)
+        CHECK(!w.nudge(true, 5632));
+    CHECK(w.nudge(true, 5632));
+}

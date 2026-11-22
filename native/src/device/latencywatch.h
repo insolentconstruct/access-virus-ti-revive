@@ -26,6 +26,17 @@ public:
         announced_ = now;
         return true;
     }
+    // #41 (E546): Logic sometimes kept an old latency although the value it read looked right. Once per instance,
+    // about 1 s of active ticks after the host first read a value, announce it anyway; only once, so a host that
+    // re-activates on the announcement cannot loop. One call per UI timer tick
+    static constexpr int kNudgeTicks = 20; // the 50 ms UI timer: about 1 s
+    bool nudge(bool active, int64_t host_read)
+    {
+        if (nudged_ || !active || host_read < 0)
+            return false;
+        nudged_ = ++nudge_ticks_ >= kNudgeTicks;
+        return nudged_;
+    }
     // for the log: has the host read a value it had not read before?
     bool read_changed(int64_t host_read)
     {
@@ -37,6 +48,8 @@ public:
 
 private:
     int64_t announced_ = -1, logged_ = -1;
+    int nudge_ticks_ = 0;
+    bool nudged_ = false;
 };
 
 } // namespace vti
