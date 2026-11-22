@@ -83,7 +83,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
 
 ## NEXT
 
-1. #41 library-save smoke test of eb55734 (Linux dev build f47d3e8, REAPER, 2026-11-22): Create Empty Library x2 logged 'created' + file written; drag-drop into a library logged 'patch(es) dropped', file 26 -> 1080 bytes; Patches folder read-only: 'NOT saved: cannot write ...mid.tmp' twice, file unchanged; folder writable again. Asked the user: LCD 'Library not saved:' seen, patch gone from the browser? SAVE-menu path into a slot not tried. Test files New Library.2mid.mid / New Library3.mid to delete. Then the reporter's 'solved?' answer, close jointly.
+1. #41 library-save smoke test of eb55734 (Linux dev build f47d3e8, REAPER, 2026-11-22): Create Empty Library x2 logged 'created' + file written; drag-drop into a library logged 'patch(es) dropped', file 26 -> 1080 bytes; Patches folder read-only: 'NOT saved: cannot write ...mid.tmp' twice, file unchanged; folder writable again. User: LCD showed 'Library not saved:', the dropped patch disappeared from the browser = PASS. SAVE-menu path into a slot not tried. Test files New Library.2mid.mid / New Library3.mid to delete. Then the reporter's 'solved?' answer, close jointly.
 2. #37: v0.8.44-rc3 WAITS for the reporter (Play twice, small + large buffer, log). Note at Play stays ~burst late
    (unavoidable, Access docs: 2 bars pre-roll, E573). #37 AU cache installer step if the reporter confirms the stale
    AU cache. Not done: rc1/rc3 on the win11 VM and the Mac.
