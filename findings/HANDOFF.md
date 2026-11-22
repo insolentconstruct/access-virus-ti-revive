@@ -88,7 +88,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    (unavoidable, Access docs: 2 bars pre-roll, E573). #37 AU cache installer step if the reporter confirms the stale
    AU cache. Not done: rc1/rc3 on the win11 VM and the Mac.
 3. Release text: 0.8.44 "New in" in build.yml + What's New (infopage.h) written 2026-11-22 (marker, Play pre-shift, library saves, Ventura confirmed); update the library line after the smoke test and add anything later in the round.
-4. #51 (E564) FIX in code (E578, model: 0 pull-backs; TI2 --ppm runs no regression, two-clock case not on hardware) + first-Play jumps at block < 240 FIXED (E577, SETTLE = AT_ONCE, TI2 A/B). hil.sh ALL PASS (work/hil/20261122-140302), 879 tests. Installed in ~/.vst3 for the user's REAPER retest at 128 + 256 (first Play after load). Then: release text line, ask #51 reporter to test the rc. Worktrees work/wt128-head, work/wt128-pre to remove.
+4. #51 (E564) FIX in code (E578, model: 0 pull-backs; TI2 --ppm runs no regression, two-clock case not on hardware) + first-Play jumps at block < 240 FIXED (E577, SETTLE = AT_ONCE, TI2 A/B). hil.sh ALL PASS (work/hil/20261122-140302), 879 tests. User REAPER retest at 128 PASSED 2026-11-22 (plug-in 2b2cd1e3 in ~/.vst3: 'works perfect, no jumps'; log: Play 1 26 pull-backs inside the burst, 3 later Plays clean). Next: an rc for #51 (ask the reporter to test) and #37.
 5. Issues: quiet-close candidates #38 (11-17) and #43 (11-17) from 2026-11-24, in a joint check; #32: look up its
    date first. Still to read: replies from #45 (two real Viruses: first real-world test), #42 (snow-idle-slow CPU),
    #44 (recall), #47, #43, #37.

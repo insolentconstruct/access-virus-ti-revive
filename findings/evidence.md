@@ -5633,7 +5633,7 @@ small blocks) still jumps at AT_ONCE mid-burst at the first Play.
 - **Date:** 2026-11-22
 - **Pointer:** native/src/device/timelinefollow.h (SETTLE, settle()); native/tests/test_timelinefollow.cpp timeline_first_play_burst_at_block_128_jumps_once; native/tools/nativehost.cpp --play/--reactivate; work/repro-128
 - **Method:** user diag.log, nativehost A/B on the TI2 (8 runs), unit test failing before / passing after
-- **Confidence:** HIGH (cause and fix on the TI2), user REAPER retest pending
+- **Confidence:** HIGH (cause and fix on the TI2; user REAPER retest 2026-11-22 at block 128, plug-in 2b2cd1e3: first Play 26 blocks pulled back inside the burst, the next 3 Plays the learned shift and 0 pulled back; heard: perfect, no jumps; 256 not retested)
 - **Hardware:** yes (our TI2 Desktop, Linux)
 
 ### E578
