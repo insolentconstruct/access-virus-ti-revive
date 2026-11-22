@@ -5707,3 +5707,34 @@ resampler's share while virus_rate() is not the host's rate).
 - **Method:** reporter's statement; diag.log on our Mac over SSH; WAV onset measurement
 - **Confidence:** HIGH (stale latency in his Logic; our takes on grid; the nudge fires as designed) / open (that the nudge cures his case)
 - **Hardware:** yes (our TI2 Desktop, Apple Silicon Mac, Logic); his Snow not
+
+### E581
+
+rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 the log
+shows "timeline caught up by -3075 frames (crossfaded)" and 107 blocks pulled back, a block switch to 128 while playing
+two more crossfaded catch-ups and 395 pulled back, the next Play "back by 765" (correct ~3600), and 4 s after a later,
+right Play (3616) a crossfade of 287. Cause (model and TI2, HIGH): the jumps inside the bursts are the same as in
+fd33fc4 (2b2cd1e3, the build heard as perfect) - rc5 only flagged them as fades, and the read path cut each one to a hard
+jump ("fades 1 (1 cut)", "2 (2 cut)"); the model gives identical moves for both builds in every burst case, and a burst
+with no Play window (REAPER's extra setActive cycles at a start or a block switch) waits half a second in both: 107
+pulled back at block 256 in the model too. Two real faults: (1) the wrong learned burst, also in fd33fc4: a Play within a
+second after such a burst took that burst's low as the cadence's normal low and learned the rest (model: 0 or 765-like
+values; TI2 with a burst 0.6 s before a Play: fd33fc4 learned nothing, rc5 3112); (2) the E579 catch-up rule also fired
+on a pre-shift's rest after a Play (rc5's 287; fd33fc4 stepped it). Fix (timelinefollow.h): a crossfaded catch-up only
+forward (an xrun leaves the timeline behind; a host ahead is a burst) and not for 4 s (QUIET = 8 half-second windows)
+after a Play window, a setActive(1), an anchor or a hard jump - there every move is as in fd33fc4; the burst is measured
+from the calm cadence's low, else from the lowest error since the last jump. TI2 nativehost A/B (--block 128 / 256,
+48 kHz, 5 Plays with --reactivate and a burst of the latency, xruns of 512 and 1024 frames 5 and 8.5 s after a Play,
+46 s): fd33fc4 128: 27 pulled back (first Play), 2 hard jumps, xruns 802 one-frame steps + a hard jump of 1165; rc5
+(e762e50) 128: 28, 1 jump, 2 fades (609, 1119), 0 steps; fix 128: 26, 1 jump, 2 fades (477, 1123), 192 steps (after
+the first Play's jump, as fd33fc4); at 256: fd33fc4 14 / 2 jumps / 689 steps, rc5 14 / 1 / 2 fades / 0, fix 13 / 1 / 2
+fades (419, 1144) / 0; learned shifts 3680-3712 (128) and 3840 (256) in all builds. A burst 0.6 s before a Play (block
+128, twice, 40 s): fd33fc4 454 pulled back and 1 of 3 Plays pre-shifted, rc5 611 and shifts 3112 / 3712, fix 402 (only
+the two bursts without a Play, 215 + 187) and shifts 3712 / 3712 / 3712, the Plays 0 pulled back. Not fixed: a burst
+with no Play window still waits half a second (also fd33fc4); not heard in REAPER yet.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (QUIET, quiet_left_, faded(), since_lo_, play_started base_); native/tests/test_timelinefollow.cpp (timeline_reaper_*, timeline_burst_before_play_does_not_spoil_the_learned_burst, timeline_preshift_rest_after_play_steps_not_fades, timeline_xrun_after_a_play_still_crossfades); work/ab-581 (runs, not in git)
+- **Method:** user diag.log, a model of REAPER's bursts run against both headers, unit tests failing on e762e50 / passing after, TI2 nativehost A/B of three builds, hil.sh
+- **Confidence:** HIGH (rc5's burst jumps equal fd33fc4's, model and TI2; the learning fault and its fix on the TI2) / open (the user's REAPER retest)
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in REAPER)

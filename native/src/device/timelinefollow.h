@@ -23,6 +23,10 @@ public:
     // a catch-up beyond this at a window end: one crossfaded jump, not a one-frame step per block. Drift up to 500 ppm
     // passes STEP by at most ~48 frames a 2 s window (owed <= STEP - HOLD + 48 = 176); a host xrun leaves 256+ (E579)
     static constexpr int64_t FADE = 192;
+    // ...and only in steady playback: not for this many half-second windows after a Play, a setActive(1), an anchor or a
+    // hard jump (the Play's learn second and the two 2 s mean windows after it, where a burst's rest shows; rc5 faded
+    // REAPER's bursts and the rest of a pre-shift, E581). There every move is as before E579: hard jumps and steps
+    static constexpr int64_t QUIET = 8;
 
     struct Move {
         int64_t delta; // added to the timeline: 0, +-1 (a drift step) or the jump
@@ -44,7 +48,7 @@ public:
     // (the size of our latency: delay compensation, likely). A Play within a second of it is a fresh start, the cadence
     // before it says nothing - without this, fast restarts never looked calm (each Play's own jump is in the range),
     // waited the half second each and piled up (user, err -4320, 16 late events)
-    void activated() { fresh_left_ = 2 * window_; }
+    void activated() { fresh_left_ = 2 * window_, quiet_left_ = QUIET * window_; }
 
     // the stamp-aligned read's margin behind the newest frame (virusplugin.h timing_m(), VTI_NATIVE_MARGIN): a block
     // with err below -margin reads frames that are not there yet and is pulled back (#51)
@@ -77,7 +81,13 @@ public:
         shift_ = learn && learned_ > JUMP ? learned_ : 0;
         learn_left_ = learn ? 2 * window_ : 0;
         learn_sum_ = -shift_, learn_min_ = 0;
-        base_ = hi >= lo && lo < 0 ? lo : 0; // the error's normal low before Play: the cadence, not the burst
+        // where the burst is measured from: the error's normal low before Play (the cadence), but after a setActive
+        // cycle's own burst within the last second (REAPER's start, a block switch: not calm) that low is the burst's -
+        // learned 765 instead of ~3700 (E581). Then the low since the last jump (the rest of that burst, if any)
+        const int64_t since = since_lo_ != INT64_MAX ? since_lo_ : last_err_;
+        base_ = calm ? (lo < 0 ? lo : 0) : since < 0 ? since : 0;
+        if (play_left_ > 0) // a Play window (no window in a rough cadence: everything stays as without Play)
+            quiet_left_ = QUIET * window_;
         return -shift_;
     }
 
@@ -91,6 +101,7 @@ public:
         restart();
         last_err_ = 0;
         learn_left_ = 0, shift_ = 0; // the learned burst stays: it belongs to the host, not to this timeline
+        quiet_left_ = QUIET * window_;
         cur_frames_ = 0, cur_min_ = INT64_MAX, cur_max_ = INT64_MIN, prev_min_ = INT64_MAX, prev_max_ = INT64_MIN;
     }
 
@@ -101,8 +112,11 @@ public:
         spread(err, frames);
         const int64_t last = last_err_;
         last_err_ = err;
+        since_lo_ = err < since_lo_ ? err : since_lo_;
         if (fresh_left_ > 0)
             fresh_left_ -= frames;
+        if (quiet_left_ > 0)
+            quiet_left_ -= frames;
         if (learn_left_ > 0) {
             learn_left_ -= frames;
             const int64_t raw = err + learn_sum_; // the error as if we had not moved since Play
@@ -162,7 +176,7 @@ public:
             // by the last half second's offset (an xrun inside the window dilutes its mean: the rest became steps).
             // The #51 lift below keeps its steps (its tests: two clocks, a late anchor)
             const int64_t catchup = tail > STEP ? tail - HOLD : tail < -STEP ? tail + HOLD : 0;
-            if (marker && owed_ != 0 && (catchup > FADE || catchup < -FADE) && (catchup > 0) == (owed_ > 0))
+            if (marker && quiet_left_ <= 0 && owed_ > 0 && catchup > FADE) // forward only: an xrun loses cycles
                 return faded(catchup);
             // #51 (E564): two clocks park the mean at the band's edge and delivery jitter then takes err past -margin
             // (the read is pulled back: a click). A window whose low end passed 3/4 of the margin is lifted back to
@@ -192,15 +206,20 @@ private:
     {
         restart();
         learn_sum_ += d; // the burst is still measured from Play on
+        quiet_left_ = QUIET * window_;
         return {d, true};
     }
 
-    // a lasting offset outside Play (host xrun, E579): the same jump, which the read path crossfades (crossfade.h)
+    // a lasting offset in steady playback (host xrun, E579): the same jump, which the read path crossfades
+    // (crossfade.h). Forward only: an xrun leaves the timeline behind the ring, a host ahead of it is a burst (and the
+    // old frames of a jump back are not in the ring yet anyway). Elsewhere the hard jump, as before (E581)
     Move faded(int64_t d)
     {
-        Move m = jumped(d);
-        m.fade = true;
-        return m;
+        if (d <= 0 || quiet_left_ > 0)
+            return jumped(d);
+        restart();
+        learn_sum_ += d;
+        return {d, true, true};
     }
 
     // after a jump: the windows start afresh and a Play's jump is used up; the error's range stays (each Play's own
@@ -212,6 +231,7 @@ private:
         tail_sum_ = 0, tail_n_ = 0;
         owed_ = 0;
         play_left_ = 0, play_frames_ = 0, play_min_ = 0;
+        since_lo_ = INT64_MAX;
     }
 
     // the error's range over the last 0.5-1 s (two half-second buckets): how calm the cadence is
@@ -231,7 +251,9 @@ private:
     int64_t margin_ = 512; // virusplugin.h timing_m()
     int64_t play_left_ = 0, play_frames_ = 0, play_min_ = 0;
     int64_t fresh_left_ = 0;
+    int64_t quiet_left_ = 0; // frames until a catch-up may be crossfaded again (QUIET)
     int64_t last_err_ = 0; // the previous block's err
+    int64_t since_lo_ = INT64_MAX; // the lowest err since the last jump or anchor
     int64_t learned_ = 0;  // the last Play's burst (frames), at most a second
     int64_t shift_ = 0;    // the pre-shift of this Play while its burst eats it
     int64_t learn_left_ = 0, learn_sum_ = 0, learn_min_ = 0, base_ = 0;

@@ -913,3 +913,167 @@ TEST(timeline_drift_never_crossfades)
         CHECK_EQ(fades, 0);
     }
 }
+
+// REAPER's Play, start and block-size switch (user diag.log 2026-11-22, rc5): each comes with setActive(1) and a burst
+// of about the latency (the ring stands still while the host renders it, then the host stays that far ahead). The E579
+// catch-up fade is for a host xrun in steady playback only: inside or after a burst every move stays as in fd33fc4
+// (hard jumps, no catch-up jump), and a burst seen before a Play is not taken for the cadence's low when it learns.
+namespace {
+
+struct Burst {
+    double at;          // s
+    int64_t frames;     // the burst (0: none)
+    bool play;          // a Play from a stop in the burst's first block (else only setActive(1) and the burst)
+    int block = 0;      // from here on this block size (0: as before)
+};
+
+struct Reaper {
+    struct Jump {
+        double at;
+        int64_t by;
+        bool fade;
+    };
+    std::vector<Jump> jumps; // hard and faded
+    std::vector<int64_t> shifts; // the pre-shift of each Play (0: nothing learned)
+    int steps = 0, pulled = 0;   // pulled: blocks read past the newest frame (err after the move < -margin)
+    double last_pulled = -1;     // s
+    int fades() const
+    {
+        int n = 0;
+        for (const Jump &j : jumps)
+            n += j.fade;
+        return n;
+    }
+    std::vector<int64_t> hard_before(double t) const
+    {
+        std::vector<int64_t> v;
+        for (const Jump &j : jumps)
+            if (j.at < t && !j.fade)
+                v.push_back(j.by);
+        return v;
+    }
+};
+
+// 48 kHz, the ring seen in 512-frame steps (PipeWire), margin 512; a jump of `lost` frames forward at `lost_at` s
+Reaper reaper(const std::vector<Burst> &bursts, int block, double seconds, int64_t lost = 0, double lost_at = -1)
+{
+    constexpr int64_t rate = 48000, chunk = 512;
+    TimelineFollow f;
+    f.set_window(rate / 2);
+    f.set_margin(MARGIN);
+    Reaper r;
+    int64_t tl = 96 - chunk + block, gone = 0;
+    size_t p = 0;
+    for (int64_t t = 0; t < (int64_t)(seconds * rate); t += block) {
+        int64_t burst = 0;
+        bool play = false;
+        if (p < bursts.size() && t >= (int64_t)(bursts[p].at * rate)) {
+            f.activated();
+            burst = bursts[p].frames, play = bursts[p].play;
+            block = bursts[p].block ? bursts[p].block : block;
+            p++;
+        }
+        if (lost_at >= 0 && t >= (int64_t)(lost_at * rate))
+            gone = lost; // a host xrun: the ring ran on
+        for (int64_t k = 0, calls = 1 + (burst + block - 1) / block; k < calls; k++) {
+            const int64_t err = t / chunk * chunk + gone - tl;
+            const TimelineFollow::Move m = f.update(err, block, true);
+            if (m.jump)
+                r.jumps.push_back({(double)t / rate, m.delta, m.fade});
+            else if (m.delta != 0)
+                r.steps++;
+            if (err - m.delta < -MARGIN)
+                r.pulled++, r.last_pulled = (double)t / rate;
+            tl += m.delta;
+            if (k == 0 && play) {
+                const int64_t s = f.play_started(true);
+                r.shifts.push_back(s);
+                tl += s;
+            }
+            tl += block;
+        }
+    }
+    return r;
+}
+
+int64_t latency(int block) { return 3072 + block + 512; } // stamprule.h: A + block + margin
+
+} // namespace
+
+TEST(timeline_reaper_plays_never_crossfade)
+{
+    // Plays from a stop, each after setActive(1) with its burst, at every phase of the 2 s mean window: as in fd33fc4
+    // the first one jumps once inside the burst, the next ones are pre-shifted; no fade
+    for (const int block : {128, 256})
+        for (double ph = 0; ph < 2; ph += 0.25) {
+            const int64_t L = latency(block);
+            const Reaper r = reaper({{10 + ph, L, true}, {17 + ph, L, true}, {24 + ph, L, true}, {31 + ph, L, true}}, block, 40);
+            CHECK_EQ(r.fades(), 0);
+            CHECK_EQ((int)r.jumps.size(), 1);
+            CHECK_EQ(r.pulled, block == 128 ? 26 : 14); // fd33fc4: the first Play's burst only
+            CHECK_EQ(r.steps, 0);
+        }
+}
+
+TEST(timeline_reaper_start_burst_before_play_jumps_hard)
+{
+    // REAPER starting the stream at Play (rc5 log: a setActive cycle with a burst, then the Play's own one): the first
+    // burst has no Play window and waits for the half-second rule, the Play's jumps inside its own. The same hard
+    // jumps as fd33fc4 (rc5 crossfaded the first one, cut to a hard jump in the read path), no fade
+    struct Case {
+        int block;
+        double gap;
+        std::vector<int64_t> moves; // fd33fc4's jumps before the second Play
+    };
+    for (const Case &c : {Case{128, 0.3, {-4192, -2999}}, Case{256, 0.3, {-4192, -3292}}, Case{128, 1.5, {-3419, -4101}},
+                          Case{256, 1.5, {-3579, -4197}}, Case{128, 0.6, {-3419, -4101}}, Case{256, 0.6, {-3579, -4197}}}) {
+        const int64_t L = latency(c.block);
+        const Reaper r = reaper({{10, L, false}, {10 + c.gap, L, true}, {20, L, true}, {30, L, true}}, c.block, 40);
+        CHECK_EQ(r.fades(), 0);
+        CHECK(r.hard_before(20) == c.moves);
+    }
+}
+
+TEST(timeline_burst_before_play_does_not_spoil_the_learned_burst)
+{
+    // rc5 log: a block switch while playing (setActive cycles with bursts), then a Play: it learned 765 frames, not the
+    // ~3700 of the latency, and the next Play's burst read 395 blocks past the newest frame. The Play took the error's
+    // low of the last second as the cadence's normal low - that was the burst before it. Only a calm cadence's low is
+    // the base, else the low since the last jump; the next Play is pre-shifted by the burst and nothing moves after it
+    for (const int block : {128, 256})
+        for (double gap = 0.3; gap < 1.0; gap += 0.15) {
+            const int64_t L = latency(block);
+            const Reaper r = reaper({{10, L, true}, {20, L, false}, {20 + gap, L, true}, {30, L, true}}, block, 36);
+            CHECK_EQ((int)r.shifts.size(), 3);
+            if (r.shifts.size() == 3)
+                CHECK(r.shifts[2] <= -L + 128 && r.shifts[2] >= -L - 128);
+            CHECK(r.last_pulled < 30); // the last Play's burst reads frames that are there
+            CHECK_EQ(r.steps, 0);      // and no rest is left behind to step off (a shift too large)
+            CHECK_EQ(r.fades(), 0);
+        }
+}
+
+TEST(timeline_preshift_rest_after_play_steps_not_fades)
+{
+    // rc5 log: a Play pre-shifted by 3616, its burst ~290 smaller: the timeline then sat ~290 behind and 4 s later a
+    // window end crossfaded the rest (287). Right after a Play that rest is the burst's, not an xrun: it is paid in
+    // one-frame steps as in fd33fc4, at every phase of the mean window
+    for (double ph = 0; ph < 2; ph += 0.25) {
+        const int64_t L = latency(128);
+        const Reaper r = reaper({{10, L, true}, {17 + ph, L - 300, true}}, 128, 30);
+        CHECK_EQ(r.fades(), 0);
+        // steps, or (err past JUMP when the learn second ends) the hard jump forward by the rest of fd33fc4
+        CHECK(r.steps > 0 || (r.hard_before(30).size() == 2 && r.hard_before(30)[1] > 0));
+    }
+}
+
+TEST(timeline_xrun_after_a_play_still_crossfades)
+{
+    // the steady playback after a Play: a host xrun (512 lost) more than 4 s after it is crossfaded as before (E579)
+    for (const int block : {128, 256}) {
+        const int64_t L = latency(block);
+        const Reaper r = reaper({{10, L, true}, {17, L, true}}, block, 30, 512, 23);
+        CHECK_EQ(r.fades(), 1);
+        CHECK_EQ(r.steps, 0);
+    }
+}

@@ -186,6 +186,8 @@ in the plug-in, switch the part's output to "Out 1" and back to "USB 1" (this se
 On macOS also check that your DAW may use the microphone (System Settings → Privacy & Security → Microphone). On Linux, if notes and knobs work but no audio comes over USB (log: `usbaudio: alternate setting 1 failed`,
 kernel log: `Not enough bandwidth`), connect the Virus directly to the computer, not through a USB hub.
 
+**Every note sounds twice (Keyboard, Polar)?** A key on a Keyboard or Polar sounds twice when two paths play the Virus at once: its own keyboard (Local On) and your DAW, which sends the key back to the plug-in when the track listens to the Virus' MIDI input with input monitoring on. The original Access plug-in does the same. Use one of them: switch Local Off on the Virus, then the DAW plays it and records the keys (best for recording), or switch the track's input monitoring off. In one report only unplugging the USB cable and plugging it in again helped; if that is your case, save the logs before you replug and open a report.
+
 **REAPER on Linux: stay in REAPER while a render runs.** REAPER 7.82 on Linux can crash right after a render from
 the render dialog if another program had the focus when the render window closed, for example when you clicked into a
 terminal or a browser during the render. Two short freezes in the same tests were probably the same bug (not
