@@ -5685,3 +5685,25 @@ host (resampled path), block 256, 60 s: 1 fade, 0 steps (WAV not checked: the pe
 - **Method:** user diag.log, unit tests failing before / passing after, TI2 nativehost runs with WAV period tracking, hil.sh
 - **Confidence:** HIGH (cause from the log and reproduced on the TI2; the fix on the TI2), not yet heard by the user in REAPER
 - **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in REAPER)
+
+### E580
+
+#41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the bus recording
+of TI Revive sat 32 ms before the grid; changing the I/O buffer to 128 and back to 32 fixed it (his reply 15:23 UTC):
+Logic kept a stale latency, the E546 kind, also the pattern of #37/#33 (E543, E532). Our Mac (MacBook Air M3, macOS
+27.2.1, Logic, TI2 Desktop, his "Project Latency", 48 kHz): at every project open the plug-in first reports 3085
+samples (block 512) and 2816 once the Virus' audio is open (the value E546 found in his November log, 269 samples
+apart), the latency watch announces 2816 and our Logic reads it. A one-time nudge was added: 6014095 fired 1 s after
+activation, which was before the Virus was ready (at 3085, wasted); 1d3b029 fires once ~1 s after the latency settled and
+the audio is open ("latency 2816 samples announced once more after the latency settled (host read 2816)", seen in the log
+17:20). Takes measured (onset = first sample over 20 % of the peak walked back to 2 %, beats at 120 BPM against the
+file start = bar 1): #05 (6014095, Virus connected after the project) and #06 (1d3b029, fresh Logic start, I/O 32) all
+16 beats 0.00 ms. Not shown: that the nudge cures his case - our Logic took the new value without it (also E544); his
+test with an rc is the real check. Where the extra 269 before the Virus is ready comes from is not traced (likely the
+resampler's share while virus_rate() is not the host's rate).
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/latencywatch.h nudge(), VirusPlugin::check_latency; issue #41 (issuecomment-7080304263, -7081427381); work/logic-41 (takes, not in git)
+- **Method:** reporter's statement; diag.log on our Mac over SSH; WAV onset measurement
+- **Confidence:** HIGH (stale latency in his Logic; our takes on grid; the nudge fires as designed) / open (that the nudge cures his case)
+- **Hardware:** yes (our TI2 Desktop, Apple Silicon Mac, Logic); his Snow not
