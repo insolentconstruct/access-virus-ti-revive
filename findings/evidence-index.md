@@ -889,7 +889,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E581](evidence.md#e581) rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
 - [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
-- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open; not on hardware)
+- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## Sound problems: crackle, silence, dropouts (192)
 
@@ -1744,7 +1744,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
 - [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
-- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open; not on hardware)
+- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## Linux (234)
 
@@ -1983,7 +1983,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E579](evidence.md#e579) Short metallic sound after REAPER xruns (Linux, pw-jack 48 kHz, block 128, user diag.log 2026-11-22): the 10 ...
 - [E581](evidence.md#e581) rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 ... (open)
 
-## Models: Snow, Polar, Keyboard, TI2 (276)
+## Models: Snow, Polar, Keyboard, TI2 (277)
 
 - [E013](evidence.md#e013) Remotedevice XML (3 blobs) embedded in Virus Control.dll at file offsets 0xc248a4, 0xcbee00 (TI ...
 - [E091](evidence.md#e091) macOS installer recon (originals/Virus TI Software Suite 5.1.7.00.pkg, xar from 2017, payloads unpacked to ...
@@ -2261,6 +2261,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E581](evidence.md#e581) rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
+- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## DAWs (259)
 
@@ -2679,7 +2680,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
 - [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
-- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open; not on hardware)
+- [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## Safety (rule 2): sends that can hurt the Virus (64)
 

@@ -5815,8 +5815,14 @@ blocks 512 / 128 and 2048 -> 128 / 512, losses 1024-2300): 4-9 phases per case p
 before, 0 after. Where err keeps dipping back inside JUMP (a scratch model with uniform jitter of +-700 or more around
 a loss of ~1000) both rules pay in two moves in about half the phases: unchanged, not addressed.
 
+TI2 A/B 2026-11-23 (work/ab-584/run.sh, not in git: 44.1 kHz, 60 s, C4 every second, 7 host losses of 52 ms ~2290
+frames spaced 6.1-6.45 s so each lands late in a 2 s window; old = 775d6f8 build 40329e7a, new = 140617e build
+52fa05f5): block 512 old 11 catch-ups (2251, 909, 1373, 1541, 752, 1881, 276, 561, 1855, 2284, 2296) + 160 one-frame
+steps, new 7 catch-ups (2285-2398) + 0 steps; block 128 old 10 catch-ups (549-2292) + 161 steps, new 7 (2164-2292)
++ 0 steps; 0 pulled back in all four. hil.sh on the new build ALL PASS (work/hil/20261123-195257-e584).
+
 - **Date:** 2026-11-23
 - **Pointer:** native/src/device/timelinefollow.h (update(): the mean window's end, far_side_); native/tests/test_timelinefollow.cpp (timeline_logic_lost_frames_one_crossfade_at_any_phase, pipewire() block_after); work/issue37-rc6/TI-Revive-logs-2026-11-22-2228.txt (not in git)
 - **Method:** reporter's diag.log (fade lines and 10 s stats windows), model unit test failing before / passing after, mutation check on the changed condition
 - **Confidence:** HIGH (the fades pay frames Logic did not process: host vs Virus frames in the log) / MEDIUM (1461 + 1108 = one loss paid twice, inferred) / open (the fix in Logic)
-- **Hardware:** no (model only; not on our TI2, not in Logic)
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in Logic)
