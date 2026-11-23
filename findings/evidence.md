@@ -5409,3 +5409,25 @@ process ("another program uses Virus 1").
 - **Method:** plug-in log over SSH, code reading, unit test
 - **Confidence:** HIGH (cause from the log + code) / not yet verified on the Mac (fix)
 - **Hardware:** yes (TI2 Desktop on the Mac: the bug); fix not yet run
+
+### E569
+
+Follow-up to E257 and E260's private serial F5/F6 analysis, firmware 5.1.7.00 TUSB payload. F5 at CODE:0x06a0
+requests the USB connection state: value zero clears internal bit address 0x11; any nonzero value
+sets it. When that state changes, the main loop writes USBCTL to connect and enable the USB
+function for the cleared state (CODE:0x0196), or disconnect it for the set state (CODE:0x0184).
+This is the private serial dispatch, separate from MIDI F5 timestamps. F6 at CODE:0x06af appends
+two mailbox bytes only if the initial count is below 15; after the append, it sets P3.5 only if
+the resulting count is exactly 16. With preserved state and an initial count in 0–15, count 14
+therefore appends both bytes and signals, while count 15 appends neither. E260 already describes
+the two-byte frames, 16-byte buffer and P3.5 handshake, and interprets the data as the host-supplied
+USB serial number for iSerialNumber at MED confidence; the host-side sender was not located.
+That interpretation remains unconfirmed by this analysis. The additions here are F5's precise
+connection polarity and F6's bounded append boundary; neither establishes hardware safety for
+sending either command.
+
+- **Date:** 2026-11-23
+- **Pointer:** firmware 5.1.7.00 TUSB payload (SHA256 prefix e7d5304f818c2e8a), CODE:0x06a0–0x06cc, main-loop writes 0x0184/0x0196, helpers 0x10e7/0x10f0; TUSB3200A data manual SLES018B, appendix A.5.1.4 (USBCTL)
+- **Method:** review of retained static analysis of the authenticated payload: F5 analysis dated 2026-09-22 and F6 recheck dated 2026-11-23; no command execution
+- **Confidence:** HIGH (static connection-state and bounded append logic); E260's MED serial-number interpretation remains unconfirmed here; hardware effects open
+- **Hardware:** n/a (static analysis)
