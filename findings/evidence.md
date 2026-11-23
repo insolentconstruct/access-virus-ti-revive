@@ -5785,12 +5785,14 @@ Reading (inferred, not tested): damaged bits on the USB link (cable, hub, port) 
 the plug-in (audioin.cpp: Float32 * 32768); 48 kHz carries ~9 % more audio data per packet than 44.1 kHz. Broker log:
 the plug-in owns the Virus, no LIBUSB_ERROR_ACCESS; the read/write errors at 19:31:09 end with NO_DEVICE (the Virus
 switched off or unplugged). Asked (issuecomment-7109412140): another short USB 2.0 cable, directly on the Mac, the same
-sequence again, the log if it still clicks; libusb audio on current macOS pointed to #40.
+sequence again, the log if it still clicks; libusb audio on current macOS pointed to #40. Reporter 2026-11-23 19:56 UTC:
+"A shorter USB cable fixed it: 48 kHz, buffer 64, part on USB 1, no clicks" - the second case (after #34) where a
+cable swap alone ended one-sided clicks at 48 kHz; issue closed as solved.
 
 - **Date:** 2026-11-23
 - **Pointer:** issue #54 (diag-click.log, tirevive-vtibroker.log in work/issue54, not in git), E560 (#34), native/plugin/source/virusplugin.cpp (stats: raw peaks), native/src/device/memsync.cpp (wrong checksum)
 - **Method:** the plug-in log's stats lines (raw peaks per pair, drops, margin) and retries, the broker log
-- **Confidence:** HIGH (one-sided full-scale values and checksum retries in the log, clean timeline) / LOW (the cable as the cause, until the reporter tries one)
+- **Confidence:** HIGH (one-sided full-scale values and checksum retries in the log, clean timeline; the cable as the cause: a shorter cable fixed it, reporter 2026-11-23)
 - **Hardware:** no (the reporter's unit)
 
 ### E584

@@ -340,7 +340,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E568](evidence.md#e568) Issue #37 (user, Catalina, Logic Pro, libusb package, TI with OS 5.0.8, 44.1 kHz block 2048): "out of sync ... (MED)
 - [E569](evidence.md#e569) rc1 in the field (v0.8.44-rc1, 99345e2e) (LOW)
 - [E573](evidence.md#e573) What the original does when the DAW reads ahead at Play (#37, E571/E572; static REA/Ghidra 12.1.4 on the ... (MED; open; not on hardware)
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 
 ## SysEx and parameter protocol (131)
 
@@ -641,7 +641,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E569](evidence.md#e569) rc1 in the field (v0.8.44-rc1, 99345e2e) (LOW)
 - [E575](evidence.md#e575) Issue #41: keeping the Virus' own Multi mode (splits / key zones) while the plug-in is open (MED; open; not on hardware)
 - [E579](evidence.md#e579) Short metallic sound after REAPER xruns (Linux, pw-jack 48 kHz, block 128, user diag.log 2026-11-22): the 10 ...
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 
 ## Timing, stamps, latency, host blocks (245)
 
@@ -888,7 +888,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E581](evidence.md#e581) rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 - [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## Sound problems: crackle, silence, dropouts (192)
@@ -1084,7 +1084,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E576](evidence.md#e576) Issue #41: a personal library on macOS could not be saved and no new library could be created, while the ... (not on hardware)
 - [E578](evidence.md#e578) #51 fix (two clocks, E564), model: with drift the 2 s mean of TimelineFollow parks at the STEP/HOLD band edge ... (MED)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 
 ## Access software (Virus Control, Control Center, installer) (231)
 
@@ -1743,7 +1743,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E577](evidence.md#e577) Jumps at the first Play at small blocks (REAPER on Linux, pw-jack 48 kHz, block 128, dev build f47d3e8, user ...
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 - [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## Linux (234)
@@ -2523,7 +2523,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E581](evidence.md#e581) rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 
 ## User reports (GitHub issues, forums) (154)
 
@@ -2679,7 +2679,7 @@ Entries: 581. Marks after an entry: its lowest confidence level when below HIGH,
 - [E579](evidence.md#e579) Short metallic sound after REAPER xruns (Linux, pw-jack 48 kHz, block 128, user diag.log 2026-11-22): the 10 ...
 - [E580](evidence.md#e580) #41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
-- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (LOW; not on hardware)
+- [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
 - [E584](evidence.md#e584) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing (MED; open)
 
 ## Safety (rule 2): sends that can hurt the Virus (64)
