@@ -665,6 +665,7 @@ TEST(timeline_loop_restart_after_a_learned_burst_never_preshifts)
     m.blocks(22, BLOCK);
     m.blocks(2 * RATE / BLOCK);
     CHECK_EQ(m.f.play_started(false), 0);
+    CHECK_EQ(m.f.play_started(), 0); // the default: not from a stop
 }
 
 TEST(timeline_anchor_keeps_the_learned_burst)
@@ -1135,4 +1136,264 @@ TEST(timeline_logic_varying_bursts_no_click_after_play)
         CHECK_EQ(late_steps, 0);
         CHECK(late_fades <= 5); // at most one per Play
     }
+}
+
+// The mutation pass on the older code (2026-11-23, findings/testing.md): the limits and the windows' exact ends
+namespace {
+struct Tally {
+    int steps = 0, jumps = 0, fades = 0, at = -1; // at: the first jump's block
+    int64_t by = 0;
+};
+// `n` blocks of `frames` with err(i), open loop (the moves are counted, not applied)
+template <class E> Tally tally(TimelineFollow &f, int n, int64_t frames, E err, bool marker = true)
+{
+    Tally t;
+    for (int i = 0; i < n; i++) {
+        const TimelineFollow::Move m = f.update(err(i), frames, marker);
+        if (m.jump && t.at < 0)
+            t.at = i, t.by = m.delta;
+        if (m.jump)
+            t.jumps++, t.fades += m.fade;
+        else
+            t.steps += m.delta != 0;
+    }
+    return t;
+}
+auto constant(int64_t e)
+{
+    return [e](int) { return e; };
+}
+} // namespace
+
+TEST(timeline_zero_window_and_margin_fall_back)
+{
+    // no Virus rate yet (0): the window stays 1, so an activation then still counts for a second at the real rate
+    // (a window of 0 lost it, and the next set_window divided by it)
+    TimelineFollow f;
+    f.set_window(0);
+    f.activated();
+    f.set_window(RATE / 2);
+    f.play_started();
+    CHECK(burst(f, -600, 4).at >= 0);
+    // VTI_NATIVE_MARGIN=0 (atoi of garbage): the default margin, so #51's lift still works
+    auto lifted = [](int64_t m) {
+        TimelineFollow g;
+        g.set_window(RATE / 2);
+        g.set_margin(m);
+        return tally(g, 3 * RATE / BLOCK, BLOCK, [](int i) { return i % 2 ? 76 : -524; }).steps;
+    };
+    CHECK(lifted(512) > 0);
+    CHECK_EQ(lifted(0), lifted(512));
+}
+
+TEST(timeline_calm_is_below_calm)
+{
+    // a cadence spread of exactly CALM is not calm: no Play window
+    for (const int64_t spread : {TimelineFollow::CALM - 1, TimelineFollow::CALM}) {
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        tally(f, RATE / BLOCK, BLOCK, [&](int i) { return i % 2 ? 0 : -spread; }, false);
+        f.play_started();
+        CHECK((burst(f, -600, 4).at >= 0) == (spread < TimelineFollow::CALM));
+    }
+}
+
+TEST(timeline_blocks_before_any_play_learn_nothing)
+{
+    // a far-ahead first block is no burst: only a Play's learn second learns (else it pre-shifted the next Play)
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    f.update(-3000, BLOCK, false);
+    feed(f, 0, 2 * RATE / BLOCK);
+    CHECK_EQ(f.play_started(true), 0);
+}
+
+TEST(timeline_rough_cadence_play_neither_learns_nor_preshifts)
+{
+    // a Play in a rough cadence has no Play window, so no learn second either: everything stays as without Play
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(22, BLOCK);
+    m.blocks(2 * RATE / BLOCK);
+    rough_second(m.f);
+    CHECK_EQ(m.f.play_started(true), 0);
+}
+
+TEST(timeline_learn_second_without_preshift_moves_as_without_play)
+{
+    // nothing learned yet: far off still jumps at once in the learn second, and its end is no reason to jump on one
+    // block behind (that waits for the half second as always)
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    feed(f, 0, RATE / BLOCK);
+    f.play_started(true);
+    CHECK_EQ(feed(f, 5000, 1).at, 0);
+    TimelineFollow g;
+    g.set_window(RATE / 2);
+    feed(g, 0, RATE / BLOCK);
+    g.play_started(true);
+    feed(g, 0, RATE / BLOCK); // 172 blocks: the learn second's last block comes next
+    CHECK(feed(g, 600, 1).at < 0);
+}
+
+TEST(timeline_burst_of_exactly_jump_is_not_learned)
+{
+    // a Play "burst" of exactly JUMP is none: learned as 512 it made the next real burst look like a host that
+    // varies by ~2500 (spread_), and the Play after that got a quarter more room than the burst
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(2, BLOCK); // 512 ahead
+    m.blocks(3 * RATE / BLOCK);
+    m.play();
+    m.blocks(12, BLOCK); // 3072
+    m.blocks(3 * RATE / BLOCK);
+    const int64_t s = m.play();
+    CHECK(s <= -12 * BLOCK + 256 && s >= -12 * BLOCK - 256);
+}
+
+TEST(timeline_preshift_learn_second_counts_minus_jump_as_inside)
+{
+    // pre-shifted: blocks at exactly -JUMP are the shift being eaten (no move, no window counted), so a burst at the
+    // learn second's end still has its Play window (counted down by them, it had run out and the jump came late)
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(22, BLOCK);
+    m.blocks(2 * RATE / BLOCK);
+    CHECK(m.f.play_started(true) < 0);
+    const Tally t = tally(m.f, 175, BLOCK, [](int i) {
+        return i < 170 ? -TimelineFollow::JUMP : i > 172 ? -1280 : -768 - (int64_t)(i - 170) * 256;
+    });
+    CHECK_EQ(t.at, 173);
+    CHECK_EQ(t.by, -1280);
+}
+
+TEST(timeline_preshift_expects_up_to_its_edges)
+{
+    // process() re-anchors beyond 8192 unless expected: the range is -JUMP..shift + JUMP, both ends included
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(46, BLOCK);
+    m.blocks(2 * RATE / BLOCK);
+    const int64_t s = m.play();
+    CHECK(m.f.expects(-s + TimelineFollow::JUMP));
+    CHECK(m.f.expects(-TimelineFollow::JUMP));
+    TimelineFollow g;
+    g.set_window(RATE / 2);
+    CHECK(!g.expects(0)); // nothing pre-shifted: nothing expected
+}
+
+TEST(timeline_window_thresholds_are_exclusive)
+{
+    // every limit is "beyond": exactly AT_ONCE waits, exactly -JUMP is no burst and no mean jump, exactly STEP no step
+    {
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        CHECK(feed(f, TimelineFollow::AT_ONCE, 1).at < 0);
+    }
+    {
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        feed(f, 0, RATE / BLOCK);
+        f.play_started();
+        CHECK(feed(f, -TimelineFollow::JUMP, RATE / BLOCK).at < 0);
+    }
+    {
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        CHECK(feed(f, -TimelineFollow::JUMP, 3 * RATE / BLOCK).at < 0);
+    }
+    for (const int64_t e : {TimelineFollow::STEP, -TimelineFollow::STEP}) {
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        CHECK_EQ(tally(f, 3 * RATE / BLOCK, BLOCK, constant(e)).steps, 0);
+    }
+}
+
+TEST(timeline_far_side_flip_restarts_the_half_second)
+{
+    // behind for 0.4 s, then ahead: the half second counts from the flip (a mixed mean jumped by 337 at 0.5 s)
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    const int flip = RATE * 4 / 10 / BLOCK;
+    const Tally t = tally(f, RATE / BLOCK, BLOCK, [&](int i) { return i < flip ? 600 : -600; });
+    CHECK_EQ(t.at, flip + RATE / 2 / BLOCK);
+    CHECK_EQ(t.by, -600);
+}
+
+TEST(timeline_offset_only_the_mean_shows_jumps_after_two_seconds)
+{
+    // behind beyond JUMP on average, every other block back inside: the half-second rule never completes, the 2 s
+    // mean jumps by it
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    const Tally t = tally(f, 3 * RATE / BLOCK, BLOCK, [](int i) { return i % 2 ? -100 : 1500; });
+    CHECK_EQ(t.at, 344);
+    CHECK(t.by > TimelineFollow::JUMP);
+}
+
+TEST(timeline_windows_end_on_exact_block_counts)
+{
+    // 48 kHz at block 64 or 128: the windows are whole blocks, each ends on the block that fills it
+    {
+        TimelineFollow f; // the half second: 375 blocks of 64
+        f.set_window(24000);
+        CHECK_EQ(tally(f, 400, 64, constant(1000)).at, 374);
+    }
+    {
+        TimelineFollow f; // the Play window: 375 blocks of 128, the next one is outside it
+        f.set_window(24000);
+        tally(f, 375, 128, constant(0));
+        f.play_started();
+        CHECK(tally(f, 376, 128, [](int i) { return i < 374 ? 0 : -600; }).at < 0);
+    }
+    {
+        TimelineFollow f; // the spread buckets: 375 blocks of 64; block 376 is in the second, which still counts
+        f.set_window(24000);
+        tally(f, 752, 64, [](int i) { return i == 375 ? -2000 : 0; }, false);
+        f.play_started();
+        CHECK(burst(f, -600, 4).at < 0);
+    }
+    {
+        // the 2 s window and its last half second (default window 22050, blocks of 150: 588 and 147 blocks); block 441
+        // (66150 frames) is not in the last half second
+        TimelineFollow f;
+        const Tally t = tally(f, 588, 150, [](int i) { return i == 440 ? -400 : 400; });
+        CHECK_EQ(t.at, 587);
+        CHECK_EQ(t.by, 272);
+        CHECK_EQ(t.fades, 1);
+    }
+}
+
+TEST(timeline_catchup_thresholds)
+{
+    // a catch-up fade needs the whole 2 s window behind (owed > 0, a late half second alone waits for the next
+    // window) and a catch-up beyond FADE (exactly FADE is stepped). Default window: no quiet time
+    {
+        TimelineFollow f;
+        CHECK(tally(f, 345, BLOCK, [](int i) { return i < 258 ? 0 : 400; }).at < 0);
+    }
+    {
+        TimelineFollow f;
+        CHECK_EQ(tally(f, 345, BLOCK, constant(TimelineFollow::FADE + TimelineFollow::HOLD)).jumps, 0);
+    }
+}
+
+TEST(timeline_lift_thresholds_are_exact)
+{
+    // #51's lift (margin 512): a low end below -384 in more than 1/16 of the blocks, a range below 768, and a lifted
+    // mean up to STEP. Exactly -384, exactly 1/16 and exactly 768 do not lift; a lifted mean of exactly STEP does
+    auto steps = [](int64_t frames, int n, auto err) {
+        TimelineFollow f;
+        f.set_window(RATE / 2);
+        f.set_margin(512);
+        return tally(f, n, frames, err).steps;
+    };
+    CHECK_EQ(steps(BLOCK, 3 * RATE / BLOCK, [](int i) { return i % 2 ? 0 : -384; }), 0);
+    CHECK_EQ(steps(251, 500, [](int i) { return i % 16 ? 0 : -400; }), 0); // 352 blocks a window, 22 low
+    CHECK_EQ(steps(BLOCK, 3 * RATE / BLOCK, [](int i) { return i % 2 ? 368 : -400; }), 0);
+    CHECK(steps(BLOCK, 3 * RATE / BLOCK, [](int i) { return i % 5 ? 128 : -512; }) > 0); // mean 0, lifted to -256
 }

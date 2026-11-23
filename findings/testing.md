@@ -250,3 +250,20 @@ without a build type has libstdc++ bounds assertions on (GCC 15), so run the too
 killed (45 %)**. In the E582 code every behaviour-changing survivor now has a test (3, two new tests, 900 in all);
 the rest there are boundary mutants with the same result. The older code's ~45 survivors are not checked yet
 (findings/log/2026-11.md, 2026-11-23).
+**The older code's survivors (same day):** 52, of which 32 changed behaviour and are now killed by 14 new tests (plus
+one CHECK in an existing one; 914 tests). Each was applied by hand in the worktree, built (Release) and run: each
+fails its test (:42 by SIGILL, the next `set_window` divides by the window of 0). They were: the fallbacks for a
+window or margin of 0 (:42, :55), the `play_started()` default (:79), exactly CALM (:82), a learn without a Play
+window (:85, :128), a burst of exactly JUMP (:134), the learn second without a pre-shift (:139, :151), the `expects()`
+edges (:102), the windows ending on exact block counts (:156, :174, :183, :185, :264), a far-side flip (:171), a
+jump only the 2 s mean shows (:191 `||`), and every "beyond" limit taken as "at": AT_ONCE (:154), -JUMP in the Play
+window and the mean (:158, :191), STEP (:193), the catch-up's `owed_ > 0` and FADE (:199), the lift's -3/4 margin,
+1/16, range and STEP (:182, :187, :207). The 20 that survive change nothing: min/max with the same value at the
+tie (:81 x2, :123, :131, :134 `burst < 2 * window_`, :159, :181 x2, :223, :263 x2); `0` either way at 0 (:95 x2);
+counters that are only read as `> 0`/`<= 0`, so going below 0 is the same as 0 (:124 fresh_left_, :126 quiet_left_);
+a guard that cannot be false, since the window's last block is always in its tail (:188 `tail_n_ > 0`); a catch-up
+of +-128 is never past FADE (:198 x2); the lift at `lo + margin_ / 2 == owed_` sets owed_ to the value it already
+has (:207); and owed_ is never 0 inside `owed_ != 0` (:211). **timelinefollow.h: 88 of 119 killed, all 31 survivors
+equivalent.** No survivor was a bug. One judgement call: :199 `owed_ >= 0` would crossfade a catch-up when only the
+window's last half second is behind (its mean is inside STEP). The real code waits one more window and then fades
+the same amount (timeline_xrun_catches_up_in_one_crossfade at 11.4 s). Pinned as it is, in timeline_catchup_thresholds.
