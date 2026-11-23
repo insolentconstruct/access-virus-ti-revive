@@ -656,6 +656,17 @@ TEST(timeline_preshift_window_expects_the_offset)
     CHECK(!g.expects(9000)); // nothing pre-shifted
 }
 
+TEST(timeline_loop_restart_after_a_learned_burst_never_preshifts)
+{
+    // a burst is learned, then the host restarts its loop (no burst): the learned shift is for a Play from a stop only
+    Model m;
+    m.blocks(RATE / BLOCK);
+    m.play();
+    m.blocks(22, BLOCK);
+    m.blocks(2 * RATE / BLOCK);
+    CHECK_EQ(m.f.play_started(false), 0);
+}
+
 TEST(timeline_anchor_keeps_the_learned_burst)
 {
     Model m;
@@ -1082,6 +1093,19 @@ TEST(timeline_xrun_after_a_play_still_crossfades)
         CHECK_EQ(r.fades(), 1);
         CHECK_EQ(r.steps, 0);
     }
+}
+
+TEST(timeline_xrun_inside_the_quiet_time_jumps_hard)
+{
+    // an xrun within QUIET after a Play (4 s) is not crossfaded: there an offset may still be the burst's (E581). Only
+    // the pre-shift's own rest fades in that time. 1500 lost: beyond JUMP for half a second, inside QUIET
+    const int64_t L = latency(128);
+    const Reaper r = reaper({{10, L, true}, {17, L, true}}, 128, 30, 1500, 18.2);
+    CHECK_EQ(r.fades(), 0);
+    int late = 0;
+    for (const Reaper::Jump &j : r.jumps)
+        late += j.at >= 18.2 && j.at < 20 && !j.fade && j.by > 1300;
+    CHECK_EQ(late, 1);
 }
 
 TEST(timeline_logic_varying_bursts_no_click_after_play)

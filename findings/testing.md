@@ -245,3 +245,8 @@ surviving mutant equivalent or sanitizer-only.** No survivor was a bug. Notes: m
 `read_missing_never_asks_past_program_127` kills its mutant through the memory layout (an empty dump placed after
 the bank), the past-the-end reads in infopage/editormenus through a marker in the vectors' spare capacity; a build
 without a build type has libstdc++ bounds assertions on (GCC 15), so run the tool on a Release build as before.
+
+**2026-11-23, timelinefollow.h** (first run on this file, copy of 775d6f8, `work/mutation-582.txt`): **53 of 119
+killed (45 %)**. In the E582 code every behaviour-changing survivor now has a test (3, two new tests, 900 in all);
+the rest there are boundary mutants with the same result. The older code's ~45 survivors are not checked yet
+(findings/log/2026-11.md, 2026-11-23).

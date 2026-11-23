@@ -13,7 +13,7 @@ Last update: 2026-11-23 afternoon: #41 closed; #37 first-note crackle FIXED in c
   site rebuilt by hand); 0.8.42 and 0.8.43 release details in log/2026-11.md (2026-11-22 entry).
 - **Round 0.8.44** on branch round-0.8.44, latest pre-release **v0.8.44-rc6** (fe65ab5): marker fix (E568), Play
   pre-shift (E574), first Play at small blocks (E577), #51 two-clock guard (E578), xrun crossfade (E579), Logic
-  latency nudge (E580), burst learning fix (E581), library-save logging (E576). 897 tests, hil.sh ALL PASS. After rc6: E582 (Logic burst room + crossfaded rest, 898 tests; not released).
+  latency nudge (E580), burst learning fix (E581), library-save logging (E576). 897 tests, hil.sh ALL PASS. After rc6: E582 (Logic burst room + crossfaded rest, 900 tests; not released). Mutation timelinefollow.h 53/119 (first run): new code's behaviour survivors killed, older code's ~45 open.
 - Our TI2 Desktop: back on Linux (2026-11-22 evening, broker socket active); it was on the Mac 16:40-~18:00 for the #41 Logic test and was FROZEN on arrival there (power cycle; cause open). User flashed ROM Z on it in early November (E500). From a VM: VM=win11 scripts/vm.sh detach, then systemctl --user start tirevive-broker.socket.
 - Linux: ~/.vst3 = dev build 40329e7a (E582 fix, 2026-11-23, for the user's REAPER listening); rc6 code backed up in work/plugin-backup-rc6-85bf0974. Backups: work/plugin-backup-ce68817b (rc3 code),
   work/rc2-plugin-backup, My Patches.mid in work/lib-test. ALSA test: Sound Core3D off in PipeWire with
