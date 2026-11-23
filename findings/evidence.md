@@ -5409,3 +5409,28 @@ process ("another program uses Virus 1").
 - **Method:** plug-in log over SSH, code reading, unit test
 - **Confidence:** HIGH (cause from the log + code) / not yet verified on the Mac (fix)
 - **Hardware:** yes (TI2 Desktop on the Mac: the bug); fix not yet run
+
+### E570
+
+Follow-up to E549 and issue #43, firmware 5.1.7.00. The host 8051 stored-single receive
+path clears the staged flags byte XDATA:0x4d01 at CODE:0x40db–0x40df before the stored
+copy at CODE:0x40f0 (through CODE:0x562d). This is payload byte 1, or dump byte 10
+counting from zero after the nine-byte header, and supplies the firmware mechanism
+inferred in E549. In two retained write-then-read runs of one synthetic single at
+bank 1/program 5, all 512 ordered copied bytes and all 524 dump-reply bytes matched
+a model derived from this receive path and the reply serializer; neither run had a
+differing offset. The runs used the emu8051-based virus8051_oracle_io host harness,
+starting with emulator reset-zero memory, configured device ID 0 and Receive Dump 1,
+mode 2 setup, an idle panel and independent writable logical data pages. The model
+assumes stable configuration, successful helper returns and a completed store before
+the read; ID 0 is a setup premise, not the ROM default. The synthetic record was zero
+except decimal markers 31/37/43/47 at payload offsets 100/255/256/511, so these runs
+check agreement for that input, not a hardware test of clearing a nonzero flag.
+This is emulation only: physical storage backing, hardware persistence and DSP
+consumption are not established.
+
+- **Date:** 2026-11-23
+- **Pointer:** E549; firmware 5.1.7.00 host 8051 image (SHA256 prefix dd57749a1efb1b88), CODE:0x40db–0x40df/0x40f0/0x562d, XDATA:0x4d01; retained emulator run summaries and comparison table (SHA256 prefixes 5e0c698d5bcdb096, 77d673d7752d4c4a, e2ffbaf7e0d4d6f4)
+- **Method:** static receive-path and reply-serializer review; review of retained emu8051 host-harness write/read summaries and source-derived model comparisons, with fixed device ID 0/Receive Dump 1 premises; no new execution
+- **Confidence:** HIGH (firmware flag-clear operation and recorded 512/524-byte agreement under the stated premises) / MED (composed receive-to-reply model) / open (hardware persistence)
+- **Hardware:** no
