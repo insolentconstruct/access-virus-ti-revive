@@ -5770,3 +5770,26 @@ to the probe", the TI2 slow to answer after a reopen (it froze on the Mac on 202
 - **Method:** reporter's diag.log, model unit tests failing before / passing after, TI2 nativehost A/B against the rc6 code, hil.sh
 - **Confidence:** HIGH (the moves at Play from the log and on the TI2) / MEDIUM (that these moves are the crackle he hears) / open (heard in Logic or by us)
 - **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in Logic)
+
+### E583
+
+#54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block 64):
+clicks on USB 1 at 48 kHz, clean at 44.1 kHz and on the analog Out 1 - the picture of #34 (E560), which a new USB
+cable fixed (reporter 2026-11-18). Plug-in log (diag-click.log, 2181 stats windows): raw peaks of USB 1 RIGHT at
+full scale while left is normal in 4 windows (646 26985, 5081 32640, 613 31097, 6195 32383; each window is the last
+second of 10 s, so more clicks than these are possible); the first raw pair's right channel at 258 (or 515) in silence
+while left is at 3-4 in 1467 of 2181 windows (3 3 in 675). drops 0 while playing (one at stream start, filled 1568),
+no byte slips, no stream restarts, read margin min 64-128, timeline steps 0. The first RAM bank sync had 19 "reply
+with a wrong checksum" retries (all 512 patches arrived) - none in any other report's log we have or our hil.sh runs.
+Reading (inferred, not tested): damaged bits on the USB link (cable, hub, port) before Core Audio hands the values to
+the plug-in (audioin.cpp: Float32 * 32768); 48 kHz carries ~9 % more audio data per packet than 44.1 kHz. Broker log:
+the plug-in owns the Virus, no LIBUSB_ERROR_ACCESS; the read/write errors at 19:31:09 end with NO_DEVICE (the Virus
+switched off or unplugged). Asked (issuecomment-7109412140): another short USB 2.0 cable, directly on the Mac, the same
+sequence again, the log if it still clicks; libusb audio on current macOS pointed to #40.
+
+- **Date:** 2026-11-23
+- **Pointer:** issue #54 (diag-click.log, tirevive-vtibroker.log in work/issue54, not in git), E560 (#34), native/plugin/source/virusplugin.cpp (stats: raw peaks), native/src/device/memsync.cpp (wrong checksum)
+- **Method:** the plug-in log's stats lines (raw peaks per pair, drops, margin) and retries, the broker log
+- **Confidence:** HIGH (one-sided full-scale values and checksum retries in the log, clean timeline) / LOW (the cable as the cause, until the reporter tries one)
+- **Hardware:** no (the reporter's unit)
+
