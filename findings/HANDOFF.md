@@ -5,7 +5,7 @@ NEXT. At most 150 lines; the Stop hook (`.claude/hooks/handoff-check.sh`) refuse
 how goes into the dated log [`log/2026-11.md`](log/2026-11.md) (newest first); older logs are in [`log/`](log/).
 Device/protocol knowledge goes into [`evidence.md`](evidence.md). Update this file in the same commit as the work._
 
-Last update: 2026-11-23 evening: user's REAPER listening of E582+E584 (52fa05f5) clean at 128/256/512/2048; v0.8.44-rc7 tagged (c7e0733), release CI 45258082055: mac-ventura failed on the artifact upload (ENOTFOUND), rerun --failed; WHEN GREEN post the approved replies: #37 + #51 (rc7), #54 (solved by a shorter cable, close), #48 (new log without a distorted stretch: ask when + rc7). Wait on the reporters (NEXT 1).
+Last update: 2026-11-23 evening: user's REAPER listening of E582+E584 (52fa05f5) clean at 128/256/512/2048; v0.8.44-rc7 tagged (c7e0733), release CI 45258082055 all green after a --failed rerun of mac-ventura (artifact upload ENOTFOUND), pre-release with 8 assets; posted on #37 (issuecomment-7113293854), #51 (-7113294319), #48 (-7113294840: when distorted + rc7); #54 closed as solved (shorter cable). Wait on the reporters (NEXT 1).
 
 ## Where things stand
 
@@ -42,7 +42,7 @@ Last update: 2026-11-23 evening: user's REAPER listening of E582+E584 (52fa05f5)
 |---|---|---|---|
 | #32 | (no change since 11-10) | reporter | before 11-10 |
 | #47 | NEW 2026-11-18: Snow "connected but not found" in Ableton; form says Windows 11 / TI Desktop, text macOS 27.0.1 / Snow; no logs, no version (E134 or E115 pattern?) | reporter: platform, model, version, Access/AURA, diag.log, broker log, ioreg, MIDI Drivers ls (issuecomment-7003657269) | 2026-11-19 |
-| #37 | Logic on Catalina (libusb pkg, E561), rc6. Reporter 2026-11-22: crackle on the FIRST notes wherever Play starts, same at I/O 128/512; log work/issue37-rc6/...-2246.txt. Cause (E582): Logic's burst varies ~1200 frames between Plays -> pull-backs + hard jumps + steps at each Play. FIXED 2026-11-23 (room + one crossfade, E582; loss paid twice E584), user's REAPER clean; rc7 reply approved, posted when the release is up. Late notes at Play (E573) stay | reporter: rc7 in Logic, diag.log | 2026-11-22 |
+| #37 | Logic on Catalina (libusb pkg, E561), rc6. Reporter 2026-11-22: crackle on the FIRST notes wherever Play starts, same at I/O 128/512; log work/issue37-rc6/...-2246.txt. Cause (E582): Logic's burst varies ~1200 frames between Plays -> pull-backs + hard jumps + steps at each Play. FIXED 2026-11-23 (room + one crossfade, E582; loss paid twice E584), user's REAPER clean; rc7 posted (issuecomment-7113293854). Late notes at Play (E573) stay | reporter: rc7 in Logic, diag.log | 2026-11-22 |
 | #38 | macOS 27 Live: AU/editor crash = SOLVED by the reporter (Access .pkg was missing; plug-in opens; Virus not connected yet) | reporter: note after connecting the Virus, then close (issuecomment-6948868845) | 2026-11-17 |
 | #40 | (ours) macOS libusb audio as an option? | #39 reporter; #37 = first real data point (works) | 2026-11-13 |
 | #53 | NEW 2026-11-22: M1 Max, Sequoia 15.8.3, latest OS + TI Revive: every note distorted with an echo/repeat, some lag; asks if ROM banks can load automatically at start. User answered 2026-11-23 (power cycle after the first bank sync, else plug-in log). Echo/repeat may be the FAQ "every note sounds twice" case (E530/E531); ROM question not answered yet | reporter: log | 2026-11-23 |
