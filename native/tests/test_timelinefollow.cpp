@@ -802,6 +802,7 @@ struct Hiccup {
     int64_t xrun = 0;                // at 10 s the host drops this many blocks (REAPER xrun): the ring runs on, we do not
     int64_t at_ms = 10000;           // when the dip or the xrun comes (10 s: where a 2 s mean window starts)
     int64_t lost = 0;                // an xrun of any size: from then on the ring is this many frames further
+    int block_after = 0;             // from at_ms on this block size (0: as before; Logic's playback -> live mode)
 };
 
 struct Moves {
@@ -817,13 +818,17 @@ Moves pipewire(const Hiccup &c, int seconds = 60)
     f.set_window(rate / 2);
     f.set_margin(MARGIN);
     Moves r;
-    int64_t tl = 96 - chunk + c.block; // err = newest - tl: -96..352
-    for (int64_t t = 0; t < seconds * rate; t += c.block) {
+    // err = newest - tl: -96..352; a block of whole chunks sees a steady 128 (HOLD)
+    int64_t tl = c.block < chunk ? 96 - chunk + c.block : -128;
+    int block = c.block;
+    for (int64_t t = 0; t < seconds * rate; t += block) {
+        if (c.block_after && t >= at)
+            block = c.block_after;
         if (t >= at && t < at + c.xrun * c.block)
             continue; // a dropped host cycle: process() is not called
         const int64_t newest = t / chunk * chunk - (t >= at && t < at + c.dip_blocks * c.block ? c.dip : 0) +
                                (t >= at ? c.lost : 0);
-        const TimelineFollow::Move m = f.update(newest - tl, c.block, true);
+        const TimelineFollow::Move m = f.update(newest - tl, block, true);
         if (m.fade)
             r.fades++, r.faded += m.delta;
         else if (m.jump)
@@ -832,7 +837,7 @@ Moves pipewire(const Hiccup &c, int seconds = 60)
             r.fwd++;
         else if (m.delta < 0)
             r.back++;
-        tl += m.delta + c.block;
+        tl += m.delta + block;
     }
     return r;
 }
@@ -904,6 +909,33 @@ TEST(timeline_large_xrun_catches_up_in_one_crossfade)
             CHECK_EQ(m.jumps, 0);
             CHECK_EQ(m.fades, 1);
             CHECK(m.faded >= lost - 64 && m.faded <= lost + 192);
+            CHECK_EQ(m.fwd + m.back, 0);
+        }
+}
+
+TEST(timeline_logic_lost_frames_one_crossfade_at_any_phase)
+{
+    // #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28): crossfaded catch-ups while playing. At a steady
+    // block of 512 (18:54:52-18:56:10 UTC) they pay frames Logic did not process (host frames 436736 / Virus frames
+    // 441441, 439808 / 441000 in their 10 s windows; the plug-in sees no xrun report), so a catch-up is needed - but
+    // "caught up by 1461 frames (crossfaded), err 2373" and 1108 a second later fit one loss of ~2300 paid twice: a 2 s
+    // mean window that ends shortly after the loss fades by its last half second's mean, diluted by the blocks before
+    // the loss; the rest is a second fade (beyond JUMP) or one-frame steps. Logic's switch from its playback mode
+    // (block 2048) to the live one (128) likely drops its read-ahead the same way (a fade of 1339 right after it in
+    // the log). One loss, one crossfade: at every phase of the mean window
+    struct Case {
+        int block, block_after;
+        int64_t lost;
+    };
+    for (const Case &k : {Case{512, 0, 2300}, Case{512, 0, 1024}, Case{128, 0, 1400}, Case{2048, 128, 1400},
+                          Case{2048, 512, 1400}})
+        for (int64_t at_ms = 10000; at_ms < 12000; at_ms += 50) {
+            Hiccup c;
+            c.block = k.block, c.block_after = k.block_after, c.lost = k.lost, c.at_ms = at_ms;
+            const Moves m = pipewire(c);
+            CHECK_EQ(m.jumps, 0);
+            CHECK_EQ(m.fades, 1);
+            CHECK(m.faded >= k.lost - 192 && m.faded <= k.lost + 192);
             CHECK_EQ(m.fwd + m.back, 0);
         }
 }
