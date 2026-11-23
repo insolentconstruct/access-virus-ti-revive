@@ -1359,11 +1359,11 @@ TEST(timeline_far_side_flip_restarts_the_half_second)
 TEST(timeline_offset_only_the_mean_shows_jumps_after_two_seconds)
 {
     // behind beyond JUMP on average, every other block back inside: the half-second rule never completes, the 2 s
-    // mean jumps by it
+    // mean jumps by it - on the first block inside JUMP once it is due (block 344 is at 1500: it waits one, E584)
     TimelineFollow f;
     f.set_window(RATE / 2);
     const Tally t = tally(f, 3 * RATE / BLOCK, BLOCK, [](int i) { return i % 2 ? -100 : 1500; });
-    CHECK_EQ(t.at, 344);
+    CHECK_EQ(t.at, 345);
     CHECK(t.by > TimelineFollow::JUMP);
 }
 
