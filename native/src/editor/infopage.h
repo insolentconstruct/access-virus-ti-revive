@@ -64,7 +64,9 @@ inline const std::vector<ChangeNote> &changelog()
           "project that plays right after opening gets its timing at once (before, only after the music paused).",
           "Play from stop (#37): when the DAW reads ahead at Play, TI Revive learns how far and at the next Play "
           "shifts back by that much, so the audio no longer jumps after Play (tested in REAPER on Linux, not in "
-          "Logic). The note exactly at Play still comes late: leave two bars of silence before the first notes.",
+          "Logic). Logic reads ahead by a different amount at each Play: TI Revive keeps room for that and closes "
+          "the rest with one short crossfade instead of crackling jumps on the first notes. The note exactly at Play "
+          "still comes late: leave two bars of silence before the first notes.",
           "Library saves (#41): a change is kept only when its file was written, every save goes into the log, and "
           "a failed one shows \"Library not saved:\" on the plug-in display (before, it failed silently)."}},
         {"0.8.43",

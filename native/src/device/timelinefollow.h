@@ -70,7 +70,12 @@ public:
     // late by its size. A Play from a stop measures its burst (the most-ahead error over a second, without our own
     // moves); the next one returns it as a shift back BEFORE the burst: its reads then hit frames that are there
     // (the quiet before Play), nothing jumps afterwards, and only notes inside the burst play at once instead of on
-    // time. A burst larger or smaller than learned leaves the rest to the jumps below and is learned anew
+    // time. A burst larger or smaller than learned leaves the rest to the jumps below and is learned anew.
+    // Logic's burst differs by up to ~1200 frames from Play to Play (#37 rc6 log): a larger one read past the newest
+    // frame and jumped back hard, a smaller one jumped forward hard - on the first notes (crackle). So the shift keeps
+    // the room of the largest difference seen between two bursts (spread_) plus a block up to JUMP (a burst counts
+    // in whole blocks), at most a quarter; a host whose bursts differ by HOLD or less (REAPER ~30) gets none. The
+    // rest is paid in one crossfade when the learn second ends (update)
     int64_t play_started(bool from_stop = false)
     {
         const int64_t lo = cur_min_ < prev_min_ ? cur_min_ : prev_min_, hi = cur_max_ > prev_max_ ? cur_max_ : prev_max_;
@@ -78,7 +83,9 @@ public:
         play_left_ = calm || fresh_left_ > 0 ? 2 * window_ : 0;
         play_frames_ = 0, play_min_ = 0;
         const bool learn = from_stop && play_left_ > 0;
-        shift_ = learn && learned_ > JUMP ? learned_ : 0;
+        const int64_t want = spread_ > HOLD ? spread_ + (block_ < JUMP ? block_ : JUMP) : 0;
+        const int64_t room = want < learned_ / 4 ? want : learned_ / 4;
+        shift_ = learn && learned_ > JUMP ? (learned_ + room < 2 * window_ ? learned_ + room : 2 * window_) : 0;
         learn_left_ = learn ? 2 * window_ : 0;
         learn_sum_ = -shift_, learn_min_ = 0;
         // where the burst is measured from: the error's normal low before Play (the cadence), but after a setActive
@@ -110,6 +117,7 @@ public:
     Move update(int64_t err, int64_t frames, bool marker)
     {
         spread(err, frames);
+        block_ = frames;
         const int64_t last = last_err_;
         last_err_ = err;
         since_lo_ = err < since_lo_ ? err : since_lo_;
@@ -122,11 +130,23 @@ public:
             const int64_t raw = err + learn_sum_; // the error as if we had not moved since Play
             learn_min_ = raw < learn_min_ ? raw : learn_min_;
             if (learn_left_ <= 0) {
-                const int64_t burst = base_ - learn_min_;
+                const int64_t burst = base_ - learn_min_, before = learned_;
                 learned_ = burst > JUMP ? (burst < 2 * window_ ? burst : 2 * window_) : 0;
+                const int64_t d = before > 0 && learned_ > 0 ? (learned_ > before ? learned_ - before : before - learned_) : 0;
+                // the host's own variation: the largest seen. shortcut: never shrinks, so one mis-learned burst gives
+                // every later Play room (at most a quarter) and a fade; decay it if a host shows that
+                spread_ = d > spread_ ? d : spread_;
                 const bool shifted = shift_ > 0;
+                const int64_t shifted_by = shift_;
                 shift_ = 0;
-                if (shifted && marker && err > JUMP) // the burst was smaller than the shift: forward by the rest now
+                // the burst was smaller than the shift: forward by the rest, crossfaded (the notes sound by now). The
+                // rest from the lowest error of the second (learn_min_): no read ends up ahead. Only if nothing else
+                // moved the timeline in that second (learn_sum_ still the shift): a jump there was another burst's
+                // (REAPER's setActive cycle 0.3 s before Play: the rest then faded forward and jumped back)
+                const int64_t rest = learn_min_ + shifted_by - base_;
+                if (shifted && marker && learn_sum_ == -shifted_by && rest > FADE)
+                    return faded(rest, true);
+                if (shifted && marker && err > JUMP) // a rest that the lowest error does not show: as before
                     return jumped(err);
             } else if (shift_ > 0 && err >= -JUMP)
                 return {0, false}; // pre-shifted: the burst eats the shift, no move meanwhile
@@ -213,12 +233,15 @@ private:
     // a lasting offset in steady playback (host xrun, E579): the same jump, which the read path crossfades
     // (crossfade.h). Forward only: an xrun leaves the timeline behind the ring, a host ahead of it is a burst (and the
     // old frames of a jump back are not in the ring yet anyway). Elsewhere the hard jump, as before (E581)
-    Move faded(int64_t d)
+    // `burst_rest`: the rest of a pre-shift after its burst (play_started), faded inside the quiet time too
+    Move faded(int64_t d, bool burst_rest = false)
     {
-        if (d <= 0 || quiet_left_ > 0)
+        if (d <= 0 || (quiet_left_ > 0 && !burst_rest))
             return jumped(d);
         restart();
         learn_sum_ += d;
+        if (burst_rest)
+            quiet_left_ = QUIET * window_;
         return {d, true, true};
     }
 
@@ -255,6 +278,8 @@ private:
     int64_t last_err_ = 0; // the previous block's err
     int64_t since_lo_ = INT64_MAX; // the lowest err since the last jump or anchor
     int64_t learned_ = 0;  // the last Play's burst (frames), at most a second
+    int64_t spread_ = 0;   // the largest difference between two learned bursts (the pre-shift's room)
+    int64_t block_ = 0;    // the last block's frames
     int64_t shift_ = 0;    // the pre-shift of this Play while its burst eats it
     int64_t learn_left_ = 0, learn_sum_ = 0, learn_min_ = 0, base_ = 0;
     int64_t cur_frames_ = 0, cur_min_ = INT64_MAX, cur_max_ = INT64_MIN, prev_min_ = INT64_MAX, prev_max_ = INT64_MIN;

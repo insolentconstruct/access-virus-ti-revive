@@ -5738,3 +5738,35 @@ with no Play window still waits half a second (also fd33fc4); not heard in REAPE
 - **Method:** user diag.log, a model of REAPER's bursts run against both headers, unit tests failing on e762e50 / passing after, TI2 nativehost A/B of three builds, hil.sh
 - **Confidence:** HIGH (rc5's burst jumps equal fd33fc4's, model and TI2; the learning fault and its fix on the TI2) / open (the user's REAPER retest)
 - **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in REAPER)
+
+### E582
+
+#37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 with
+blocks of 128): the reporter hears crackling on the first notes wherever Play starts, the same at I/O 128 and 512.
+The log's four pre-shifted Plays learned 10779, 11847, 11847, 10642 frames: Logic's burst varies by up to ~1200 frames
+from Play to Play (REAPER: ~30, E581). A burst larger than the shift read past the newest frame (1 block pulled back by
+1097 / 343 / 516) and jumped back hard, a smaller one jumped forward hard; the 10 s windows with a Play show 17-45
+one-frame timeline steps and read margin min 0, windows without a Play 0 steps. All of it falls on the first notes after
+Play. Fix (timelinefollow.h): the pre-shift keeps room = the largest difference seen between two learned bursts plus a
+block up to JUMP, at most a quarter of the burst, only when that difference exceeds HOLD (REAPER gets none); when the
+learn second ends, the rest (from the learn second's lowest error, so no read ends up ahead) is one crossfaded move
+(Move::fade, inside the quiet time too), only if nothing else moved the timeline in that second (a burst 0.3 s before
+the Play otherwise faded forward and jumped back in the model). Unit test timeline_logic_varying_bursts_no_click_after_play
+(the log's bursts, blocks 512 and 2048) failed before (3 pulled back, 4 hard jumps after the third Play at 512), passes;
+timeline_preshift_rest_after_play_is_one_crossfade replaces the E581 rule that stepped the rest. TI2 nativehost A/B
+(44.1 kHz, 7 Plays from a stop with --ahead 268.6/244.4/268.6/268.6/241.3/268.6/244.4 ms, C4 every second, 60 s),
+from the second Play on: rc6 code at 512: 7 pulled back, 3 hard jumps (868, -1155, 1074); fix: 1 hard jump (-1289, the
+second Play, before a spread is known), 4 fades (497-2799), 0 steps, 5 pulled back (largest 777) in the 10 s window
+of the second and third Play (likely the second's jump back; the windows do not say), none later; at 2048: rc6
+4 pulled back, 4 hard jumps, 60 steps; fix 0 pulled back, 0 hard jumps, 0 steps, 6 fades (542-2778). The REAPER pattern
+of E581 (run.sh, block 128 / 256) is unchanged against E581's build: shifts 3680-3712 / 3807-3840, the same xrun fades,
+192 / 0 steps after the first Play's jump. Cost: the rest is a crossfaded skip of up to ~63 ms about a second after Play
+(not heard yet). hil.sh on the TI2 with the fix: one item failed per run (H2-2 first note at 17 s, then H2-1 no
+sound), the rc6 build failed the same way (H1 first note at 17 s): the start-up messages queued for ~10 s / "no reply
+to the probe", the TI2 slow to answer after a reopen (it froze on the Mac on 2026-11-22), not the timeline.
+
+- **Date:** 2026-11-23
+- **Pointer:** native/src/device/timelinefollow.h (spread_, block_, play_started room, learn end rest, faded(burst_rest)); native/tests/test_timelinefollow.cpp (timeline_logic_varying_bursts_no_click_after_play, timeline_preshift_rest_after_play_is_one_crossfade, the learned-burst tests); work/issue37-rc6/TI-Revive-logs-2026-11-22-2246.txt, work/ab-37 (runs, not in git), work/hil/20261123-*
+- **Method:** reporter's diag.log, model unit tests failing before / passing after, TI2 nativehost A/B against the rc6 code, hil.sh
+- **Confidence:** HIGH (the moves at Play from the log and on the TI2) / MEDIUM (that these moves are the crackle he hears) / open (heard in Logic or by us)
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in Logic)

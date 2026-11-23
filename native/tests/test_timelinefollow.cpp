@@ -36,8 +36,8 @@ struct Ring {
 };
 
 struct Result {
-    int jumps = 0, steps = 0;
-    std::vector<int64_t> jump_at, jump_by;
+    int jumps = 0, steps = 0; // jumps: hard and crossfaded ones
+    std::vector<int64_t> jump_at, jump_by, hard_at; // hard_at: the jumps without a crossfade
     std::vector<int64_t> t, err;
     std::vector<int64_t> shift_at, shift_by; // pre-shifts at Play (from a stop, a burst learned before)
 };
@@ -58,6 +58,8 @@ Result run(const std::vector<int64_t> &calls, const Ring &ring, bool marker = tr
         if (activated && next_play < plays.size() && c >= plays[next_play])
             f.activated();
         const TimelineFollow::Move m = f.update(err, BLOCK, marker);
+        if (m.jump && !m.fade)
+            r.hard_at.push_back(c);
         if (m.jump)
             r.jumps++, r.jump_at.push_back(c), r.jump_by.push_back(m.delta);
         else if (m.delta != 0)
@@ -551,10 +553,10 @@ bool in_sync_after(const Result &r, int64_t play)
             return false;
     return true;
 }
-int jumps_between(const Result &r, int64_t a, int64_t b)
+int jumps_between(const Result &r, int64_t a, int64_t b, bool hard_only = false)
 {
     int n = 0;
-    for (int64_t t : r.jump_at)
+    for (int64_t t : hard_only ? r.hard_at : r.jump_at)
         n += t >= a && t < b;
     return n;
 }
@@ -579,15 +581,16 @@ TEST(timeline_learned_burst_preshifts_the_next_play)
 
 TEST(timeline_learned_burst_too_large_jumps_forward_and_learns_less)
 {
-    // the next burst is smaller (12 blocks instead of 22): the timeline is behind by the rest, a jump forward fixes
-    // it, and the third Play shifts by the new size
+    // the next burst is smaller (12 blocks instead of 22): the timeline is behind by the rest, a move forward fixes
+    // it, and the third Play shifts by the new size plus the room for a burst that varies (at most a quarter)
     const std::vector<int64_t> plays = {5 * RATE, 12 * RATE, 19 * RATE};
     const Result r = run(steady_with_plays(25, plays, 0, {22, 12, 12}), Ring{}, true, plays, false, true);
     CHECK(r.shift_by.size() == 2);
     if (r.shift_by.size() == 2)
-        CHECK(r.shift_by[1] <= -12 * BLOCK + 441 && r.shift_by[1] >= -12 * BLOCK - 441);
+        CHECK(r.shift_by[1] <= -12 * BLOCK + 441 && r.shift_by[1] >= -12 * BLOCK * 5 / 4 - 441);
     CHECK(in_sync_after(r, plays[1]));
-    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE) == 0);
+    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE, true) == 0); // the room's rest is one crossfade
+    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE) <= 1);
 }
 
 TEST(timeline_learned_burst_too_small_jumps_the_rest_and_learns_more)
@@ -596,9 +599,10 @@ TEST(timeline_learned_burst_too_small_jumps_the_rest_and_learns_more)
     const Result r = run(steady_with_plays(25, plays, 0, {10, 22, 22}), Ring{}, true, plays, false, true);
     CHECK(r.shift_by.size() == 2);
     if (r.shift_by.size() == 2)
-        CHECK(r.shift_by[1] <= -22 * BLOCK + 441 && r.shift_by[1] >= -22 * BLOCK - 441);
+        CHECK(r.shift_by[1] <= -22 * BLOCK + 441 && r.shift_by[1] >= -22 * BLOCK * 5 / 4 - 441);
     CHECK(in_sync_after(r, plays[1]));
-    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE) == 0);
+    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE, true) == 0); // the room's rest is one crossfade
+    CHECK(jumps_between(r, plays[2], plays[2] + 3 * RATE) <= 1);
 }
 
 TEST(timeline_loop_restart_never_preshifts)
@@ -937,6 +941,7 @@ struct Reaper {
     std::vector<int64_t> shifts; // the pre-shift of each Play (0: nothing learned)
     int steps = 0, pulled = 0;   // pulled: blocks read past the newest frame (err after the move < -margin)
     double last_pulled = -1;     // s
+    std::vector<double> step_at, pulled_at; // s
     int fades() const
     {
         int n = 0;
@@ -981,9 +986,9 @@ Reaper reaper(const std::vector<Burst> &bursts, int block, double seconds, int64
             if (m.jump)
                 r.jumps.push_back({(double)t / rate, m.delta, m.fade});
             else if (m.delta != 0)
-                r.steps++;
+                r.steps++, r.step_at.push_back((double)t / rate);
             if (err - m.delta < -MARGIN)
-                r.pulled++, r.last_pulled = (double)t / rate;
+                r.pulled++, r.last_pulled = (double)t / rate, r.pulled_at.push_back((double)t / rate);
             tl += m.delta;
             if (k == 0 && play) {
                 const int64_t s = f.play_started(true);
@@ -1053,17 +1058,18 @@ TEST(timeline_burst_before_play_does_not_spoil_the_learned_burst)
         }
 }
 
-TEST(timeline_preshift_rest_after_play_steps_not_fades)
+TEST(timeline_preshift_rest_after_play_is_one_crossfade)
 {
     // rc5 log: a Play pre-shifted by 3616, its burst ~290 smaller: the timeline then sat ~290 behind and 4 s later a
-    // window end crossfaded the rest (287). Right after a Play that rest is the burst's, not an xrun: it is paid in
-    // one-frame steps as in fd33fc4, at every phase of the mean window
+    // window end crossfaded the rest (287); E581 made it one-frame steps again (167 in the user's REAPER test, can
+    // sound metallic; at Logic's ~1200 a hard jump, #37). Now the rest is one crossfade when the learn second ends,
+    // at every phase of the mean window: no steps, no hard jump after the first Play's
     for (double ph = 0; ph < 2; ph += 0.25) {
         const int64_t L = latency(128);
         const Reaper r = reaper({{10, L, true}, {17 + ph, L - 300, true}}, 128, 30);
-        CHECK_EQ(r.fades(), 0);
-        // steps, or (err past JUMP when the learn second ends) the hard jump forward by the rest of fd33fc4
-        CHECK(r.steps > 0 || (r.hard_before(30).size() == 2 && r.hard_before(30)[1] > 0));
+        CHECK_EQ(r.fades(), 1);
+        CHECK_EQ(r.steps, 0);
+        CHECK_EQ((int)r.hard_before(30).size(), 1);
     }
 }
 
@@ -1075,5 +1081,34 @@ TEST(timeline_xrun_after_a_play_still_crossfades)
         const Reaper r = reaper({{10, L, true}, {17, L, true}}, block, 30, 512, 23);
         CHECK_EQ(r.fades(), 1);
         CHECK_EQ(r.steps, 0);
+    }
+}
+
+TEST(timeline_logic_varying_bursts_no_click_after_play)
+{
+    // #37 (rc6, Logic on Catalina, diag.log 2026-11-22 18:56-18:58 UTC, block 2048): Logic's burst differs by up to
+    // ~1200 frames from Play to Play (learned 10779, 11847, 11847, 10642). A burst larger than the pre-shift read past
+    // the newest frame (1 block pulled back by 343-1097) and jumped back hard; a smaller one jumped forward hard or
+    // was stepped off frame by frame (17-45 steps per Play) - right on the first notes, the reported crackle. Once
+    // two Plays showed the spread, the pre-shift keeps that much room, and the rest after the burst is one crossfade
+    for (const int block : {512, 2048}) {
+        const std::vector<int64_t> b = {11847, 10779, 11847, 11847, 10642, 11847, 10779}; // the log's Plays
+        std::vector<Burst> bursts;
+        for (size_t i = 0; i < b.size(); i++)
+            bursts.push_back({10 + 7.0 * (double)i, b[i], true});
+        const Reaper r = reaper(bursts, block, 10 + 7.0 * (double)b.size());
+        const double from = 10 + 7.0 * 2; // from the third Play on the spread is known
+        int late_pulled = 0, late_steps = 0, late_hard = 0, late_fades = 0;
+        for (double t : r.pulled_at)
+            late_pulled += t >= from;
+        for (double t : r.step_at)
+            late_steps += t >= from;
+        for (const Reaper::Jump &j : r.jumps)
+            if (j.at >= from)
+                (j.fade ? late_fades : late_hard)++;
+        CHECK_EQ(late_pulled, 0);
+        CHECK_EQ(late_hard, 0);
+        CHECK_EQ(late_steps, 0);
+        CHECK(late_fades <= 5); // at most one per Play
     }
 }

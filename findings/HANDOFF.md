@@ -5,7 +5,7 @@ NEXT. At most 150 lines; the Stop hook (`.claude/hooks/handoff-check.sh`) refuse
 how goes into the dated log [`log/2026-11.md`](log/2026-11.md) (newest first); older logs are in [`log/`](log/).
 Device/protocol knowledge goes into [`evidence.md`](evidence.md). Update this file in the same commit as the work._
 
-Last update: 2026-11-23: #41 confirmed by Chris (rc6 fixed it) and closed; #37 log 22:46 analysed (crackle on first notes = 1-frame timeline steps after Play, NEXT 2a); #53 new. Continue with NEXT 2.
+Last update: 2026-11-23 afternoon: #41 closed; #37 first-note crackle FIXED in code (E582: pre-shift room for Logic's varying burst + the rest as one crossfade), TI2 A/B clean, hil.sh fails on TI2 start-ups (rc6 the same); not heard yet. Continue with NEXT 2.
 
 ## Where things stand
 
@@ -13,9 +13,9 @@ Last update: 2026-11-23: #41 confirmed by Chris (rc6 fixed it) and closed; #37 l
   site rebuilt by hand); 0.8.42 and 0.8.43 release details in log/2026-11.md (2026-11-22 entry).
 - **Round 0.8.44** on branch round-0.8.44, latest pre-release **v0.8.44-rc6** (fe65ab5): marker fix (E568), Play
   pre-shift (E574), first Play at small blocks (E577), #51 two-clock guard (E578), xrun crossfade (E579), Logic
-  latency nudge (E580), burst learning fix (E581), library-save logging (E576). 897 tests, hil.sh ALL PASS.
+  latency nudge (E580), burst learning fix (E581), library-save logging (E576). 897 tests, hil.sh ALL PASS. After rc6: E582 (Logic burst room + crossfaded rest, 898 tests; not released).
 - Our TI2 Desktop: back on Linux (2026-11-22 evening, broker socket active); it was on the Mac 16:40-~18:00 for the #41 Logic test and was FROZEN on arrival there (power cycle; cause open). User flashed ROM Z on it in early November (E500). From a VM: VM=win11 scripts/vm.sh detach, then systemctl --user start tirevive-broker.socket.
-- Linux: ~/.vst3 = dev build 85bf0974 (694a51e = rc6 code). Backups: work/plugin-backup-ce68817b (rc3 code),
+- Linux: ~/.vst3 = dev build 40329e7a (E582 fix, 2026-11-23, for the user's REAPER listening); rc6 code backed up in work/plugin-backup-rc6-85bf0974. Backups: work/plugin-backup-ce68817b (rc3 code),
   work/rc2-plugin-backup, My Patches.mid in work/lib-test. ALSA test: Sound Core3D off in PipeWire with
   pactl set-card-profile alsa_card.pci-0000_07_00.0 off, back with output:analog-stereo+input:iec958-stereo.
 - win11 VM: 0.8.43 release (setup /quiet exit 0, VST3 e36f8e6c), shut down (use Stop-Computer: virsh shutdown is
@@ -42,7 +42,7 @@ Last update: 2026-11-23: #41 confirmed by Chris (rc6 fixed it) and closed; #37 l
 |---|---|---|---|
 | #32 | (no change since 11-10) | reporter | before 11-10 |
 | #47 | NEW 2026-11-18: Snow "connected but not found" in Ableton; form says Windows 11 / TI Desktop, text macOS 27.0.1 / Snow; no logs, no version (E134 or E115 pattern?) | reporter: platform, model, version, Access/AURA, diag.log, broker log, ioreg, MIDI Drivers ls (issuecomment-7003657269) | 2026-11-19 |
-| #37 | Logic on Catalina (libusb pkg, E561), rc6. Reporter 2026-11-22: crackle on the FIRST notes wherever Play starts, same at I/O 128 and 512; log work/issue37-rc6/TI-Revive-logs-2026-11-22-2246.txt (new part: one 17 s session at 512, byte-slip restart E488 1 s before the notes, no steps). In the 18:56-18:58 UTC Logic session of the same log every Play window has timeline steps 17-45 + read margin min 0 while sound plays; windows without Play 0 steps = the pre-shift leftover paid in 1-frame steps (NEXT 2a) is the likely crackle; late notes at Play (E573) separate. Also catch-ups during playback (NEXT 2). Not replied yet | us: fix NEXT 2a, then reply | 2026-11-22 |
+| #37 | Logic on Catalina (libusb pkg, E561), rc6. Reporter 2026-11-22: crackle on the FIRST notes wherever Play starts, same at I/O 128/512; log work/issue37-rc6/...-2246.txt. Cause (E582): Logic's burst varies ~1200 frames between Plays -> pull-backs + hard jumps + steps at each Play. FIXED in code 2026-11-23 (room + one crossfade), TI2 A/B clean from the 3rd Play; not heard, not released. Late notes at Play (E573) stay. Also catch-ups during playback (NEXT 2). Not replied yet | us: user listens (REAPER), then rc7 + reply | 2026-11-22 |
 | #38 | macOS 27 Live: AU/editor crash = SOLVED by the reporter (Access .pkg was missing; plug-in opens; Virus not connected yet) | reporter: note after connecting the Virus, then close (issuecomment-6948868845) | 2026-11-17 |
 | #40 | (ours) macOS libusb audio as an option? | #39 reporter; #37 = first real data point (works) | 2026-11-13 |
 | #53 | NEW 2026-11-22: M1 Max, Sequoia 15.8.3, latest OS + TI Revive: every note distorted with an echo/repeat, some lag; asks if ROM banks can load automatically at start. User answered 2026-11-23 (power cycle after the first bank sync, else plug-in log). Echo/repeat may be the FAQ "every note sounds twice" case (E530/E531); ROM question not answered yet | reporter: log | 2026-11-23 |
@@ -84,7 +84,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
 
 1. **Wait on rc6 (v0.8.44-rc6, fe65ab5):** #41 DONE (closed 2026-11-23). Still waiting: #37 (see 2), #51.
    #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log ('pulled back' gone? E578/E579).
-2. FIRST (#37 crackle on the first notes, log 22:46): leftover (a) below = 17-45 1-frame steps per Play in Logic. Then: crossfaded catch-ups during playback in Logic (#37 log 22:28, mixed blocks 128/512/2048, no xrun): reproduce on our Mac in Logic (TI2 to the Mac), find what moves err there, fix test-first. Then timeline leftovers (both as in fd33fc4, E581): (a) after a pre-shifted Play the leftover is paid in 1-frame steps (167
+2. #37 first-note crackle: DONE in code (E582, not heard: user to listen in REAPER with ~/.vst3 40329e7a, Plays from stop; then rc7). hil.sh 2026-11-23: TI2 start-ups slow (H1/H2 first note 17 s or none, 'no reply to the probe', rc6 the same) - power cycle the TI2 and rerun. Then: crossfaded catch-ups during playback in Logic (#37 log 22:28, mixed blocks 128/512/2048, no xrun): reproduce on our Mac in Logic (TI2 to the Mac), find what moves err there, fix test-first. Then timeline leftovers (both as in fd33fc4, E581): (a) after a pre-shifted Play the leftover is paid in 1-frame steps (167
    in the user's REAPER test = can sound metallic): fade it or pay slower; (b) a burst without a Play window (setActive
    alone, Play again without stop, buffer switch) waits 0.5 s (22-395 pulled back): decide whether setActive(1) opens a
    burst window. Also our own 6022 us process() at block 64 during the RAM bank sync (lock with the sync?).
