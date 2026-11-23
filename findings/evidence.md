@@ -5409,3 +5409,20 @@ process ("another program uses Virus 1").
 - **Method:** plug-in log over SSH, code reading, unit test
 - **Confidence:** HIGH (cause from the log + code) / not yet verified on the Mac (fix)
 - **Hardware:** yes (TI2 Desktop on the Mac: the bug); fix not yet run
+
+### E568
+
+An unresolved Input Follower Release mapping in firmware 5.1.7.00. The parameter catalog names
+page 112, index 58 as Input Follower Release. In retained DSP1 interpreter runs with Input Follower
+selected (113/38 = 1, 113/39 = 0), P:$04f36e instead reads the 112/55 effect cell, X:$049b65, in all
+683 recorded follower evaluations per arm. Comparing raw values 0 and 127 for 112/58 changes its
+own cell, X:$049b68, through P:$04f4a1 but leaves that follower read unchanged; the corresponding
+112/55 comparison changes the follower read. Scope: preset 1:0 and its allocation, one run per arm,
+filtered records only. Whether the original editor redirects the catalog control, and the audible
+effect on hardware, remain open. This does not establish a replacement mapping for TI Revive.
+
+- **Date:** 2026-11-22
+- **Pointer:** firmware 5.1.7.00 DSP emulator ROM (SHA256 prefix 8e3daea8552f9ecb), follower P:$04f365/$04f36e, parameter writers P:$04f443/$04f4a1; four retained DSP1 runs comparing 112/55 and 112/58 at raw 0/127 under the Input Follower condition
+- **Method:** compare recorded parameter-cell writes and follower reads in the four interpreter runs; accesses outside the retained filter were not checked
+- **Confidence:** HIGH (recorded reads and writes in this setup) / open (editor mapping and audible hardware behaviour)
+- **Hardware:** no
