@@ -5409,3 +5409,22 @@ process ("another program uses Virus 1").
 - **Method:** plug-in log over SSH, code reading, unit test
 - **Confidence:** HIGH (cause from the log + code) / not yet verified on the Mac (fix)
 - **Hardware:** yes (TI2 Desktop on the Mac: the bug); fix not yet run
+
+### E567
+
+Follow-up to E323 (5) and E331 (1–2), firmware 5.1.7.00. In retained DSP interpreter runs,
+delivering global Frequency (page 115, index 16) = 1 reaches P:$05205b, stores the rate selector at
+P:$05205e, executes the PLL write at P:$052096, updates the ESAI dividers and restarts DAX through
+P:$052000. Feeding the host emulator's messages from its SysEx-receive path into the DSP emulator's
+HDI08 queue produces the same selector and rate-table state; both DSPs log the PLL change. Either
+the forwarded SysEx or the separate parameter delivery suffices in these runs. Separately, a TUSB
+harness entering the SET_CUR handler at CODE:0x1868 directly observes no new rate report or audio
+clock-generator rewrite for an equal stored rate, and both for a changed rate. These observations
+support the separate chip and DSP rate paths in E331. They do not reproduce E175/E241, measure
+physical clock frequencies, or establish the ordering of a complete USB-to-host-to-DSP transition.
+
+- **Date:** 2026-11-22
+- **Pointer:** firmware 5.1.7.00 DSP emulator ROM (SHA256 prefix 8e3daea8552f9ecb), P:$05205b/$05205e/$052096/$0520a3–$0520ac/$052000; TUSB payload (SHA256 prefix e7d5304f818c2e8a), CODE:0x1868/0x02dc/0x11a2
+- **Method:** review of retained gearmulator interpreter traces (parameter-only, relay-only, combined and value-0 controls) and TUSB equal/changed-rate harness results; host and DSP are separate emulators joined at recorded messages; TUSB USB setup/data stages were not executed
+- **Confidence:** HIGH (recorded DSP execution) / MED (composed host-to-DSP handoff and TUSB harness result) / open (historical failure cause and hardware timing)
+- **Hardware:** no
