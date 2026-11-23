@@ -182,7 +182,10 @@ public:
         mean_low_n_ += paid < -3 * margin_ / 4;
         if (mean_frames_ > 3 * window_) // the window's last half second: where the error is now, for a catch-up
             tail_sum_ += paid, tail_n_++;
-        if (mean_frames_ >= 4 * window_) {
+        // a window ending while err is beyond +JUMP waits: the half-second path above pays the whole loss (or err comes
+        // back inside JUMP and the window ends then). Ended at once, a loss in its last half second was faded by a tail
+        // diluted by the blocks before it and the rest paid again (#37 rc6 log 22:28: 1461 then 1108, E584)
+        if (mean_frames_ >= 4 * window_ && far_side_ <= 0) {
             const int64_t mean = mean_sum_ / mean_n_, lo = mean_lo_, hi = mean_hi_;
             const bool low = mean_low_n_ * 16 > mean_n_; // the band's low end, not one late delivery
             const int64_t tail = tail_n_ > 0 ? tail_sum_ / tail_n_ : mean;

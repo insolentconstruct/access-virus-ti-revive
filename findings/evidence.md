@@ -5793,3 +5793,30 @@ sequence again, the log if it still clicks; libusb audio on current macOS pointe
 - **Confidence:** HIGH (one-sided full-scale values and checksum retries in the log, clean timeline) / LOW (the cable as the cause, until the reporter tries one)
 - **Hardware:** no (the reporter's unit)
 
+### E584
+
+#37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing. Session
+18:54:52-18:56:10 UTC at block 512 throughout: "timeline caught up by 1461 / 1108 / 2037 / 1329 / 1733 frames
+(crossfaded)", no xrun report, no anchors. The 10 s windows around them count host frames 436736 against Virus frames
+441441 (the first three) and 439808 against 441000 (1329 and 1733, one window each); windows without a fade 440832 /
+441000. So Logic did not process whole blocks of frames there, the ring ran on, and a catch-up is needed (the fades sum
+to about the missing frames). 1461 at err 2373 and 1108 a second later fit one loss of ~2300 paid twice (inferred from
+the amounts and the times, the log has no per-block err): in timelinefollow.h a 2 s mean window that ends while err is
+already beyond +JUMP faded by its last half second's mean, diluted by the blocks before the loss, and the half-second
+path then paid the rest as a second fade (or one-frame steps below FADE). Fix: a mean window does not end while err is
+beyond +JUMP (far_side_ > 0); the half-second path pays the whole loss once, or err comes back inside JUMP and the
+window ends then. The wait is bounded: err beyond +JUMP for a whole half second fires the far path, which restarts the
+windows. Logic's switch from block 2048 to 128 after a setActive(1) (18:56:29 UTC) has one fade of 1339 at err 1525
+right after it (host frames 438272 / 441000 in its window): likely the same kind of loss, in the unit test as Case
+2048 -> 128 / 512. The fade of 208 at block 2048 (18:57:01 UTC) after a 128 -> 2048 switch without setActive follows
+29 steps and a read margin of 0 in the window before: E581 open item (b) (a burst without a Play window), not covered
+here. Model (unit test timeline_logic_lost_frames_one_crossfade_at_any_phase, 40 phases of the mean window per case,
+blocks 512 / 128 and 2048 -> 128 / 512, losses 1024-2300): 4-9 phases per case paid in two fades or 149-171 steps
+before, 0 after. Where err keeps dipping back inside JUMP (a scratch model with uniform jitter of +-700 or more around
+a loss of ~1000) both rules pay in two moves in about half the phases: unchanged, not addressed.
+
+- **Date:** 2026-11-23
+- **Pointer:** native/src/device/timelinefollow.h (update(): the mean window's end, far_side_); native/tests/test_timelinefollow.cpp (timeline_logic_lost_frames_one_crossfade_at_any_phase, pipewire() block_after); work/issue37-rc6/TI-Revive-logs-2026-11-22-2228.txt (not in git)
+- **Method:** reporter's diag.log (fade lines and 10 s stats windows), model unit test failing before / passing after, mutation check on the changed condition
+- **Confidence:** HIGH (the fades pay frames Logic did not process: host vs Virus frames in the log) / MEDIUM (1461 + 1108 = one loss paid twice, inferred) / open (the fix in Logic)
+- **Hardware:** no (model only; not on our TI2, not in Logic)
