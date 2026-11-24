@@ -913,9 +913,11 @@ def thanks_links(text, fmt):
 
 
 def thanks_block():
+    link = '<a href="' + GH + '/issues/{n}">#{n}</a>'  # no backslash inside the f-string: CI's Python is < 3.12
+
     def items(rows):
         return "".join(f'\n        <li><a href="https://github.com/{n}">{n}</a>: '
-                       f'{thanks_links(w, "<a href=\"" + GH + "/issues/{n}\">#{n}</a>")}</li>' for n, w in rows)
+                       f'{thanks_links(w, link)}</li>' for n, w in rows)
     return f"""<h3>Thank you</h3>
     <p>{THANKS_INTRO}</p>
     <div class="testing thanks-list">
