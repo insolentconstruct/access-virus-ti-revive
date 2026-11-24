@@ -5847,3 +5847,21 @@ USB-to-host-to-DSP transition, the physical frequencies and the cause of E175/E2
 - **Method:** retained DSP interpreter traces (parameter only, relay only, both and value-0 controls), DSP listing for divider and port writes, and retained TUSB equal/changed-rate harness results. The host and DSP emulators were joined at recorded messages. The TUSB harness entered the handler directly.
 - **Confidence:** HIGH (recorded DSP execution and static register targets) / MED (composed host-to-DSP handoff and TUSB harness result) / open (historical failure cause and hardware timing)
 - **Hardware:** no
+
+### E586
+
+An unresolved Input Follower Release mapping in firmware 5.1.7.00. The parameter catalog names
+page 112, index 58 as Input Follower Release. In retained DSP1 interpreter runs with Input Follower
+selected (113/38 = 1, 113/39 = 0), P:$04f36e reads the 112/55 effect cell at X:(part base - $39)
+in all 683 recorded follower evaluations per arm. Comparing raw values 0 and 127 for 112/58 changes
+its own cell at X:(part base - $36) through P:$04f4a1, and the follower read stays the same.
+The corresponding 112/55 comparison changes the follower read. The absolute X addresses depend
+on the allocation. In our preset 1:0 runs, the part base is X:$049b9e and the cells are
+X:$049b65 and X:$049b68. The runs cover one filtered record per arm. The original editor's
+control mapping and the audible effect on hardware remain open.
+
+- **Date:** 2026-11-22
+- **Pointer:** firmware 5.1.7.00 DSP emulator ROM (SHA256 prefix 8e3daea8552f9ecb), follower P:$04f365/$04f36e, parameter writers P:$04f443/$04f4a1
+- **Method:** compare recorded parameter writes and follower reads in four DSP1 interpreter runs (112/55 and 112/58 at raw 0/127), and compare the listing's follower operand with the writer addresses and the run's part base
+- **Confidence:** HIGH (relative offsets and recorded reads and writes in this setup) / open (editor mapping and audible hardware behaviour)
+- **Hardware:** no
