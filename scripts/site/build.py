@@ -549,6 +549,7 @@ def page_landing(latest, releases, sums):
       <div><h3>Without code</h3><p>Test reports, reports about problems in the original, and help with reading
       someone's logs are as useful as pull requests.</p></div>
     </div>
+    {thanks_block()}
     <p class="actions contribute-actions"><a class="second" href="{GH}/blob/main/CONTRIBUTING.md">How to
     contribute</a> <a class="second" href="{GH}">Open the repository</a></p>
   </div>
@@ -879,6 +880,61 @@ SHARED_IMAGES = ["control-center.png", "control-center-nerd-mode.png", "plugin-h
                  "plugin-menus.png", "plugin-library-drop.png",
                  "plugin-section-lock.png", "plugin-edit-menu.png", "plugin-help-menu.png"]
 TESTS = 848 # unit tests in native/tests (vtitests), as of 2026-11-21 (0.8.43)
+
+# The "Thank you" list, in the Contributing block; the README's "Thank you" section is the same list (unit test).
+# (GitHub name, what they did); "#N" becomes a link to issue/PR N. Code and findings first, then testing and reports.
+THANKS_CODE = [
+    ("insolentconstruct", "macOS broker control requests (#1), firmware evidence (#55 to #58)"),
+    ("vmunoz82", "the Snow's bulk MIDI on Linux (#27), the Snow on Linux and under Wine (#26), the Windows installer "
+     "leaving the Access driver behind (#31)"),
+    ("wirrareka", "findings from their own native macOS TI2 project (#7)"),
+]
+THANKS_TESTS = [
+    ("packman83", "many test rounds in Logic on Catalina for the Play and timing fixes (#37)"),
+    ("christopherdoerr", "latency and bus pre-delay in Logic (#30, #41)"),
+    ("timemachine70", "TI Keyboard MIDI and latency (#29, #39)"),
+    ("sbostock76", "flashed banks in the browser, audio glitches, several TIs in one project (#22, #24, #50)"),
+    ("psychowsky", "RAM presets in the browser (#36)"),
+    ("ManuAnilkumar23", "the first Snow on macOS (#4)"),
+    ("JAMES77-LAB", "Intel Macs (#33)"),
+    ("jwalkermed", "mod wheel, part bar and section locking (#18, #21)"),
+    ("alexs1986-utils", "the Virus TI Desktop test (#16)"),
+    ("edy013", "clicks with two audio interfaces on Windows (#51)"),
+    ("substrate13", "the crackle that a USB cable fixed (#34)"),
+    ("Give-me-a-signal", "the first macOS bench test (#5)"),
+    ("coconutPhreak", "modulation matrix destinations (#11)"),
+]
+THANKS_INTRO = "TI Revive got where it is through the people who sent code, findings, logs and test reports."
+THANKS_REST = "And everyone who opened an issue, sent logs or tested a pre-release."
+
+
+def thanks_links(text, fmt):
+    return re.sub(r"#(\d+)", lambda m: fmt.format(n=m.group(1)), text)
+
+
+def thanks_block():
+    def items(rows):
+        return "".join(f'\n        <li><a href="https://github.com/{n}">{n}</a>: '
+                       f'{thanks_links(w, "<a href=\"" + GH + "/issues/{n}\">#{n}</a>")}</li>' for n, w in rows)
+    return f"""<h3>Thank you</h3>
+    <p>{THANKS_INTRO}</p>
+    <div class="testing thanks-list">
+      <div><h3>Code and findings</h3><ul>{items(THANKS_CODE)}
+      </ul></div>
+      <div><h3>Testing and reports</h3><ul>{items(THANKS_TESTS)}
+      </ul></div>
+    </div>
+    <p>{THANKS_REST}</p>
+    """
+
+
+def thanks_markdown():
+    def items(rows):
+        return "\n".join(f"- [{n}](https://github.com/{n}): {thanks_links(w, '[#{n}](' + GH + '/issues/{n})')}"
+                          for n, w in rows)
+    return (f"{THANKS_INTRO}\n\nCode and findings:\n\n{items(THANKS_CODE)}\n\nTesting and reports:\n\n{items(THANKS_TESTS)}\n\n"
+            f"{THANKS_REST}\n")
+
 
 # Important information shown at the top of the page, newest first (empty list = no box). The README starts with the
 # same text ("Important" block), keep both identical. Remove an entry when it no longer matters to users.

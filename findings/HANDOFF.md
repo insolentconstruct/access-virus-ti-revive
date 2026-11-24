@@ -5,7 +5,7 @@ NEXT. At most 150 lines; the Stop hook (`.claude/hooks/handoff-check.sh`) refuse
 how goes into the dated log [`log/2026-11.md`](log/2026-11.md) (newest first); older logs are in [`log/`](log/).
 Device/protocol knowledge goes into [`evidence.md`](evidence.md). Update this file in the same commit as the work._
 
-Last update: 2026-11-24: #37 rc7 in Logic 'much better than rc6', crackle left on the first notes = the crossfade ~1 s after Play (log work/issue37-rc7), reply posted (issuecomment-7123137920). PRs #55-#58 (insolentconstruct, evidence): verified (sim S150 fd8a51a + our listings: E570 confirmed by run, E569 confirmed + 2 side effects missing, E567/E568 in part); asked the author (PR comments 2026-11-24) to rebase on round-0.8.44 as E585-E588 with the corrections, or OK a cherry-pick by us | waits on the author. Website/README 'Thank you' section: list proposed to the user, waiting for OK.
+Last update: 2026-11-24: #37 rc7 in Logic 'much better than rc6', crackle left on the first notes = the crossfade ~1 s after Play (log work/issue37-rc7), reply posted (issuecomment-7123137920). PRs #55-#58 (insolentconstruct, evidence): verified (sim S150 fd8a51a + our listings: E570 confirmed by run, E569 confirmed + 2 side effects missing, E567/E568 in part); asked the author (PR comments 2026-11-24) to rebase on round-0.8.44 as E585-E588 with the corrections, or OK a cherry-pick by us | waits on the author. 'Thank you' section added (README section + site Contributing block from THANKS_* in scripts/site/build.py, test_site_thanks keeps both identical; 3 code/findings + 13 testers, user-approved list); on the site with the next build from main.
 
 ## Where things stand
 

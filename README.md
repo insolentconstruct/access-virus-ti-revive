@@ -819,6 +819,34 @@ Bug reports, tests on your setup and pull requests are welcome — see [CONTRIBU
 with an AI coding assistant, it finds its instructions in [AGENTS.md](AGENTS.md) (Claude Code also reads
 `CLAUDE.md` and the skills in `.claude/skills/`).
 
+## Thank you
+
+TI Revive got where it is through the people who sent code, findings, logs and test reports.
+
+Code and findings:
+
+- [insolentconstruct](https://github.com/insolentconstruct): macOS broker control requests ([#1](https://github.com/derpsn/ti-revive/issues/1)), firmware evidence ([#55](https://github.com/derpsn/ti-revive/issues/55) to [#58](https://github.com/derpsn/ti-revive/issues/58))
+- [vmunoz82](https://github.com/vmunoz82): the Snow's bulk MIDI on Linux ([#27](https://github.com/derpsn/ti-revive/issues/27)), the Snow on Linux and under Wine ([#26](https://github.com/derpsn/ti-revive/issues/26)), the Windows installer leaving the Access driver behind ([#31](https://github.com/derpsn/ti-revive/issues/31))
+- [wirrareka](https://github.com/wirrareka): findings from their own native macOS TI2 project ([#7](https://github.com/derpsn/ti-revive/issues/7))
+
+Testing and reports:
+
+- [packman83](https://github.com/packman83): many test rounds in Logic on Catalina for the Play and timing fixes ([#37](https://github.com/derpsn/ti-revive/issues/37))
+- [christopherdoerr](https://github.com/christopherdoerr): latency and bus pre-delay in Logic ([#30](https://github.com/derpsn/ti-revive/issues/30), [#41](https://github.com/derpsn/ti-revive/issues/41))
+- [timemachine70](https://github.com/timemachine70): TI Keyboard MIDI and latency ([#29](https://github.com/derpsn/ti-revive/issues/29), [#39](https://github.com/derpsn/ti-revive/issues/39))
+- [sbostock76](https://github.com/sbostock76): flashed banks in the browser, audio glitches, several TIs in one project ([#22](https://github.com/derpsn/ti-revive/issues/22), [#24](https://github.com/derpsn/ti-revive/issues/24), [#50](https://github.com/derpsn/ti-revive/issues/50))
+- [psychowsky](https://github.com/psychowsky): RAM presets in the browser ([#36](https://github.com/derpsn/ti-revive/issues/36))
+- [ManuAnilkumar23](https://github.com/ManuAnilkumar23): the first Snow on macOS ([#4](https://github.com/derpsn/ti-revive/issues/4))
+- [JAMES77-LAB](https://github.com/JAMES77-LAB): Intel Macs ([#33](https://github.com/derpsn/ti-revive/issues/33))
+- [jwalkermed](https://github.com/jwalkermed): mod wheel, part bar and section locking ([#18](https://github.com/derpsn/ti-revive/issues/18), [#21](https://github.com/derpsn/ti-revive/issues/21))
+- [alexs1986-utils](https://github.com/alexs1986-utils): the Virus TI Desktop test ([#16](https://github.com/derpsn/ti-revive/issues/16))
+- [edy013](https://github.com/edy013): clicks with two audio interfaces on Windows ([#51](https://github.com/derpsn/ti-revive/issues/51))
+- [substrate13](https://github.com/substrate13): the crackle that a USB cable fixed ([#34](https://github.com/derpsn/ti-revive/issues/34))
+- [Give-me-a-signal](https://github.com/Give-me-a-signal): the first macOS bench test ([#5](https://github.com/derpsn/ti-revive/issues/5))
+- [coconutPhreak](https://github.com/coconutPhreak): modulation matrix destinations ([#11](https://github.com/derpsn/ti-revive/issues/11))
+
+And everyone who opened an issue, sent logs or tested a pre-release.
+
 ## Using our findings
 
 The protocol knowledge in [findings/](findings/) is free to use. If it helps your project, we would be happy about a
