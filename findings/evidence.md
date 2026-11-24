@@ -5984,3 +5984,43 @@ Two instances that are both processed behave as before.
 - **Method:** reporter's description of their diag.log, code reading, unit test failing before / passing after
 - **Confidence:** HIGH (the cause in our code: first claim wins regardless of processing) / MEDIUM (that Studio Pro's unprocessed instance is the whole story: the log is missing) / open (the fix on Studio Pro)
 - **Hardware:** no
+
+### E591
+
+Lost SysEx answers ("Virus ready after 11.5 s (no reply to the probe)", "bank info RAM A: no reply", "single RAM D 34:
+no reply", "bank sync failed") on Mac (#48, #37 rc6), Windows (#51) and our TI2, investigated 2026-11-24 by four agents
+(log forensics, code review, the original via REA, TI2 runs + simulator), each result checked by the orchestrator.
+Not one cause but several:
+(1) Late answers are thrown away (code, verified: native/src/device/memsync.cpp transact). The wait starts when the
+request is queued, not written; a matching reply in the 1.5 s drain is kept in the inbox but never checked and the
+next try clears it; after the last try every reply is dropped. Bank info waits 3 s, the probe 10 s. The original Virus
+Control 5.1.7 x64 (REA, static) waits about 4-5 s per bank info (0x18008e220 / 0x18008ea30) and up to 10 s per single
+(0x18008e980), and its reply entry 0x18008eaf0 takes any 10/14 reply of 267 or 524 bytes, also a late one; it asks only
+when the start-up queue is empty and less than about 0x220 bytes wait to go out (0x18007ec30, 0x1800aac00), drops notes
+while syncing, re-sends the reply-cable globals after repeated bank-info misses (listener 0x180086bf0) and after
+too many misses aborts and shows "A communication error has occurred..." (0x180080ba0). TI Revive gives up silently.
+(2) A false "no reply" after a handover (TI2, 3 of 3 with nativehost --duplicate 99 --idle-first, also in today's
+diag.log 18:29): the instance that gave its Virus away (E590) still runs its probe and logs 11.5 s, while the other one
+was answered in 1.1 s. #51's rc7 line after "another instance uses Virus 1" is this kind.
+(3) The Virus refuses EP 0x06 for about 8.7 s (TI2, broker journal: 27 "write ep 06: 5 timeout(s), gave up" since
+2026-11-01, clustered on 11-23 14:52-15:10 after the unit froze on the Mac, none after the user's power cycle, none in
+19 sessions today), always while the 16 part dumps are uploaded, nearly all at 44.1 kHz. Two old captures
+(captures/m512-44100-115232): EP 0x86 silent during the stall, an unsolicited 73 00 40 00 about 1.5 s after it, edit
+buffers kept. Simulator (static): no 8051 dump/main-loop wait that long; the only ~8.2 s wait is the DSP boot handshake
+(0x5168-0x519b), so a DSP-side restart is suspected (inferred). A probe queued behind the state on a reconnect then
+times out (with (1)).
+(4) MIDI IN dead until the Virus re-enumerates (#48, Mac, 0.8.43; log + code, inferred): the device open behind both
+distorted sessions logged one isolated LIBUSB_ERROR_IO on EP 0x86 (05:22:50) and EP 0x85 (05:23:23) and afterwards no
+reply and no 0x54 sync report came in, while OUT and audio worked; two earlier opens with the same pair of errors ended
+with "0 messages handed to macOS". The libusb reader (src/broker/vticore.c reader loop, rxqueue.h vti_rx_probe_now /
+vti_rx_unpark_after) resubmits a failed transfer only when none is in flight and unparks only after data: if the
+transfers still pending never complete, the endpoint stays silent and no rule reopens it. Cleared when the Virus left
+USB at 05:25:36. Whether #48's distortion has the same cause is not shown.
+Also: 62 of the 68 "no reply" lines in our diag.log.1 are instances closed during the probe (0.0-5.8 s), not misses;
+the pattern exists since 2026-10-17 (probe added in 582bda5), not new in 0.8.41.
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/memsync.cpp (transact, feed); native/plugin/source/virusplugin.cpp (probe_virus_ready, wait_virus_ready, reconnect path); src/broker/vticore.c (rx_done, reader loop), src/broker/rxqueue.h; Virus Control.dll 5.1.7 x64 addresses above (user's own, REA snapshot work/rea/virus-control-5.1.7-x64.ghidra1214-20261109.snapshot); work/sysex-noreply (reporters' logs, runs/ with diag, journal and pcapng per run, not in git); issues #48, #51, #37; E145, E464, E529, E582, E590
+- **Method:** log forensics over 3 reporters and our TI2 logs; static code review; REA static analysis of the original; 19 nativehost/hil.sh sessions on our TI2 (only the plug-in's own traffic) with usbmon; simulator (static)
+- **Confidence:** HIGH (1), (2), the stall counts of (3) / MED (the original's details) / LOW-MED (3)'s DSP restart, (4)'s mechanism (not reproduced)
+- **Hardware:** yes (our TI2 Desktop, Linux; the #48 case only from its log)
