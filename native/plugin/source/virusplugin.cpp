@@ -1011,6 +1011,9 @@ void DeviceOut::run()
             else if (n.what[0] == 'f')
                 log("timeline caught up by %lld frames (crossfaded), err %lld block %d\n", (long long)n.value,
                     (long long)n.err, n.block);
+            else if (n.what[0] == 'k')
+                log("timeline: %lld frames behind kept, inside the stamp lead (#37), err %lld block %d\n",
+                    (long long)n.value, (long long)n.err, n.block);
             else if (n.what[0] == 'p')
                 log("Virus TI native: Play: timeline back by %lld frames for the DAW's burst (#37), err %lld block %d\n",
                     (long long)-n.value, (long long)n.err, n.block);
@@ -1336,6 +1339,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     out_->stamp_floor = !timing_classic_;
     out_->live_notes = live_notes_;
     out_->live_later = vti::cc::plugin_option("live-later") ? LIVE_LATER_FRAMES : 0; // E519
+    keep_rest_ = vti::cc::plugin_option("keep-rest"); // E589, #37: keep-rest.off = the rest corrected as in rc7
     if (diag_enabled()) {
         // the folder first: on a fresh install it came only with the bank cache, ~7 s in, and every line before
         // (library scan, ready probe, marker) was lost (win10 VM, rc1, 2026-11-11)
@@ -1354,6 +1358,8 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     }
     out_->log("Virus TI native: timing: lead %d frames, safety net %s%s\n", timing_a_, timing_classic_ ? "off" : "on",
               timing_classic_ ? " (timing-classic.on)" : "");
+    if (!keep_rest_)
+        out_->log("Virus TI native: keep-rest off (keep-rest.off): the rest after a Play is corrected, not kept (E589)\n");
     if (od_changes_only_)
         out_->log("Virus TI native: output delays only on change (outdelay-changes.on)\n");
 #ifdef __APPLE__
@@ -1963,6 +1969,10 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         tl_follow_.set_window(vrate / 2);
         tl_follow_.set_margin(timing_m()); // the pull-back guard of #51 knows the read margin (VTI_NATIVE_MARGIN)
     }
+    // #37 (E589): the stamp lead above the safety net's floor is room for the timeline to sit behind the ring (a
+    // Play burst's rest stays instead of being faded on the first notes). Every block: Live Mode / Plugin Latency
+    // change the lead from another thread (apply_timing_mode, a_now_), and the follower is this thread's
+    tl_follow_.set_room(keep_rest_ ? timing_a() - DeviceOut::floor_min : 0); // 0: off (Control Center option)
     int64_t newest = ring_newest();
     if (out_ && out_->generation.load() != generation_seen_) { // the Virus came back: a new audio stream
         generation_seen_ = out_->generation.load();
@@ -2040,8 +2050,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             tl_ += mv.delta;
             next_tick_ += (double)mv.delta;
             restart_.shift(mv.delta);
-            if (mv.fade) { // a host xrun's catch-up: the reads below fade from the old position (E579)
-                xfade_.start(mv.delta);
+            if (mv.jump && mv.fade) { // a move forward (a host xrun's catch-up, E579; every one since E589): the
+                xfade_.start(mv.delta); // reads below fade from the old position
                 out_->tl_fades.fetch_add(1, std::memory_order_relaxed);
                 out_->note_timeline({"fade", err, mv.delta, data.numSamples});
                 rs_valid_ = false; // the resampled read jumps to the new position too, and fades the same way
@@ -2053,8 +2063,19 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                 // the resampled output (host rate != 44.1 kHz) jumps too: steering at 0.2 % took >10 s for the
                 // ~1000 frames after a render in REAPER - notes late, then catching up (user, L3; E279)
                 rs_valid_ = false;
-            } else if (mv.delta != 0)
+            } else if (mv.delta != 0) {
                 out_->tl_steps.fetch_add(1, std::memory_order_relaxed);
+                // a one-frame step read hard skips or repeats a frame: a click per block, the metallic sound of #37
+                // and E579. The direct read fades it like a catch-up (delta 1); the resampled read steers its
+                // position smoothly already (read_resampled), a fade there would start one frame off
+                if (mv.fade && !resampling())
+                    xfade_.start(mv.delta);
+            }
+            if (const int64_t rest = tl_follow_.rest(); rest != rest_seen_) { // what stays behind now, for the log
+                if (rest != 0)
+                    out_->note_timeline({"kept", err, rest, data.numSamples});
+                rest_seen_ = rest;
+            }
         }
     }
     // automation takes at most 96 slots and clock/bend/aftertouch a few dozen, so notes always keep 100+; what does
@@ -2138,7 +2159,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
     auto at = [&](int32 offset) { return tl_valid_ ? tl_ + (int64_t)std::lround(offset * ratio) : -1; };
     if (live_notes_ && out_) { // both under the test: without the Access files out_ is null (no_access_files)
         out_->live_ratio.store(ratio, std::memory_order_relaxed);
-        out_->live_s.store(S, std::memory_order_relaxed);
+        // a live stamp counts from the newest frame: the timeline is S and the kept rest (E589) behind it
+        out_->live_s.store(S + (int)tl_follow_.rest(), std::memory_order_relaxed);
     }
     if (data.inputParameterChanges && out_) {
         for (int32 i = 0; i < data.inputParameterChanges->getParameterCount(); i++) {
@@ -2318,8 +2340,9 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                 if (const int k = xfade_.frames(data.numSamples)) { // a catch-up: fade in from the old position
                     const int64_t old = pos - xfade_.delta();
                     if (pulled_back || !Crossfade::readable(old, k, avail, VTI_AUDIO_RING)) {
+                        if (std::llabs(xfade_.delta()) > 1) // a one-frame step is no catch-up: not in "fades (cut)"
+                            out_->tl_fades_cut.fetch_add(1, std::memory_order_relaxed);
                         xfade_.stop(); // the old audio is not in the ring (or this read is not the timeline's): hard
-                        out_->tl_fades_cut.fetch_add(1, std::memory_order_relaxed);
                     }
                     else {
                         float(*b)[Crossfade::LEN] = xfade_buf_;

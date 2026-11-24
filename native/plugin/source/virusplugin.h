@@ -212,7 +212,7 @@ public:
     // the timeline's anchors and jumps for the VTI_NATIVE_STATS log: process() notes them, the worker prints them (no
     // stdio on the audio thread). `value`: the newest ring frame (anchor) or the jump
     struct TimelineNote {
-        const char *what; // "anchor", "re-anchor", "jump", "fade" or "preshift" (string literals)
+        const char *what; // "anchor", "re-anchor", "jump", "fade", "kept" or "preshift" (string literals)
         int64_t err, value;
         int block;
     };
@@ -861,7 +861,9 @@ private:
     double stat_acc_ = 0; // the same for the host-frames statistic
     int64_t stream_start_ = -1;
     TimelineFollow tl_follow_; // after the anchor: jumps and drift steps from the error over time, not per block (E337)
-    vti::Crossfade xfade_;     // a fade move of tl_follow_ (host xrun, E579): the reads fade from the old position
+    vti::Crossfade xfade_;     // a fade move of tl_follow_ (a move forward, a one-frame step): the reads fade from the old position
+    int64_t rest_seen_ = 0;    // tl_follow_.rest() as last logged (E589)
+    bool keep_rest_ = true;    // Control Center option keep-rest (keep-rest.off): set before the first process()
     float xfade_buf_[6][vti::Crossfade::LEN]; // the old position's frames during it (all six output channels)
     std::atomic<bool> reactivated_{false}; // setActive(1) -> the next process(): a Play then is a fresh start (E351)
     // offline render (export, freeze): each block waits for the Virus' audio; the worker logs mode changes and timeouts

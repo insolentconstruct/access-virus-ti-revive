@@ -48,7 +48,48 @@ float worst_step(const std::vector<float> &v)
     return w;
 }
 
+// the timeline's one-frame drift steps (TimelineFollow, Move::fade): one frame forward at every `every`-th block
+std::vector<float> render_steps(int block, int blocks, int every, bool fade)
+{
+    Crossfade x;
+    std::vector<float> out, dst(block), old(block);
+    int64_t pos = 10000;
+    for (int b = 0; b < blocks; b++) {
+        if (b > 0 && b % every == 0) {
+            pos += 1;
+            if (fade)
+                x.start(1);
+        }
+        for (int i = 0; i < block; i++)
+            dst[i] = ring(pos + i);
+        if (const int k = x.frames(block)) {
+            for (int i = 0; i < k; i++)
+                old[i] = ring(pos - x.delta() + i);
+            x.mix(dst.data(), old.data(), k);
+            x.advance(k);
+        }
+        out.insert(out.end(), dst.begin(), dst.end());
+        pos += block;
+    }
+    return out;
+}
+
 } // namespace
+
+TEST(crossfade_renders_one_frame_steps_without_a_jump)
+{
+    // #37 / E579: a one-frame step per block, read hard, skips a frame each time - the output steps by two frames of
+    // the sine (0.062 at 440 Hz) 86 times a second at block 512: the metallic sound. Through the fade (delta 1) the
+    // largest step stays the sine's own (0.031), as long as a fade is over before the next one starts
+    for (int block : {128, 512, 2048}) {
+        CHECK(worst_step(render_steps(block, 400, 1, false)) > 0.06f);
+        CHECK(worst_step(render_steps(block, 400, 1, true)) < 0.033f);
+    }
+    CHECK(worst_step(render_steps(64, 800, 2, true)) < 0.033f); // block 64: every second block (128 frames apart)
+    // a step in every 64-frame block restarts the fade mid-way: half a frame's step on top again. That is why the
+    // follower keeps its steps Crossfade::LEN frames apart (test_timelinefollow.cpp)
+    CHECK(worst_step(render_steps(64, 800, 1, true)) > 0.04f);
+}
 
 TEST(crossfade_has_no_sample_jump)
 {

@@ -66,7 +66,14 @@ TEST(diag_plugin_options)
 {
     Home h("vtester");
     const auto &opts = plugin_options();
-    CHECK(opts.size() == 9);
+    CHECK(opts.size() == 10);
+    // keep-rest (E589, 0.8.44, #37, user 2026-11-24): after a Play the timeline may stay behind inside the stamp lead
+    // instead of correcting on the first notes; ON by default, keep-rest.off switches it off (live notes then never
+    // pay the kept rest); the hint says the price
+    CHECK(std::string(opts[9].name) == "keep-rest" && std::string(opts[9].file) == "keep-rest.off");
+    CHECK(opts[9].default_on && plugin_option("keep-rest"));
+    CHECK(std::string(opts[9].hint).find("ms") != std::string::npos);
+    CHECK(!option_applies_at_once("keep-rest"));
     // snow-idle-slow (0.8.42, #42, user 2026-11-17): a Snow that only idles is asked every 4 ms instead of every 1 ms
     // after a quiet second; OFF by default, read by the broker (not the plug-in), and the hint says the price
     CHECK(std::string(opts[8].name) == "snow-idle-slow" && std::string(opts[8].file) == "snow-idle-slow.on");

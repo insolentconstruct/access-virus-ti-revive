@@ -8,6 +8,7 @@
 // at once when it is far off.
 // Header only, no allocation (runs on the audio thread): the plug-in and the tests use it.
 #pragma once
+#include "crossfade.h"
 #include <cstdint>
 
 namespace vti {
@@ -27,11 +28,17 @@ public:
     // hard jump (the Play's learn second and the two 2 s mean windows after it, where a burst's rest shows; rc5 faded
     // REAPER's bursts and the rest of a pre-shift, E581). There every move is as before E579: hard jumps and steps
     static constexpr int64_t QUIET = 8;
+    // two one-frame steps are at least a crossfade apart: below block 128 a step per block restarted the read path's
+    // fade mid-way (half a frame's step again). 1 frame in 128 is 0.8 %, far more than any clock drift needs
+    static constexpr int64_t SPACE = Crossfade::LEN;
 
     struct Move {
         int64_t delta; // added to the timeline: 0, +-1 (a drift step) or the jump
         bool jump;
-        bool fade = false; // a jump the read path crossfades (crossfade.h): the catch-up after a host xrun
+        // the read path crossfades it from the old position (crossfade.h): every move forward (the skipped audio is in
+        // the ring) and every one-frame step (hard, a step per block is a click per block: the metallic sound of
+        // #37 and E579). A jump back cannot fade: its old position is past the newest frame
+        bool fade = false;
     };
 
     // `frames`: the Virus frames of half a second (the jump window; the mean window is four of them). A new rate starts
@@ -53,6 +60,18 @@ public:
     // the stamp-aligned read's margin behind the newest frame (virusplugin.h timing_m(), VTI_NATIVE_MARGIN): a block
     // with err below -margin reads frames that are not there yet and is pulled back (#51)
     void set_margin(int64_t m) { margin_ = m > 0 ? m : 512; }
+
+    // #37 (E589): the room above zero. With the marker an event at timeline t sounds at ring frame t + lead and is
+    // read latency later, so a timeline BEHIND the ring by r plays every stamped event exactly; it only uses r of the
+    // stamp lead, and the safety net floors a stamp beyond A - floor_min (stamprule.h StampFloor). `frames` = that
+    // room (3072 - 1024 at the default lead). The timeline may then sit behind by a rest of up to keep_ frames (the
+    // room less STEP, where the drift steps hold the mean), and every rule below works on err - rest: an offset they
+    // want gone is first taken into (or out of) the rest, and only what does not fit moves the timeline (moved()).
+    // Logic's burst differs from Play to Play (rc7: 4260-5924 at block 512) and what a pre-shift left of it was paid
+    // on the first notes: a crossfade a second after Play, then a hard jump or 138-174 steps. Now it stays.
+    // A lead that leaves no room (Live Mode, Plugin Latency, the experimental low lead: at most 2 * JUMP): off
+    void set_room(int64_t frames) { keep_ = frames > 2 * JUMP ? frames - STEP : 0; }
+    int64_t rest() const { return rest_; } // frames the timeline sits behind the ring on purpose (for the log)
 
     // Play (or a loop restart): REAPER then processes 7 blocks ahead at once and stays ahead (Linux, 1792 frames at
     // block 256, also with anticipative FX off). The timeline is then ahead of the ring and each block reads at its
@@ -85,9 +104,26 @@ public:
         const bool learn = from_stop && play_left_ > 0;
         const int64_t want = spread_ > HOLD ? spread_ + (block_ < JUMP ? block_ : JUMP) : 0;
         const int64_t room = want < learned_ / 4 ? want : learned_ / 4;
-        shift_ = learn && learned_ > JUMP ? (learned_ + room < 2 * window_ ? learned_ + room : 2 * window_) : 0;
+        int64_t back = learned_ + room;
+        // with a room for the rest (set_room) nothing has to be guessed generously: the largest of the last eight
+        // bursts and a small guard (a burst counts in whole blocks), and what the burst leaves of it stays. Eight:
+        // a burst larger than the shift reads past the newest frame (crackle), a smaller one only leaves more rest -
+        // in the model of the rc7 log four forgot a large burst too soon (22 blocks pulled back in 398 Plays at
+        // block 2048, eight: 8)
+        if (keep_ > 0) {
+            back = learned_;
+            for (const int64_t b : recent_)
+                back = b > back ? b : back;
+            back += HOLD + block_ / 8;
+        }
+        shift_ = learn && learned_ > JUMP ? (back < 2 * window_ ? back : 2 * window_) : 0;
+        // the rest kept since the last Play is part of the shift: the timeline is that far back already (else every
+        // Play put its rest on top of the last one's)
+        const int64_t have = shift_ > 0 ? rest_ : 0;
+        rest_ -= have;
+        shift_ = shift_ < have ? have : shift_;
         learn_left_ = learn ? 2 * window_ : 0;
-        learn_sum_ = -shift_, learn_min_ = 0;
+        learn_sum_ = -shift_, learn_min_ = 0, late_lo_ = INT64_MAX;
         // where the burst is measured from: the error's normal low before Play (the cadence), but after a setActive
         // cycle's own burst within the last second (REAPER's start, a block switch: not calm) that low is the burst's -
         // learned 765 instead of ~3700 (E581). Then the low since the last jump (the rest of that burst, if any)
@@ -95,7 +131,7 @@ public:
         base_ = calm ? (lo < 0 ? lo : 0) : since < 0 ? since : 0;
         if (play_left_ > 0) // a Play window (no window in a rough cadence: everything stays as without Play)
             quiet_left_ = QUIET * window_;
-        return -shift_;
+        return have - shift_;
     }
 
     // process() re-anchors on abs(err) > 8192: while a pre-shift is being eaten by the burst, this err is expected
@@ -107,6 +143,7 @@ public:
     {
         restart();
         last_err_ = 0;
+        rest_ = 0;
         learn_left_ = 0, shift_ = 0; // the learned burst stays: it belongs to the host, not to this timeline
         quiet_left_ = QUIET * window_;
         cur_frames_ = 0, cur_min_ = INT64_MAX, cur_max_ = INT64_MIN, prev_min_ = INT64_MAX, prev_max_ = INT64_MIN;
@@ -116,6 +153,12 @@ public:
     // then may the timeline jump without a new anchor, E279)
     Move update(int64_t err, int64_t frames, bool marker)
     {
+        if (!marker)
+            rest_ = 0; // no room without the marker: the stamps are not tied to the ring, behind is real latency
+        if (rest_ > keep_) // another lead with less room: the rest goes, crossfaded
+            return moved(0);
+        err -= rest_; // from here on the error against where the timeline is meant to be
+        since_step_ = since_step_ < SPACE ? since_step_ + frames : since_step_;
         spread(err, frames);
         block_ = frames;
         const int64_t last = last_err_;
@@ -129,6 +172,8 @@ public:
             learn_left_ -= frames;
             const int64_t raw = err + learn_sum_; // the error as if we had not moved since Play
             learn_min_ = raw < learn_min_ ? raw : learn_min_;
+            if (learn_left_ <= window_) // the second's last half: the burst is over, the cadence steady again
+                late_lo_ = err < late_lo_ ? err : late_lo_;
             if (learn_left_ <= 0) {
                 const int64_t burst = base_ - learn_min_, before = learned_;
                 learned_ = burst > JUMP ? (burst < 2 * window_ ? burst : 2 * window_) : 0;
@@ -136,6 +181,8 @@ public:
                 // the host's own variation: the largest seen. shortcut: never shrinks, so one mis-learned burst gives
                 // every later Play room (at most a quarter) and a fade; decay it if a host shows that
                 spread_ = d > spread_ ? d : spread_;
+                if (learned_ > 0)
+                    recent_[recent_n_++ % 8] = learned_;
                 const bool shifted = shift_ > 0;
                 const int64_t shifted_by = shift_;
                 shift_ = 0;
@@ -144,15 +191,21 @@ public:
                 // moved the timeline in that second (learn_sum_ still the shift): a jump there was another burst's
                 // (REAPER's setActive cycle 0.3 s before Play: the rest then faded forward and jumped back)
                 const int64_t rest = learn_min_ + shifted_by - base_;
-                if (shifted && marker && learn_sum_ == -shifted_by && rest > FADE)
-                    return faded(rest, true);
-                if (shifted && marker && err > JUMP) // a rest that the lowest error does not show: as before
-                    return jumped(err);
+                // with a room (E589): what the steady cadence after the burst is behind by - its low above the
+                // normal low. Logic idles after its burst (rc7: err a second after Play was 250-1960 above the
+                // second's low), so the burst's low alone left a second move to pay. It stays if it fits the room
+                if (keep_ > 0) {
+                    if (shifted && marker && learn_sum_ == -shifted_by && late_lo_ != INT64_MAX && late_lo_ > base_)
+                        return moved(late_lo_ - base_, true);
+                } else if (shifted && marker && learn_sum_ == -shifted_by && rest > FADE)
+                    return moved(rest, true);
+                else if (shifted && marker && err > JUMP) // a rest that the lowest error does not show
+                    return moved(err, true);
             } else if (shift_ > 0 && err >= -JUMP)
                 return {0, false}; // pre-shifted: the burst eats the shift, no move meanwhile
         }
         if (marker && (err > AT_ONCE || err < -AT_ONCE)) // REAPER processing ahead after Play (up to -8548): no waiting
-            return jumped(err);
+            return moved(err);
         if (play_left_ > 0) {
             play_left_ -= frames;
             if (marker && err < -JUMP) {
@@ -161,7 +214,7 @@ public:
                 // in the burst the ring does not move (microseconds per block): err falls by each whole block; the
                 // first block where it does not fall = the burst is over. SETTLE: in case it never seems to end
                 if ((play_frames_ > frames && err >= last) || play_frames_ >= settle(frames)) {
-                    return jumped(play_min_);
+                    return moved(play_min_);
                 }
             } else
                 play_frames_ = 0, play_min_ = 0;
@@ -172,7 +225,7 @@ public:
                 far_side_ = side, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
             far_frames_ += frames, far_sum_ += err, far_n_++;
             if (far_frames_ >= window_) // beyond JUMP on one side for half a second: a real offset (an xrun of
-                return faded(far_sum_ / far_n_); // 512+ frames too, E579: crossfaded)
+                return moved(far_sum_ / far_n_); // 512+ frames too, E579: crossfaded)
         } else
             far_side_ = 0, far_frames_ = 0, far_sum_ = 0, far_n_ = 0;
 
@@ -192,7 +245,7 @@ public:
             tail_sum_ = 0, tail_n_ = 0;
             mean_frames_ = 0, mean_sum_ = 0, mean_n_ = 0, mean_lo_ = INT64_MAX, mean_hi_ = INT64_MIN, mean_low_n_ = 0;
             if (marker && (mean > JUMP || mean < -JUMP)) // an offset hidden in a rough cadence (or an xrun, E579)
-                return faded(mean);
+                return moved(mean);
             owed_ = mean > STEP ? mean - HOLD : mean < -STEP ? mean + HOLD : 0;
             // a host xrun (REAPER on Linux drops cycles): the ring ran on, the timeline did not. One frame per block
             // was ~375 skips a second for a second at block 128, a short metallic sound (E579): one crossfade instead,
@@ -200,7 +253,7 @@ public:
             // The #51 lift below keeps its steps (its tests: two clocks, a late anchor)
             const int64_t catchup = tail > STEP ? tail - HOLD : tail < -STEP ? tail + HOLD : 0;
             if (marker && quiet_left_ <= 0 && owed_ > 0 && catchup > FADE) // forward only: an xrun loses cycles
-                return faded(catchup);
+                return moved(catchup);
             // #51 (E564): two clocks park the mean at the band's edge and delivery jitter then takes err past -margin
             // (the read is pulled back: a click). A window whose low end passed 3/4 of the margin is lifted back to
             // half of it, if its whole range fits 1.5 margins; a wider one (rough cadence, E337) no position fits.
@@ -210,10 +263,11 @@ public:
             if (low && hi - lo < 3 * margin_ / 2 && lo + margin_ / 2 < owed_ && mean - (lo + margin_ / 2) <= STEP)
                 owed_ = lo + margin_ / 2;
         }
-        if (owed_ != 0) {
+        if (owed_ != 0 && since_step_ >= SPACE) {
             const int64_t d = owed_ > 0 ? 1 : -1;
             owed_ -= d;
-            return {d, false};
+            since_step_ = 0;
+            return {d, false, true};
         }
         return {0, false};
     }
@@ -225,27 +279,26 @@ private:
     // 202 reads pulled back); a burst that keeps falling block by block reaches AT_ONCE first anyway
     static int64_t settle(int64_t frames) { return SETTLE > 16 * frames ? SETTLE : 16 * frames; }
 
-    Move jumped(int64_t d)
+    // Every jump of the rules above. With a room (set_room, E589) the offset is first taken into the rest, or out of
+    // it: no move at all while the timeline then sits 0..keep_ behind the ring. What does not fit moves the timeline,
+    // and all of it (the rest goes too: the whole lead is back). A move forward is crossfaded by the read path
+    // (crossfade.h) - also inside QUIET, where E581 jumped hard: the skipped audio is in the ring, a hard jump there
+    // was a click for nothing (#37 rc7: one after every Play). A move back stays hard: a host ahead of the ring is a
+    // burst, and the old position's frames are not in the ring yet. Elsewhere as before E589: a hard jump and the
+    // rest of a pre-shift (`burst_rest`, play_started) start the quiet time, a catch-up forward does not
+    Move moved(int64_t d, bool burst_rest = false)
     {
+        const int64_t all = rest_ + d;
         restart();
         learn_sum_ += d; // the burst is still measured from Play on
-        quiet_left_ = QUIET * window_;
-        return {d, true};
-    }
-
-    // a lasting offset in steady playback (host xrun, E579): the same jump, which the read path crossfades
-    // (crossfade.h). Forward only: an xrun leaves the timeline behind the ring, a host ahead of it is a burst (and the
-    // old frames of a jump back are not in the ring yet anyway). Elsewhere the hard jump, as before (E581)
-    // `burst_rest`: the rest of a pre-shift after its burst (play_started), faded inside the quiet time too
-    Move faded(int64_t d, bool burst_rest = false)
-    {
-        if (d <= 0 || (quiet_left_ > 0 && !burst_rest))
-            return jumped(d);
-        restart();
-        learn_sum_ += d;
-        if (burst_rest)
+        if (keep_ > 0 && all >= 0 && all <= keep_) {
+            rest_ = all;
+            return {0, false};
+        }
+        rest_ = 0;
+        if (all <= 0 || burst_rest)
             quiet_left_ = QUIET * window_;
-        return {d, true, true};
+        return {all, true, all > 0};
     }
 
     // after a jump: the windows start afresh and a Play's jump is used up; the error's range stays (each Play's own
@@ -285,6 +338,12 @@ private:
     int64_t block_ = 0;    // the last block's frames
     int64_t shift_ = 0;    // the pre-shift of this Play while its burst eats it
     int64_t learn_left_ = 0, learn_sum_ = 0, learn_min_ = 0, base_ = 0;
+    int64_t keep_ = 0;             // the largest rest that may stay (set_room; 0: no room)
+    int64_t rest_ = 0;             // frames the timeline sits behind the ring on purpose, 0..keep_
+    int64_t late_lo_ = INT64_MAX;  // the lowest err of the learn second's last half (the steady cadence after the burst)
+    int64_t recent_[8] = {};       // the last eight learned bursts
+    unsigned recent_n_ = 0;
+    int64_t since_step_ = SPACE;   // frames since the last one-frame step, up to SPACE
     int64_t cur_frames_ = 0, cur_min_ = INT64_MAX, cur_max_ = INT64_MIN, prev_min_ = INT64_MAX, prev_max_ = INT64_MIN;
 };
 

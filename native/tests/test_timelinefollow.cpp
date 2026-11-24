@@ -3,6 +3,8 @@
 // the ring grows in 441-frame USB chunks (10 ms), the host calls 256-frame blocks at the given times, the timeline
 // moves by the block plus what TimelineFollow says - the same arithmetic as process().
 #include "check.h"
+#include "device/crossfade.h"
+#include "device/stamprule.h"
 #include "device/timelinefollow.h"
 #include <cstdint>
 #include <cstdlib>
@@ -13,6 +15,8 @@ using namespace vti;
 namespace {
 
 constexpr int RATE = 44100, BLOCK = 256;
+constexpr int64_t LEAD_A = 3072, FLOOR_MIN = 1024; // stamprule.h timing_lead, virusplugin.h floor_min
+constexpr int64_t ROOM = LEAD_A - FLOOR_MIN;       // what process() hands to set_room (#37)
 
 struct Lcg { // deterministic jitter
     uint64_t s;
@@ -44,11 +48,14 @@ struct Result {
 
 // `plays`: host times of Play starts; as in process(), the block that sees Play tells the follower after its update.
 // `activated`: each Play comes right after setActive(1) (REAPER), seen by process() before the Play block's update
+// `room` > 0: set_room, as the plug-in does at the default lead (#37)
 Result run(const std::vector<int64_t> &calls, const Ring &ring, bool marker = true,
-           const std::vector<int64_t> &plays = {}, bool activated = false, bool from_stop = false)
+           const std::vector<int64_t> &plays = {}, bool activated = false, bool from_stop = false, int64_t room = 0)
 {
     TimelineFollow f;
     f.set_window(RATE / 2);
+    if (room > 0)
+        f.set_room(room);
     Result r;
     int64_t tl = ring.newest(calls[0]); // anchored at the first block
     size_t next_play = 0;
@@ -703,6 +710,7 @@ struct Clocks {
     int64_t jitter = 300;    // the ring seen up to this many frames early or late per block (#51: err spread ~630)
     int64_t anchor_late = 0; // the anchor block sees the ring this much further than its average (an unlucky anchor)
     int64_t margin = 0;      // set_margin() if > 0
+    int64_t room = 0;        // set_room() if > 0 (#37)
     uint64_t seed = 1;
 };
 
@@ -717,6 +725,8 @@ Drift two_clocks(const Clocks &c, int seconds, int from_seconds)
     f.set_window(c.rate / 2);
     if (c.margin > 0)
         f.set_margin(c.margin);
+    if (c.room > 0)
+        f.set_room(c.room);
     Jitter j{c.seed, c.jitter};
     const int chunk = c.rate / 1000;
     auto newest = [&](int64_t t) { return ((int64_t)((double)t * (1.0 + c.ppm * 1e-6)) + j.next()) / chunk * chunk; };
@@ -944,7 +954,8 @@ TEST(timeline_logic_lost_frames_one_crossfade_at_any_phase)
 TEST(timeline_drift_never_crossfades)
 {
     // clock drift up to 500 ppm passes STEP by at most ~48 frames a 2 s window: its owed amount stays below the fade
-    // threshold, so it keeps its sparse one-frame steps
+    // threshold, so it keeps its sparse one-frame steps (each rendered as a one-frame fade since E589: Move::fade
+    // without Move::jump) and never becomes a crossfaded jump
     for (double ppm : {-500.0, -200.0, 200.0, 500.0}) {
         Clocks c;
         c.ppm = ppm, c.jitter = 0;
@@ -955,7 +966,7 @@ TEST(timeline_drift_never_crossfades)
         for (int64_t k = 0; k < 120LL * c.rate / c.block; k++) {
             const int64_t t = k * c.block, newest = (int64_t)((double)t * (1.0 + ppm * 1e-6)) / 48 * 48;
             const TimelineFollow::Move m = f.update(newest - tl, c.block, true);
-            fades += m.fade;
+            fades += m.jump && m.fade;
             tl += m.delta + c.block;
         }
         CHECK_EQ(fades, 0);
@@ -1106,8 +1117,10 @@ TEST(timeline_preshift_rest_after_play_is_one_crossfade)
 {
     // rc5 log: a Play pre-shifted by 3616, its burst ~290 smaller: the timeline then sat ~290 behind and 4 s later a
     // window end crossfaded the rest (287); E581 made it one-frame steps again (167 in the user's REAPER test, can
-    // sound metallic; at Logic's ~1200 a hard jump, #37). Now the rest is one crossfade when the learn second ends,
-    // at every phase of the mean window: no steps, no hard jump after the first Play's
+    // sound metallic; at Logic's ~1200 a hard jump, #37). Without a room (set_room not called: a lead that leaves
+    // none, e.g. the experimental low lead) the rest is one crossfade when the learn second ends, at every phase of
+    // the mean window: no steps, no hard jump after the first Play's. With the room the rest stays instead
+    // (timeline_logic_rest_inside_the_lead_room_is_kept)
     for (double ph = 0; ph < 2; ph += 0.25) {
         const int64_t L = latency(128);
         const Reaper r = reaper({{10, L, true}, {17 + ph, L - 300, true}}, 128, 30);
@@ -1128,17 +1141,22 @@ TEST(timeline_xrun_after_a_play_still_crossfades)
     }
 }
 
-TEST(timeline_xrun_inside_the_quiet_time_jumps_hard)
+TEST(timeline_xrun_inside_the_quiet_time_is_crossfaded)
 {
-    // an xrun within QUIET after a Play (4 s) is not crossfaded: there an offset may still be the burst's (E581). Only
-    // the pre-shift's own rest fades in that time. 1500 lost: beyond JUMP for half a second, inside QUIET
+    // an xrun within QUIET after a Play (4 s): E581 made it a hard jump, because rc5's fades there were flagged burst
+    // jumps the read path cut anyway. But a move forward skips audio that is in the ring, so it can always be
+    // crossfaded, and a hard one is a click for nothing (#37 rc7: one after every Play). QUIET now only keeps the
+    // window-end catch-up from firing on a burst's rest. 1500 lost: beyond JUMP for half a second, inside QUIET
     const int64_t L = latency(128);
     const Reaper r = reaper({{10, L, true}, {17, L, true}}, 128, 30, 1500, 18.2);
-    CHECK_EQ(r.fades(), 0);
-    int late = 0;
-    for (const Reaper::Jump &j : r.jumps)
-        late += j.at >= 18.2 && j.at < 20 && !j.fade && j.by > 1300;
+    CHECK_EQ(r.fades(), 1);
+    int late = 0, hard_forward = 0;
+    for (const Reaper::Jump &j : r.jumps) {
+        late += j.at >= 18.2 && j.at < 20 && j.fade && j.by > 1300;
+        hard_forward += j.by > 0 && !j.fade;
+    }
     CHECK_EQ(late, 1);
+    CHECK_EQ(hard_forward, 0);
 }
 
 TEST(timeline_logic_varying_bursts_no_click_after_play)
@@ -1147,7 +1165,9 @@ TEST(timeline_logic_varying_bursts_no_click_after_play)
     // ~1200 frames from Play to Play (learned 10779, 11847, 11847, 10642). A burst larger than the pre-shift read past
     // the newest frame (1 block pulled back by 343-1097) and jumped back hard; a smaller one jumped forward hard or
     // was stepped off frame by frame (17-45 steps per Play) - right on the first notes, the reported crackle. Once
-    // two Plays showed the spread, the pre-shift keeps that much room, and the rest after the burst is one crossfade
+    // two Plays showed the spread, the pre-shift keeps that much room, and the rest after the burst is one crossfade.
+    // This is the path without set_room (a lead that leaves no room). At the default lead the rest stays and no
+    // crossfade is needed: rc7 still crackled with this rule (timeline_logic_rest_inside_the_lead_room_is_kept)
     for (const int block : {512, 2048}) {
         const std::vector<int64_t> b = {11847, 10779, 11847, 11847, 10642, 11847, 10779}; // the log's Plays
         std::vector<Burst> bursts;
@@ -1167,6 +1187,366 @@ TEST(timeline_logic_varying_bursts_no_click_after_play)
         CHECK_EQ(late_hard, 0);
         CHECK_EQ(late_steps, 0);
         CHECK(late_fades <= 5); // at most one per Play
+    }
+}
+
+// #37 rc7 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-24, build c7e07331): every pre-shifted Play was followed by a
+// crossfade about a second later ("caught up by 374..2067 frames"), and err at that block was still 250-1960 above the
+// fade, so a second move followed: a hard jump forward ("anchors 1" in the windows with one Play) or 138-174 one-frame
+// steps - all on the first notes. With the marker none of it is needed: an event at timeline t sounds at ring frame
+// t + lead and is read latency later, so a timeline that is BEHIND the ring by a rest plays every stamped event
+// exactly. The rest only uses stamp lead, and a stamp is floored only beyond A - floor_min (stamprule.h StampFloor).
+// So a rest inside that room stays (set_room), and what has to move forward is always crossfaded.
+namespace {
+
+struct LogicPlay {
+    int64_t burst; // rendered at once at Play: the lowest err of the learn second
+    int64_t idle;  // then the host waits this long and stays burst - idle ahead (the log: err at the fade - the fade)
+};
+
+struct Logic : Reaper {
+    std::vector<double> play_at;  // s
+    std::vector<int64_t> rest_hi; // per Play: the highest err of its last two seconds (the rest that stays)
+    int late(double from, bool fades, bool hard) const // jumps from `from` on
+    {
+        int n = 0;
+        for (const Jump &j : jumps)
+            n += j.at >= from && (j.fade ? fades : hard);
+        return n;
+    }
+    int steps_from(double from) const
+    {
+        int n = 0;
+        for (double t : step_at)
+            n += t >= from;
+        return n;
+    }
+    int pulled_from(double from) const
+    {
+        int n = 0;
+        for (double t : pulled_at)
+            n += t >= from;
+        return n;
+    }
+};
+
+// Logic's Plays from a stop, one every 9 s from 10 s on: 44.1 kHz, the ring seen in 441-frame steps (err swings about
+// +-220, the log's band at block 512). `room` 0: set_room is not called. `lost` frames at `lost_at` s: a host xrun
+Logic logic(const std::vector<LogicPlay> &plays, int block, int64_t room, int64_t lost = 0, double lost_at = -1)
+{
+    constexpr int64_t chunk = 441;
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    f.set_margin(MARGIN);
+    if (room > 0)
+        f.set_room(room);
+    Logic r;
+    int64_t tl = -220, t = 0;
+    auto call = [&](bool starts) {
+        const int64_t newest = t / chunk * chunk + (lost_at >= 0 && t >= (int64_t)(lost_at * RATE) ? lost : 0);
+        const TimelineFollow::Move m = f.update(newest - tl, block, true);
+        if (m.jump)
+            r.jumps.push_back({(double)t / RATE, m.delta, m.fade});
+        else if (m.delta != 0)
+            r.steps++, r.step_at.push_back((double)t / RATE);
+        tl += m.delta;
+        if (starts) {
+            const int64_t s = f.play_started(true);
+            r.shifts.push_back(s);
+            tl += s;
+        }
+        if (newest - tl < -MARGIN) // this block reads past the newest frame
+            r.pulled++, r.pulled_at.push_back((double)t / RATE);
+        if (!r.rest_hi.empty() && t >= (int64_t)((r.play_at.back() + 7) * RATE) && newest - tl > r.rest_hi.back())
+            r.rest_hi.back() = newest - tl;
+        tl += block;
+    };
+    for (size_t k = 0; k <= plays.size(); k++) {
+        for (const int64_t until = (int64_t)(10 + 9 * k) * RATE; t < until; t += block)
+            call(false);
+        if (k == plays.size())
+            break;
+        r.play_at.push_back((double)t / RATE), r.rest_hi.push_back(INT64_MIN);
+        const int64_t t0 = t, n = plays[k].burst / block + 1; // whole blocks at once: the ring does not move
+        for (int64_t j = 0; j < n; j++)
+            call(j == 0);
+        t = t0 + n * block - plays[k].burst; // the burst's last block: the host is `burst` ahead here
+        call(false);
+        t = t0 + (n + 1) * block - (plays[k].burst - plays[k].idle); // then it idles and stays burst - idle ahead
+    }
+    return r;
+}
+
+// The rc7 log's Plays. Block 512 (session from 1795473943): the bursts follow from the logged shifts and fades (each
+// shift is the burst before it plus its room: 5441 + 886 = 6327, 5867 + 1466 = 7333), the idle is err at the fade
+// block minus the fade where both are logged (633, 1606, 920, 252, 920, 698, 723, 1222); 600, 362 and 400 are
+// assumed (Plays without a fade line)
+const std::vector<LogicPlay> RC7_512 = {{5755, 600}, {5815, 362}, {5441, 633}, {4260, 1606}, {5680, 400}, {5924, 920},
+                                        {5516, 252}, {5512, 920}, {5781, 698}, {5867, 723}, {5912, 1222}};
+// Block 2048 (session from 1795473710): 11443 / 236, 10524 / 1961 and 11346 / 520 the same way; 11787 and 11817 are the
+// shifts of the two Plays without a fade, and the last four are rc6's learned bursts (E582); their idles are assumed
+const std::vector<LogicPlay> RC7_2048 = {{11787, 500}, {11817, 500}, {11443, 236}, {10524, 1961}, {11346, 520},
+                                         {10779, 600}, {11847, 600}, {11847, 600}, {10642, 600}};
+
+} // namespace
+
+TEST(timeline_logic_rest_inside_the_lead_room_is_kept)
+{
+    // from the third Play on (the first learns, the second has one burst to go by): no hard jump, no step, no read
+    // past the newest frame. At 512 one Play may fade (the one whose burst was 4260 after 5441-5815 and whose idle of
+    // 1606 left more than the room), at 2048 three (bursts 10524-11847: the spread plus the idle passes the room)
+    for (const int block : {512, 2048}) {
+        const Logic r = logic(block == 512 ? RC7_512 : RC7_2048, block, ROOM);
+        const double from = r.play_at[2] - 0.5;
+        CHECK_EQ(r.late(from, false, true), 0);
+        CHECK_EQ(r.steps_from(from), 0);
+        CHECK_EQ(r.pulled_from(from), 0);
+        CHECK(r.late(from, true, false) <= (block == 512 ? 1 : 3));
+        for (size_t k = 2; k < r.rest_hi.size(); k++)
+            CHECK(r.rest_hi[k] <= ROOM); // and what stays floors no stamp
+    }
+}
+
+TEST(timeline_kept_rest_does_not_add_up)
+{
+    // ten equal Plays: the pre-shift counts from where the timeline already is (the rest kept from the Play before),
+    // else each Play put its ~700 on top and the fourth passed the room. Nothing moves at all, and the tenth Play's
+    // rest is the third's (a ring step of slack)
+    for (const int block : {512, 2048}) {
+        const Logic r = logic(std::vector<LogicPlay>(10, {block == 512 ? 5600 : 11400, 600}), block, ROOM);
+        const double from = r.play_at[2] - 0.5;
+        CHECK_EQ(r.late(from, true, true), 0);
+        CHECK_EQ(r.steps_from(from), 0);
+        CHECK_EQ(r.pulled_from(from), 0);
+        for (size_t k = 2; k < r.rest_hi.size(); k++)
+            CHECK(r.rest_hi[k] <= ROOM);
+        CHECK(r.rest_hi[9] <= r.rest_hi[2] + 441);
+    }
+}
+
+TEST(timeline_xrun_on_a_kept_rest_pays_once_crossfaded)
+{
+    // a host xrun while a rest is kept (Logic lost ~2290 frames, E584): rest + loss pass the room, one crossfade pays
+    // it - 5.5 s after the Play and 2 s after it (inside QUIET) alike: no hard jump, no steps, nothing floored after
+    for (const double after : {5.5, 2.0}) {
+        const Logic r = logic(std::vector<LogicPlay>(4, {5600, 600}), 512, ROOM, 2290, 28 + after);
+        const double from = 28 + after;
+        CHECK_EQ(r.late(from, true, false), 1);
+        CHECK_EQ(r.late(from, false, true), 0);
+        CHECK_EQ(r.steps_from(from), 0);
+        CHECK_EQ(r.pulled_from(from), 0);
+        CHECK(r.rest_hi[2] <= ROOM && r.rest_hi[3] <= ROOM);
+    }
+    // a loss that still fits the room with the rest (600 on ~700): nothing moves, the lead covers it
+    const Logic r = logic(std::vector<LogicPlay>(4, {5600, 600}), 512, ROOM, 600, 33.5);
+    CHECK_EQ(r.late(r.play_at[2] - 0.5, true, true), 0);
+    CHECK_EQ(r.steps_from(r.play_at[2] - 0.5), 0);
+    CHECK(r.rest_hi[2] <= ROOM && r.rest_hi[3] <= ROOM);
+}
+
+TEST(timeline_rest_inside_the_room_floors_no_stamp)
+{
+    // what the room rests on (stamprule.h StampFloor, virusplugin.cpp pack): a block at timeline tl has
+    // err = newest - S - tl, and its event is due at ring frame tl + S + A. Up to err = A - floor_min the safety net
+    // leaves the stamp alone (the note sounds on its stamp), one frame more and it moves
+    const int64_t S = 5000, tl = 1000000;
+    for (const int64_t err : {(int64_t)0, (int64_t)700, ROOM}) {
+        StampFloor net;
+        CHECK_EQ(net.apply(tl + S + LEAD_A, tl + S + err, FLOOR_MIN), tl + S + LEAD_A);
+        CHECK_EQ(net.moved, 0);
+    }
+    StampFloor net;
+    CHECK_EQ(net.apply(tl + S + LEAD_A, tl + S + ROOM + 1, FLOOR_MIN), tl + S + LEAD_A + 1);
+    CHECK_EQ(net.moved, 1);
+}
+
+TEST(timeline_forward_move_is_always_faded)
+{
+    // a move forward skips audio that is in the ring, so the read path can always crossfade it (crossfade.h); a hard
+    // one is a click for nothing. Without a room too. rc7 jumped hard in three places (the third, an xrun inside
+    // QUIET, is timeline_xrun_inside_the_quiet_time_is_crossfaded):
+    // (1) after a Play's fade, the rest the fade left (the log's "anchors 1" per Play; 4 and 3 times in this model)
+    for (const int block : {512, 2048}) {
+        const Logic r = logic(block == 512 ? RC7_512 : RC7_2048, block, 0);
+        int hard_forward = 0;
+        for (const Reaper::Jump &j : r.jumps)
+            hard_forward += j.at >= r.play_at[2] - 0.5 && j.by > 0 && !j.fade;
+        CHECK_EQ(hard_forward, 0);
+    }
+    // (2) a stall beyond AT_ONCE in steady playback (6000 frames): at once as before, but crossfaded
+    {
+        const Logic r = logic({}, 512, 0, 6000, 5);
+        CHECK_EQ((int)r.jumps.size(), 1);
+        CHECK(r.jumps.size() == 1 && r.jumps[0].fade && r.jumps[0].by > 5000);
+    }
+    // a move back stays hard: its old position is past the newest frame, there is nothing to fade from
+    {
+        const Logic r = logic({{5600, 600}}, 512, 0);
+        int back_faded = 0;
+        for (const Reaper::Jump &j : r.jumps)
+            back_faded += j.by < 0 && j.fade;
+        CHECK_EQ(back_faded, 0);
+    }
+}
+
+TEST(timeline_lasting_offset_inside_the_room_is_absorbed)
+{
+    // REAPER after a render (E279), ~1000 frames behind for good: with the room nothing moves - the stamped notes
+    // are exact either way, the offset only uses lead. Beyond the room it is paid in one crossfade, all of it (the
+    // whole lead is back), and a host AHEAD of the ring jumps back as before: those frames are not there yet
+    Ring ring;
+    ring.offset_at = 10 * RATE, ring.offset = 1000;
+    const Result kept = run(steady(20), ring, true, {}, false, false, ROOM);
+    CHECK_EQ(kept.jumps, 0);
+    CHECK_EQ(kept.steps, 0);
+    for (size_t i = 0; i < kept.t.size(); i++)
+        if (kept.t[i] > 12 * RATE)
+            CHECK(kept.err[i] > 550 && kept.err[i] < 1100); // the offset on the model's band (-390..50)
+    ring.offset = 2500;
+    const Result paid = run(steady(20), ring, true, {}, false, false, ROOM);
+    CHECK_EQ(paid.jumps, 1);
+    CHECK_EQ((int)paid.hard_at.size(), 0);
+    if (paid.jumps == 1)
+        CHECK(paid.jump_by[0] >= 2200 && paid.jump_by[0] <= 2600);
+    CHECK(std::llabs(paid.err.back()) < 450);
+    ring.offset = -1000;
+    const Result back = run(steady(20), ring, true, {}, false, false, ROOM);
+    CHECK_EQ(back.jumps, 1);
+    CHECK_EQ((int)back.hard_at.size(), 1);
+    CHECK(std::llabs(back.err.back()) < 450);
+}
+
+// Guards: the room is on in the plug-in at the default lead, so the older rules have to hold with it. Where no jump
+// is asked for, the room changes nothing at all: the same steps at the same blocks
+namespace {
+bool same(const Result &a, const Result &b) { return a.jumps == b.jumps && a.steps == b.steps && a.err == b.err; }
+} // namespace
+
+TEST(timeline_room_changes_nothing_in_a_rough_cadence)
+{
+    // E337 (Ableton at 2048, err -767..852 within a second): no jump, few steps, exactly as without the room
+    for (uint64_t seed = 1; seed <= 4; seed++) {
+        const std::vector<int64_t> calls = uneven(seed, 10, 60, 10, 882);
+        const Result r = run(calls, Ring{}, true, {}, false, false, ROOM);
+        CHECK(r.jumps == 0);
+        CHECK(r.steps < 400);
+        CHECK(same(r, run(calls, Ring{})));
+    }
+}
+
+TEST(timeline_room_keeps_the_drift_steps)
+{
+    // two clocks drifting: one-frame steps as before, on both sides. A drift is not taken into the room: it would
+    // fill it in minutes (200 ppm = 529 frames a minute) and then cost a crossfade of the whole room
+    for (double ppm : {-200.0, 200.0}) {
+        Ring ring;
+        ring.ppm = ppm;
+        const Result r = run(steady(60), ring, true, {}, false, false, ROOM);
+        CHECK(r.jumps == 0);
+        CHECK(r.steps > 100);
+        for (size_t i = 3000; i < r.err.size(); i++)
+            CHECK(r.err[i] > -512 && r.err[i] < 600);
+        CHECK(same(r, run(steady(60), ring)));
+    }
+}
+
+TEST(timeline_room_two_clocks_stay_inside_the_read_margin)
+{
+    // #51 (E564, E578) with the room, the cases of the two tests above: no pulled-back block, no jump, the same steps
+    struct Case {
+        int block;
+        double ppm;
+    };
+    for (const Case k : {Case{256, -90}, Case{256, -200}, Case{256, 90}, Case{32, -90}, Case{2048, -90}}) {
+        Clocks c;
+        c.block = k.block, c.ppm = k.ppm;
+        const Drift off = two_clocks(c, 10 * 60, k.block >= 2048 ? 30 : 4);
+        c.room = ROOM;
+        const Drift d = two_clocks(c, 10 * 60, k.block >= 2048 ? 30 : 4);
+        CHECK(d.jumps == 0);
+        CHECK_EQ(d.pulls, 0);
+        CHECK_EQ(d.steps, off.steps);
+        CHECK_EQ(d.err_min, off.err_min);
+        CHECK_EQ(d.err_max, off.err_max);
+    }
+}
+
+TEST(timeline_room_needs_the_marker)
+{
+    // without the marker the stamps are not tied to the ring: a timeline behind it is real latency, so there is no
+    // room - the offset is stepped out as before
+    Ring ring;
+    ring.offset_at = 5 * RATE, ring.offset = 1000;
+    const Result r = run(steady(20), ring, false, {}, false, false, ROOM);
+    CHECK(r.jumps == 0);
+    CHECK(r.steps > 500);
+    CHECK(std::llabs(r.err.back()) < 450);
+    CHECK(same(r, run(steady(20), ring, false)));
+    // and a rest kept with the marker is given up when the marker goes: stepped out, no jump
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    f.set_room(ROOM);
+    int64_t err = 1000, jumps = 0, steps = 0;
+    for (int i = 0; i < 20 * RATE / BLOCK; i++) {
+        const TimelineFollow::Move m = f.update(err, BLOCK, i < 5 * RATE / BLOCK);
+        jumps += m.jump, steps += !m.jump && m.delta != 0;
+        err -= m.delta;
+    }
+    CHECK_EQ(jumps, 0);
+    CHECK(steps > 500);
+    CHECK(err < 450);
+}
+
+namespace {
+struct Steps {
+    int n = 0, unfaded = 0;
+    int64_t gap_min = INT64_MAX; // frames between two steps
+};
+// a mean offset of 300 (beyond STEP: 172 frames owed), stepped off in a closed loop at this block size
+Steps step_off(int block)
+{
+    TimelineFollow f;
+    f.set_window(RATE / 2);
+    Steps s;
+    int64_t err = 300, since = -1;
+    for (int i = 0; i < 12 * RATE / block; i++) {
+        const TimelineFollow::Move m = f.update(err, block, true);
+        if (since >= 0)
+            since += block;
+        if (!m.jump && m.delta != 0) {
+            s.n++, s.unfaded += !m.fade;
+            if (since >= 0)
+                s.gap_min = since < s.gap_min ? since : s.gap_min;
+            since = 0;
+            err -= m.delta;
+        }
+    }
+    return s;
+}
+} // namespace
+
+TEST(timeline_step_is_reported_as_faded)
+{
+    // a one-frame step skips or repeats a frame: hard, that is a click per block (86 a second at block 512, the
+    // "metallic" sound of #37 and E579). The follower reports it with Move::fade, and the read path renders it as a
+    // 128-frame crossfade from the old position (crossfade.h, delta +-1) like a catch-up
+    for (const int block : {64, 128, 512, 2048}) {
+        const Steps s = step_off(block);
+        // 300 - HOLD = 172 owed; at 2048 a window has 43 blocks and the mean is back inside STEP after the first
+        CHECK(block == 2048 ? s.n >= 40 : s.n == 172);
+        CHECK_EQ(s.unfaded, 0);
+    }
+}
+
+TEST(timeline_steps_leave_room_for_their_fade)
+{
+    // below block 128 a step per block would restart the 128-frame fade mid-way (a half step: a small click again).
+    // So two steps are at least Crossfade::LEN frames apart: every 4th block at 32, every 2nd at 64 - 0.8 % at
+    // most, far more than any clock drift needs. From 128 on one per block, as before
+    for (const int block : {32, 64, 128, 256}) {
+        const Steps s = step_off(block);
+        CHECK_EQ(s.n, 172); // all of them still come
+        CHECK_EQ(s.gap_min, block < Crossfade::LEN ? (int64_t)Crossfade::LEN : (int64_t)block);
     }
 }
 

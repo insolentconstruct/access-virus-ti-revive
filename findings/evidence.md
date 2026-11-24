@@ -5905,3 +5905,57 @@ storage backing, persistence and DSP consumption remain open.
 - **Method:** static receive-path and reply-serializer review, review of two retained emu8051 write/read runs with flags zero, and the maintainer's nonzero-flag emulation (2026-11-24)
 - **Confidence:** HIGH (static flag clear and recorded emulator results under the stated premises) / MED (composed receive-to-reply model) / open (hardware persistence)
 - **Hardware:** no
+
+### E589
+
+#37 rc7 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-24, build c7e07331) and the design that follows from it:
+"keep the rest" plus every forward move and one-frame step faded. **Model only, not run on hardware, not in Logic.**
+(1) The log. Every pre-shifted Play was followed about a second later by "timeline caught up by 374..2067 frames
+(crossfaded)" (block 512) or 404..1835 (block 2048), and err at that block was still 250-1960 above the fade (e.g.
+"caught up by 2067, err 3673"); the windows with one Play then show "anchors 1" (a hard jump forward, not crossfaded
+because of QUIET) or 138-174 timeline steps. The logged shifts follow exactly from rc7's rule (the burst before plus
+its room: 5441 + 886 = 6327, 5867 + 1466 = 7333), so the bursts at block 512 were 5441-5924 with one of 4260; the
+room of a quarter of the burst made a rest of ~1400 at every Play. Inferred (the log has no per-block err): Logic
+idles after its burst, so the steady cadence sits 250-1960 above the learn second's lowest err and the fade from
+that low left a second move. Windows without a Play: 0 steps, 0 fades, read margin 280-530, drops unchanged since
+stream start, virus frames 441000/441441 per 10 s - the Virus stream is clean. The windows with 43 and 139 blocks
+pulled back have fewer "timeline back" lines than bursts (0-1 against 1-6 hard jumps): bursts without a pre-shift,
+43 blocks at 512 being the half-second far window; why they got none is not known. (2) Why the rest need not be
+paid (code, HIGH): with the marker an event at timeline t is due at ring frame t + lead and process() reads the
+ring latency behind that (virusplugin.h, "R5 timing"), so a timeline behind the ring by r still plays every stamped
+event exactly; r only uses stamp lead, and StampFloor moves a stamp only beyond A - floor_min = 3072 - 1024 = 2048
+(unit test timeline_rest_inside_the_room_floors_no_stamp). Simulator (virus-ti-sim-95, earlier model runs, nothing
+new run; the real unit's border is not measured): a lead of 1100-2000 frames at arrival is sample-exact (0 of 16
+off at every sender lead 576..2048, S051; 896..8192, S052), queued notes keep their stamps when a later F5 comes
+(S065 Q1), and by reading nothing reacts to a lead that changes while the stamps stay monotonic (E246, E251).
+(3) The change (timelinefollow.h): set_room(A - floor_min) gives the follower a rest of 0..room - 256 frames it may
+sit behind the ring; every rule works on err - rest, and an offset a rule wants gone is first taken into or out of
+the rest (no move), only what does not fit moves the timeline, then all of it. After a pre-shifted Play the rest is
+the steady cadence's low (the learn second's last half) above the normal low. The pre-shift is the largest of the
+last eight bursts + 128 + block/8, counted from where the timeline already is. One-frame drift steps are not taken
+into the rest (200 ppm would fill it in minutes and then cost one large crossfade). Only with the marker; a lead
+that leaves no room (Live Mode, Plugin Latency, the experimental low lead) keeps the rules of E582. Also: every move
+forward is crossfaded (the skipped audio is in the ring; E581's hard jump inside QUIET is gone), a move back stays
+hard; each one-frame step is reported with Move::fade and the direct read renders it as a 128-frame fade (the
+resampled read steers smoothly already), two steps at least 128 frames apart so a fade is never restarted mid-way;
+the fade's gains are a table built off the audio thread. A live stamp counts S + rest so it stays the original's.
+(4) Model (work/issue37-keep, not in git: the real header against a copy of the rc7 one; Plays rebuilt from the log
+as a burst then an idle, five idle values assumed), from the third Play on. Block 512, 9 Plays: rc7 9 fades, 6 hard
+jumps, 325 steps, 15 blocks pulled back, 0 Plays without a move; new 1 fade, 0 hard, 0 steps, 0 pulled back, 8
+without a move. Block 2048, 7 Plays: rc7 8 fades, 3 hard, 88 steps; new 2 fades, 0 hard, 0 steps, 4 without a move,
+and one kept rest at the room's edge whose band top passed 2048 by up to 72 frames (33 blocks with floored stamps:
+notes up to 1.6 ms late, no click). Bootstrap of 398 Plays from the same lists (+-100 frames): 512 rc7 3 without a
+move, 209 hard jumps, 20661 steps, 136 pulled back; new 362 without a move, 32 fades, 0 hard, 620 steps, 0 pulled
+back; 2048 rc7 0 without a move, 508 fades, 160 hard, 9691 steps, 1 pulled back; new 201 without a move, 167
+fades, 0 hard, 2423 steps, 8 pulled back (a burst larger than the last eight by more than the guard). A synthetic
+saw (numpy, one step per 512-block): a hard step leaves -49.5 dB of energy above 12 kHz, through the fade -111.6 dB.
+(5) Not shown, open: anything on the TI2 or in Logic; the 2048 model does not have Logic's real cadence (the log's
+band is -2013..73); notes played live sound up to the rest later (at most ~41 ms) while a rest is kept; the lead
+left for a host stall shrinks by the rest (to 1280 frames at least; E496 had 1408 exact on Linux, Logic is rougher,
+E363).
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/timelinefollow.h (set_room, rest(), moved(), play_started, SPACE), native/src/device/crossfade.h (gain table), native/plugin/source/virusplugin.cpp process() (set_room, the step's fade, "frames behind kept" log line, live_s); native/tests/test_timelinefollow.cpp (timeline_logic_rest_inside_the_lead_room_is_kept, timeline_kept_rest_does_not_add_up, timeline_xrun_on_a_kept_rest_pays_once_crossfaded, timeline_lasting_offset_inside_the_room_is_absorbed, timeline_forward_move_is_always_faded, timeline_xrun_inside_the_quiet_time_is_crossfaded, timeline_step_is_reported_as_faded, timeline_steps_leave_room_for_their_fade, the timeline_room_* guards), native/tests/test_crossfade.cpp (crossfade_renders_one_frame_steps_without_a_jump); work/issue37-rc7/log.txt, work/issue37-keep (model, not in git); issue #37; E574, E581, E582, E584
+- **Method:** reporter's diag.log, code reading, simulator answer (model runs cited, nothing new run), a model of the log's Plays run against both headers, unit tests failing before / passing after
+- **Confidence:** HIGH (what the log's Plays show; that a rest inside the room floors no stamp, from the code) / MEDIUM (the idle after the burst, inferred; the simulator's lead border) / open (that it removes the crackle the reporter hears: not run on hardware or in Logic)
+- **Hardware:** no
