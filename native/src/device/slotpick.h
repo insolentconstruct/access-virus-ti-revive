@@ -42,6 +42,17 @@ inline bool slot_give_up(int slot, bool present, bool elsewhere, int absent_ms)
     return absent_ms >= SLOT_GIVE_UP_MS && (elsewhere || (slot > 1 && !present));
 }
 
+// #51 (rc7, Studio Pro 8): a song opened with two instances in one process; the first claimed Virus 1 and was never
+// processed, the one the DAW played waited behind it (silence until File > Revert). An owner the DAW has not processed
+// for YIELD_MS (`mine_ms`, -1 = never) while an instance of this process without a Virus was processed within
+// PLAYED_MS (`waiting_ms`, -1 = never) lets its Virus go, and does not claim one again in that state. Two instances
+// that are both played behave as before: the first keeps the Virus.
+constexpr int YIELD_MS = 2000, PLAYED_MS = 500;
+inline bool slot_yield(int mine_ms, int waiting_ms)
+{
+    return waiting_ms >= 0 && waiting_ms <= PLAYED_MS && (mine_ms < 0 || mine_ms >= YIELD_MS);
+}
+
 // the slot a project keeps (getState): the one where a Virus answered, else the project's own (audit #2; a slot only
 // being tried is not kept: a project saved then reopened on that empty slot, round 0.8.42 test)
 inline int slot_to_save(int found, int preferred) { return found ? found : preferred; }

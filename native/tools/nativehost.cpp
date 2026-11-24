@@ -18,6 +18,8 @@
 // the same notes; at T s the first is removed and the second takes over the Virus. --editor2 with it: the
 // duplicate's editor too (its "Virus unavailable" page while it waits); with --editor both editors are open at once,
 // as in REAPER at a duplicated track (E183: the second one replaced the process-wide VSTGUI run loop).
+// --idle-first with --duplicate: the first instance is activated but never processed, the second one is (#51,
+// Studio Pro 8 opening a song): the played one has to get the Virus.
 // --state loads a state (a raw component state, or vtihost's VTISTATE file: the original's state), checks that
 // getState returns it unchanged, --param applies parameter changes through process(), --save writes getState.
 // --play A:B (repeatable, instead of --transport/--stop-at): the transport plays from A s to B s, each Play from bar 1;
@@ -259,6 +261,7 @@ int main(int argc, char **argv)
     bool reactivate = false;                      // --reactivate: setActive(0)/(1) right before each --play (REAPER, E351)
     double ppm = 0; // --ppm N: the block period divided by 1 + N * 1e-6 (a second clock against the Virus, #51)
     double duplicate = 0; // --duplicate T: remove the first of two instances after T s
+    bool idle_first = false; // --idle-first: with --duplicate the first instance is active but never processed (#51)
     double sc_sine = 0; // --sidechain-sine HZ: a sine (-6 dBFS) on the Sidechain bus (input bus 1)
     std::vector<std::pair<double, double>> aheads; // (at s, ms)
     int block = 512; // --block N: host block size
@@ -411,7 +414,9 @@ int main(int argc, char **argv)
             Action a{};                                           // one in the same window (a DAW's FX window)
             a.kind = 'o', a.t = atof(argv[++i]);
             actions.push_back(a);
-        } else if (!strcmp(argv[i], "--duplicate") && i + 1 < argc)
+        } else if (!strcmp(argv[i], "--idle-first")) // #51 Studio Pro: the DAW plays the second, not the first
+            idle_first = true;
+        else if (!strcmp(argv[i], "--duplicate") && i + 1 < argc)
             duplicate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--sidechain-sine") && i + 1 < argc)
             sc_sine = atof(argv[++i]);
@@ -830,7 +835,7 @@ int main(int argc, char **argv)
                 if (float *s = data.inputs[1].channelBuffers32 ? data.inputs[1].channelBuffers32[c] : nullptr)
                     for (int i = 0; i < block; i++)
                         s[i] = 0.5f * (float)std::sin(2 * 3.14159265358979323846 * sc_sine * ((double)clk.frame(b) + i) / clk.rate);
-        if (proc)
+        if (proc && !(idle_first && proc2))
             proc->process(data);
         if (proc2) { // the duplicate plays the same notes (same clip on the duplicated track)
             data2.inputEvents = &ev;

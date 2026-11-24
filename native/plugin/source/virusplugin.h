@@ -144,6 +144,8 @@ public:
     // the Virus this instance claimed when several are connected (#45): 1.., 0 = none yet
     int slot() const { return slot_.load(); }
     bool other_owner() const; // another instance of this process talks to another Virus (#50: show the numbers)
+    // process(): the DAW processed this instance (a block with samples, steady ms); #51: the Virus goes to the played one
+    void note_processed(int64_t ms);
     int preferred_slot() const { return slot_pref_.load(); }
     // the slot where a Virus answered this instance (0 = none yet, or given up): what a project keeps
     int found_slot() const { return found_slot_.load(); }
@@ -272,6 +274,8 @@ private:
     bool claim_owner();
     void release_owner();
     std::atomic<bool> owner_{false}; // this instance holds a claim (worker writes, leave_virus reads)
+    std::atomic<int64_t> processed_ms_{-1}; // note_processed: the last block the DAW processed (-1 = none yet)
+    bool yield_due() const;                 // #51: slot_yield for this instance (slotpick.h)
     std::atomic<int> slot_{0};       // the claimed slot, 1 = the first Virus (0 = none)
     std::atomic<int> slot_pref_{0};  // the slot the project was saved with (0 = none)
     std::atomic<bool> reslot_{false}; // prefer_slot: the worker moves to that slot when it is free

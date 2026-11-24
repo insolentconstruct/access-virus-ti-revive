@@ -178,6 +178,30 @@ bool DeviceOut::other_owner() const
     return false;
 }
 
+// #51: the newest block the DAW processed in an instance of this process that has no Virus (steady ms, -1 = none)
+static std::atomic<int64_t> g_waiting_played_ms{-1};
+
+static int64_t steady_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void DeviceOut::note_processed(int64_t ms)
+{
+    processed_ms_.store(ms, std::memory_order_relaxed);
+    if (!owner_.load(std::memory_order_relaxed) || !broker_.device_present())
+        g_waiting_played_ms.store(ms, std::memory_order_relaxed);
+}
+
+bool DeviceOut::yield_due() const
+{
+    const int64_t now = steady_ms(), mine = processed_ms_.load(std::memory_order_relaxed),
+                  other = g_waiting_played_ms.load(std::memory_order_relaxed);
+    auto ago = [now](int64_t t) { return t < 0 ? -1 : (int)std::min<int64_t>(now - t, 1 << 30); };
+    return vti::slot_yield(ago(mine), ago(other));
+}
+
 bool DeviceOut::claim_owner()
 {
     std::lock_guard<std::mutex> g(g_owner_mu);
@@ -628,7 +652,8 @@ void DeviceOut::run()
                 broker_.on_rx([parser](uint8_t ep, const uint8_t *d, size_t len) { parser->feed(ep, d, len); });
                 rx_set_ = true;
             }
-            if (!owner_ && !claim_owner()) {
+            // #51: not played while another instance of this process is: no claim, that one gets the Virus
+            if (!owner_ && (yield_due() || !claim_owner())) {
                 // every free slot given up (one Virus, this a second instance): wait, try them again after a while
                 const auto now = std::chrono::steady_clock::now();
                 if (tried_wait_since_ == std::chrono::steady_clock::time_point{})
@@ -752,6 +777,13 @@ void DeviceOut::run()
             if (on_waiting_)
                 on_waiting_(false);
             report_status();
+        }
+        if (yield_due()) { // #51: the DAW plays another instance of this process, not this one: it takes the Virus
+            log("Virus TI native: the DAW plays another instance, not this one - handing Virus %d over (#51)\n",
+                slot_.load());
+            lose_broker();
+            release_owner();
+            continue;
         }
         skip_slot_ = 0;
         tried_ = 0;
@@ -1952,6 +1984,9 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             }
         }
     } process_timer{this, data.numSamples};
+    if (out_ && data.numSamples > 0) // #51: which instance the DAW plays (a flush with no samples does not count)
+        out_->note_processed(
+            std::chrono::duration_cast<std::chrono::milliseconds>(process_timer.t0.time_since_epoch()).count());
     host_playing_.store(data.processContext && (data.processContext->state & ProcessContext::kPlaying),
                         std::memory_order_relaxed); // the sync error page: shown while playing, cleared by Play
     if ((data.processContext && (data.processContext->state & ProcessContext::kPlaying)) ||

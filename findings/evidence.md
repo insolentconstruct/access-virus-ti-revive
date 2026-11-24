@@ -5959,3 +5959,28 @@ E363).
 - **Method:** reporter's diag.log, code reading, simulator answer (model runs cited, nothing new run), a model of the log's Plays run against both headers, unit tests failing before / passing after
 - **Confidence:** HIGH (what the log's Plays show; that a rest inside the room floors no stamp, from the code) / MEDIUM (the idle after the burst, inferred; the simulator's lead border) / open (that it removes the crackle the reporter hears: not run on hardware or in Logic)
 - **Hardware:** no
+
+### E590
+
+#51 (rc7 c7e07331, Windows 11, Studio Pro 8, Apollo Twin, 48 kHz / 256; reporter's description 2026-11-24, the log
+itself did not arrive: an e-mail reply, GitHub drops its attachments). Opening a song with one TI Revive instrument
+left two plug-in instances in the DAW's process. Instance A got setState, setActive(1) and "device connected" and held
+Virus 1, but its process() was never called ("process calls 0 ... largest 0"). Instance B, the one the DAW processed
+("process calls 1876"), found Virus 1 taken, tried Virus 2-4 ("another instance uses Virus 1 - trying Virus 2", "no
+Virus 2 - trying the others, waiting"), each try starting a vtibroker.exe for that slot, and then waited: silence
+while the song played. File > Revert closed B and processed A, after which the audio was fine. Cause, from the code:
+within one process the first instance to claim a slot (claim_owner, virusplugin.cpp g_owner) owns that Virus until it
+is destroyed, whether the DAW processes it or not; a waiting instance only takes over when the owner goes. This was
+so before #45 as well (a second instance always waited behind the first); #45 added the tries on Virus 2-4 and their
+short-lived brokers (they exit after 30 s without clients, vtibroker.c IDLE_EXIT_MS). Why Studio Pro kept an instance
+it never processes is not known. Change for rc8: an instance records each process() block with samples
+(note_processed); an owner not processed for 2 s while an instance of the same process without a Virus was processed
+within the last 0.5 s lets the Virus go without the close sequence and does not claim one again in that state
+(slotpick.h slot_yield); the played instance takes over through the existing takeover (its own start-up and state).
+Two instances that are both processed behave as before.
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/slotpick.h (slot_yield, YIELD_MS, PLAYED_MS); native/plugin/source/virusplugin.cpp (note_processed, yield_due, the claim gate and the "handing Virus N over (#51)" log line); native/tests/test_slotpick.cpp (slotpick_an_unplayed_owner_yields_to_a_played_waiting_instance); native/tools/nativehost.cpp --idle-first; issue #51; E553
+- **Method:** reporter's description of their diag.log, code reading, unit test failing before / passing after
+- **Confidence:** HIGH (the cause in our code: first claim wins regardless of processing) / MEDIUM (that Studio Pro's unprocessed instance is the whole story: the log is missing) / open (the fix on Studio Pro)
+- **Hardware:** no
