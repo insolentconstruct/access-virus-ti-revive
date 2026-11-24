@@ -45,6 +45,10 @@ public:
     // `match` (prefix). Retries `tries` times, each waiting `timeout_ms` + 1.5 s (plus the queue, see `sending`); a
     // reply to any try of it counts, also one that comes after the next try went out (E591). Empty result on failure.
     Dump transact(const Dump &request, const std::vector<uint8_t> &match, int timeout_ms = 3000, int tries = 3);
+    // the last transact got no reply although every try went out and waited its whole time: the Virus did not answer
+    // (not a cancel, a handover, a send that failed, or a reply of the wrong size). The plug-in's cue for AnswerWatch
+    // (E591): a sync that ended with -1 because of it, or the readiness probe.
+    bool missed() const { return missed_; }
     // Ends a waiting transact() at once and makes every later one return empty right away (the plug-in's
     // terminate(): it waited up to 10 s for a request in flight, review 2026-10-19 M6).
     void cancel();
@@ -101,6 +105,7 @@ private:
     std::vector<Dump> inbox_;
     bool cancelled_ = false; // under mu_
     bool waiting_ = false;   // under mu_: a transact is running, feed() keeps Access SysEx
+    std::atomic<bool> missed_{false}; // set under tx_mu_, read by the plug-in after the transact
 };
 
 } // namespace vti

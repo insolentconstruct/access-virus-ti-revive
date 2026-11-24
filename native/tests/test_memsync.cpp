@@ -171,6 +171,71 @@ TEST(memsync_transact_failed_send)
     CHECK_EQ(sends, 1); // no retries when the message cannot even be queued
 }
 
+// missed(): the last request waited its whole time and nothing came - the plug-in's cue to re-send the reply cables
+// and then warn (E591). Not a stop, a send that failed, a handover, or a reply of the wrong size.
+TEST(memsync_missed_only_when_the_virus_did_not_answer)
+{
+    const Dump req = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7};
+    MemorySync quiet([](const Bytes &) { return true; });
+    CHECK(!quiet.missed());
+    CHECK(quiet.transact(req, {0x10, 0x00, 0x00}, 100, 1).empty());
+    CHECK(quiet.missed());
+
+    MemorySync *ms = nullptr;
+    MemorySync answers([&](const Bytes &) {
+        ms->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    ms = &answers;
+    answers.transact(req, {0x10, 0x00, 0x00}, 100, 1);
+    CHECK(!answers.missed());
+
+    MemorySync failed([](const Bytes &) { return false; });
+    CHECK(failed.transact(req, {0x10, 0x00, 0x00}, 100, 1).empty());
+    CHECK(!failed.missed()); // nothing reached the Virus
+
+    MemorySync gone([](const Bytes &) { return true; });
+    gone.present = [] { return false; };
+    CHECK(gone.transact(req, {0x10, 0x00, 0x00}, 100, 1).empty());
+    CHECK(!gone.missed()); // handed over (E591 (2))
+
+    MemorySync stopped([](const Bytes &) { return true; });
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        stopped.cancel();
+    });
+    CHECK(stopped.transact(req, {0x10, 0x00, 0x00}, 1000, 1).empty());
+    stopper.join();
+    CHECK(!stopped.missed());
+
+    // the same instance: a miss, then an answer
+    bool answer = false;
+    MemorySync *ps = nullptr;
+    MemorySync once([&](const Bytes &) {
+        if (answer)
+            ps->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    ps = &once;
+    once.transact(req, {0x10, 0x00, 0x00}, 100, 1);
+    CHECK(once.missed());
+    answer = true;
+    once.transact(req, {0x10, 0x00, 0x00}, 100, 1);
+    CHECK(!once.missed());
+}
+
+TEST(memsync_wrong_size_replies_are_not_missed)
+{
+    MemorySync *ms = nullptr;
+    MemorySync sync([&](const Bytes &m) {
+        ms->feed({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x10, m[7], m[8], 0x00, 0xF7}); // cut short
+        return true;
+    });
+    ms = &sync;
+    CHECK(sync.single(1, 7).empty());
+    CHECK(!sync.missed()); // lost packets, a Virus that answers
+}
+
 TEST(memsync_transact_late_reply)
 {
     // the readiness probe's case: the Virus answers only after it worked through what was queued before

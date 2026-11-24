@@ -3718,7 +3718,40 @@ bool VirusPlugin::probe_virus_ready()
     }
     out_->log("Virus TI native: Virus ready after %.1f s%s\n", (now_ms() - tp) / 1000.0,
               r.empty() ? " (no reply to the probe)" : "");
+    if (!r.empty() || sync_->missed()) // not a stop (closing): the plug-in's terminate() cancels the wait
+        note_answer(!r.empty());
     return !r.empty();
+}
+
+static const char *const NO_ANSWER_LCD = "The Virus does not answer";
+
+// Like the original (E591, listener 0x180086bf0 / 0x180080ba0): the first unanswered request of a connection re-sends
+// the start-up messages that set the cables the Virus answers on, then probes once more; one unanswered after that
+// shows a message. Bounded: 3 known messages once per connection (rule 2). An answer takes the message back.
+void VirusPlugin::note_answer(bool answered)
+{
+    if (answered) {
+        answers_.answered();
+        std::lock_guard<std::mutex> lk(values_mu_);
+        if (lcd_param_ == NO_ANSWER_LCD) {
+            lcd_param_.clear(), lcd_value_.clear();
+            lcd_dirty_ = true;
+        }
+        return;
+    }
+    const AnswerWatch::Action a = answers_.missed();
+    if (a == AnswerWatch::RESEND) {
+        out_->log("Virus TI native: the Virus did not answer - routing settings sent again (E591)\n");
+        for (auto &m : AnswerWatch::routing_messages(startup_messages()))
+            out_->send(m);
+        probe_virus_ready(); // goes out once the queue is empty (MemorySync::sending); a miss comes back here
+        return;
+    }
+    if (a == AnswerWatch::WARN)
+        out_->log("Virus TI native: the Virus does not answer TI Revive - switch it off and on; the RAM banks in the "
+                  "browser may be out of date (E591)\n");
+    if (answers_.warned()) // also again after a later miss: the sync's end may have cleared the display meanwhile
+        lcd_message(NO_ANSWER_LCD, "switch it off and on");
 }
 
 // The Virus is back (sender thread, after the start-up messages and the state were queued): until it has worked
@@ -3736,6 +3769,7 @@ void VirusPlugin::resend_to_virus()
 
 void VirusPlugin::after_reconnect()
 {
+    answers_.reset(); // a new connection: its own re-send of the cables if it does not answer (E591)
     if (!sync_)
         return;
     std::lock_guard<std::mutex> g(reconnect_mu_); // terminate() joins under it
@@ -3956,6 +3990,9 @@ void VirusPlugin::sync_banks()
         lcd_value_.clear();
         lcd_orig_.clear();
     }
+    // after the display above: a sync that ended because the Virus did not answer (not a stop or a wrong size, E591)
+    if (result >= 0 || sync_->missed())
+        note_answer(result >= 0);
     ui_dirty_ = true;
 }
 

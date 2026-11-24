@@ -145,6 +145,7 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
     // one request at a time, also across threads: the readiness probe after a reconnect met a bank sync still
     // running, the Virus answered only the newer request (E145) and the probe waited 10 s (review 2026-10-19)
     std::lock_guard<std::mutex> one(tx_mu_);
+    missed_ = false;
     struct Done { // on every return, after the reply was copied out: stop keeping SysEx, free what is left
         MemorySync *s;
         ~Done()
@@ -185,6 +186,7 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
             if (!wait_slice(match, reply, until))
                 return reply;
     }
+    missed_ = true; // every try waited its whole time: the Virus did not answer (E591)
     return {};
 }
 

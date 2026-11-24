@@ -6024,3 +6024,27 @@ the pattern exists since 2026-10-17 (probe added in 582bda5), not new in 0.8.41.
 - **Method:** log forensics over 3 reporters and our TI2 logs; static code review; REA static analysis of the original; 19 nativehost/hil.sh sessions on our TI2 (only the plug-in's own traffic) with usbmon; simulator (static)
 - **Confidence:** HIGH (1), (2), the stall counts of (3) / MED (the original's details) / LOW-MED (3)'s DSP restart, (4)'s mechanism (not reproduced)
 - **Hardware:** yes (our TI2 Desktop, Linux; the #48 case only from its log)
+
+### E592
+
+The fixes for E591's lost SysEx answers (round 0.8.44, after rc8), done by three agents and reviewed by the orchestrator.
+(A) MemorySync::transact keeps every reply to any try of the same request (also in the 1.5 s pause after a try and after
+the next try went out) and starts a try's timeout only once the request has left the out queue; (B) a request goes out
+only when the plug-in's out queue is empty, both waits together at most 15 s per try, like the original's pacing; bank
+info waits 5 s x 3, a single dump 10 s x 2 (at most 19.5 s / 23 s without a reply); (C) an instance without a Virus
+(DeviceOut::has_virus false: handed over, waiting) neither probes nor syncs; (D) the libusb broker resets an IN
+endpoint's transfers once (cancel, clear halt, one probe) when it stays silent for 2 s after an error with a transfer
+parked, and gives up on the device (reopen) if they still do not come back; (E) the first unanswered probe or bank sync
+of a connection re-sends the three start-up messages that set the reply cables (73 00 3A/3B/3C from the user's
+GlobalInit, unchanged; E039), then probes once more; a miss after that shows "The Virus does not answer / switch it off
+and on" on the plug-in's display and logs it; an answer clears it. Like the original (E591), bounded to once per
+connection. Hardware (our TI2 Desktop, Linux, new plug-in + new broker c5441638): hil.sh ALL PASS (H1-H3, H6; probes
+1.1 s, 3.7 s after the broker kill), nativehost --duplicate 99 --idle-first: handover, played instance ready after
+1.1 s, no false "no reply" (before: 3 of 3); no re-send, warning or transfer reset on the healthy unit. Not run: a Virus
+that really stops answering (the recovery and the warning), the broker reset on macOS (#48's case), Windows.
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/memsync.{h,cpp} (transact, wait_slice, sending, present, missed); native/src/device/answerwatch.h; native/plugin/source/virusplugin.cpp (probe_virus_ready, note_answer, wait_virus_ready, sync_banks, after_reconnect), virusplugin.h (has_virus); src/broker/vticore.c (rx_reset, reader), src/broker/rxqueue.h (vti_rx_stuck); native/tests/test_memsync.cpp, test_answerwatch.cpp, test_rxqueue.cpp, test_access.cpp; commits efcbd2e, df67e27 and the E commit; work/hil/20261124-e591-fixes; E591
+- **Method:** unit tests failing before / passing after (946 tests), TI2 runs with only the plug-in's own traffic
+- **Confidence:** HIGH (A-C on the TI2 and in tests) / MED (D, E: tested in units only for the failure case)
+- **Hardware:** yes (our TI2 Desktop, Linux; the failure cases not reproduced)

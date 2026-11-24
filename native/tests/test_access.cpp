@@ -4,6 +4,7 @@
 #include "access/firmware.h"
 #include "access/library.h"
 #include "check.h"
+#include "device/answerwatch.h"
 #include "editor/editorrender.h"
 #include "model/remotedevice.h"
 #include "model/sectionlock.h"
@@ -136,6 +137,16 @@ TEST(access_init_messages_show_configuring_like_the_original)
         CHECK(with[at + 2] == multi);
         CHECK(with[at + 3][6] == 0x72);
     }
+}
+
+TEST(access_init_messages_hold_the_reply_cables)
+{
+    // what AnswerWatch re-sends when the Virus does not answer (E591): the three cable globals of GlobalInit, with the
+    // values the original's start-up sends (E395: MIDI Data 1, Panel Data 2, Sounddump 3)
+    const auto r = AnswerWatch::routing_messages(dev().init_messages());
+    CHECK_EQ(r.size(), 3u);
+    for (const auto &m : r)
+        CHECK((m[8] == 0x3B && m[9] == 1) || (m[8] == 0x3C && m[9] == 2) || (m[8] == 0x3A && m[9] == 3));
 }
 
 TEST(access_automation_map)

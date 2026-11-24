@@ -17,6 +17,7 @@
 #include "device/keepalive.h"
 #include "device/markerscan.h"
 #include "device/memsync.h"
+#include "device/answerwatch.h"
 #include "device/resync.h"
 #include "device/slipwatch.h"
 #include "device/slotpick.h"
@@ -792,6 +793,9 @@ private:
     void after_reconnect();
     void resend_to_virus(); // start-up messages + state + readiness probe, after the Virus came back or woke up
     bool probe_virus_ready(); // the readiness probe (30 00 00 behind everything queued); false: no reply
+    // E591: a request answered, or not answered at all (MemorySync::missed): the cables re-sent once, then a warning
+    AnswerWatch answers_;
+    void note_answer(bool answered);
     std::atomic<bool> sync_started_{false};
     void sync_banks(); // brings the bank cache up to date with the Virus (background thread)
     // ROM A.. for the connected model: from the user's firmware.bin, except the banks with the user's own patches
