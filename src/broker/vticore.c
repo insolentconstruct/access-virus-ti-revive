@@ -274,6 +274,21 @@ static void rx_clear_halt(rxep *e)
     pthread_mutex_unlock(&e->mu);
 }
 
+// E591 (4): silent after an error with a transfer parked (vti_rx_stuck): the transfers still out are cancelled, the
+// halt cleared, then one probes again as after any error (S143). -1 when even the cancel did not bring them back.
+static int rx_reset(rxep *e)
+{
+    rx_clear_halt(e);
+    pthread_mutex_lock(&e->mu);
+    const int left = e->inflight;
+    int slot;
+    if (!left && !e->v->closing && vti_rxq_may_resubmit(&e->q, 1) && (slot = vti_unpark(&e->parked)) >= 0 &&
+        rx_submit(e, slot))
+        vti_rxq_push(&e->q, slot, -4, NULL, 0);
+    pthread_mutex_unlock(&e->mu);
+    return left ? -1 : 0;
+}
+
 static void *reader(void *p)
 {
     rxep *e = p;
@@ -281,13 +296,32 @@ static void *reader(void *p)
     const uint8_t ep = e->ep;
     int fails = 0, last = 0; // errors in a row and the last one (vtireaderr.h)
     int gave_up = 0;
+    int armed = 0;                // an error since the last data or reset (vti_rx_stuck)
+    uint64_t last_ns = mono_ns(); // the last record, data or error
     vti_rx_rec rec;
     for (;;) { // after stop, until the queue is empty: the close hands on what still came (S139)
         if (rx_take(e, &rec)) {
             if (v->stop)
                 break;
+            const uint64_t silent_ms = (mono_ns() - last_ns) / 1000000ull;
+            pthread_mutex_lock(&e->mu);
+            const unsigned parked = e->parked;
+            pthread_mutex_unlock(&e->mu);
+            if (vti_rx_stuck(armed, parked, v->closing || gave_up, silent_ms)) {
+                armed = 0;
+                vti_log("vti: read ep %02x: no data for %llu ms after an error - transfers reset (E591)\n", ep,
+                        (unsigned long long)silent_ms);
+                if (rx_reset(e)) { // they never came back: the broker closes it and opens the Virus again
+                    vti_log("vti: read ep %02x: transfers still pending after the reset, giving up on the device\n", ep);
+                    v->dead = 1;
+                    gave_up = 1;
+                }
+                last_ns = mono_ns();
+            }
             continue;
         }
+        last_ns = mono_ns();
+        armed = rec.err != 0;
         if (gave_up && !vti_rx_hand_on_after_giveup(rec.err))
             continue;
         if (rec.err && !gave_up) {
