@@ -5833,8 +5833,8 @@ steps, new 7 catch-ups (2285-2398) + 0 steps; block 128 old 10 catch-ups (549-22
 
 Follow-up to E323 (5) and E331 (1–2), firmware 5.1.7.00. In retained DSP interpreter runs,
 delivering global Frequency (page 115, index 16) = 1 reaches P:$05205b, stores the rate selector at
-P:$05205e, and executes the PLL write at P:$052096. The DSP then updates the ESAI_1 dividers
-(RCCR_1/TCCR_1) and re-arms port D (the DAX pins) after a frame sync (P:$052000). Feeding the host
+P:$05205e, and executes the PLL write at P:$052096. In the DSP listing, the code then updates
+the ESAI_1 dividers (RCCR_1/TCCR_1) and re-arms port D (the DAX pins) after a frame sync (P:$052000). Feeding the host
 emulator's messages from its SysEx receive path into the DSP emulator's HDI08 queue produces the
 same selector and rate-table state. Both DSPs log the PLL change. Either the forwarded SysEx or the
 separate parameter delivery suffices in these runs. In a separate TUSB harness entering SET_CUR
@@ -5900,7 +5900,7 @@ flags zero. Clearing nonzero flags was confirmed by the maintainer's emulation i
 0x55 and 0x7F both read back as zero at byte 10, with the other 523 bytes matching. Physical
 storage backing, persistence and DSP consumption remain open.
 
-- **Date:** 2026-11-23
+- **Date:** 2026-11-24
 - **Pointer:** E549, [PR #58 maintainer check](https://github.com/derpsn/ti-revive/pull/58#issuecomment-7123210401), firmware 5.1.7.00 host 8051 image (SHA256 prefix dd57749a1efb1b88), CODE:0x40db–0x40df/0x40f0/0x562d, XDATA:0x4d01, and retained emulator comparisons (SHA256 prefixes 5e0c698d5bcdb096, 77d673d7752d4c4a, e2ffbaf7e0d4d6f4)
 - **Method:** static receive-path and reply-serializer review, review of two retained emu8051 write/read runs with flags zero, and the maintainer's nonzero-flag emulation (2026-11-24)
 - **Confidence:** HIGH (static flag clear and recorded emulator results under the stated premises) / MED (composed receive-to-reply model) / open (hardware persistence)
