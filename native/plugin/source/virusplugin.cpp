@@ -1423,6 +1423,10 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         return true;
     });
     sync_->log = [this](const std::string &line) { out_->log("Virus TI native: %s\n", line.c_str()); }; // #34
+    // E591: every request (probe, bank sync, downloads) goes out only when the queue is empty, like the original, and
+    // its timeout starts once it is written; an instance without a Virus (handed over, waiting) asks nothing
+    sync_->sending = [this] { return out_->busy(); };
+    sync_->present = [this] { return out_->has_virus(); };
     out_->on_reply([this](const std::vector<uint8_t> &m) { sync_->feed(m); });
     out_->on_waiting([this](bool waiting) { // worker thread
         // the original's page for a Virus that another program holds (SystemStatus/Error 2 = "VDM not Master":
@@ -3680,7 +3684,12 @@ void VirusPlugin::wait_virus_ready()
         set_recall_progress(meter.update(out_->queued()));
     }
     set_recall_progress(RecallMeter::SENT);
-    probe_virus_ready();
+    if (!probe_virus_ready() && !out_->has_virus()) { // handed over meanwhile (#51, E591 (2)): as if no Virus at start
+        absent_at_start_ = !stop_warm_;
+        ready_ = true;
+        set_recall_progress(127);
+        return;
+    }
     ready_ = true;
     // process() anchors now and sends the ping (0.5 s of stream, 1 s of silence); notes stay held until its marker
     // is found, so the first notes are stamped on the Virus' clock (at most 3 s, else stamps stay ring-relative)
@@ -3694,9 +3703,19 @@ void VirusPlugin::wait_virus_ready()
 
 bool VirusPlugin::probe_virus_ready()
 {
+    // no Virus here (handed over to the played instance, #51, or waiting): nothing to probe, and no false "no reply"
+    // (E591 (2)); when this instance gets the Virus, its start-up (on_device -> after_reconnect) probes then
+    if (!out_->has_virus())
+        return false;
     const int64_t tp = now_ms();
-    // one try: a second request behind a slow first one would only lengthen the Virus' backlog
+    // one try: a second request behind a slow first one would only lengthen the Virus' backlog. It goes out when the
+    // queue (start-up messages, state) is empty, the 10 s count from then (MemorySync::sending, E591)
     Dump r = sync_->transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 1);
+    if (r.empty() && !out_->has_virus()) { // handed over while it waited: ended at once, not a Virus that did not answer
+        out_->log("Virus TI native: readiness probe stopped after %.1f s, the Virus went to another instance\n",
+                  (now_ms() - tp) / 1000.0);
+        return false;
+    }
     out_->log("Virus TI native: Virus ready after %.1f s%s\n", (now_ms() - tp) / 1000.0,
               r.empty() ? " (no reply to the probe)" : "");
     return !r.empty();
@@ -3755,7 +3774,8 @@ void VirusPlugin::sync_banks()
     // without the editor in between (user, L4)
     wait_virus_ready();
     starting_ = false;
-    if (stop_warm_ || !out_ || !out_->connected()) { // no Virus: no sync, the editor as usual
+    // no Virus (also one handed over to the played instance, E591 (2)): no sync, the editor as usual
+    if (stop_warm_ || !out_ || !out_->connected() || !out_->has_virus()) {
         syncing_ = false;
         set_start_pages(127, 127);
         return;

@@ -189,6 +189,175 @@ TEST(memsync_transact_late_reply)
     CHECK_EQ(r.size(), 524u);
 }
 
+// E591 (1): answers that came after the timeout were thrown away - one in the 1.5 s pause after a try was kept but never
+// looked at, the next try cleared it. Each reply below comes `after_ms` after the first request, the fake Virus answers
+// only that first one.
+static Dump late_answer(int after_ms, int timeout_ms, int tries, int &sends, const Dump &reply = fake_single(0, 0, 1))
+{
+    MemorySync *self = nullptr;
+    std::thread late;
+    sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        if (sends++ == 0)
+            late = std::thread([&self, after_ms, reply] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(after_ms));
+                self->feed(reply);
+            });
+        return true;
+    });
+    self = &sync;
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, timeout_ms,
+                           tries);
+    late.join();
+    return r;
+}
+
+TEST(memsync_transact_takes_a_reply_in_the_pause_after_a_try)
+{
+    int sends;
+    CHECK_EQ(late_answer(700, 100, 1, sends).size(), 524u); // in the pause after the timeout
+    CHECK_EQ(late_answer(700, 100, 2, sends).size(), 524u); // ... and not cleared by a second try
+    CHECK_EQ(sends, 1); // the reply came before the second try was due: no second request for the Virus
+}
+
+TEST(memsync_transact_takes_the_first_tries_reply_after_the_second_try)
+{
+    int sends;
+    CHECK_EQ(late_answer(1800, 100, 2, sends).size(), 524u); // try 2 went out at 1.6 s: the same request, it counts
+    CHECK_EQ(sends, 2);
+}
+
+TEST(memsync_transact_ignores_a_late_reply_with_another_header)
+{
+    int sends;
+    CHECK(late_answer(700, 100, 1, sends, fake_single(0, 1, 1)).empty()); // 10 00 01 is not the answer to 30 00 00
+}
+
+// E591 (1): the clock started when the request was queued; behind a state upload it may wait seconds before it is
+// even written. `sending` says the plug-in's queue still holds messages: the timeout starts when it is empty.
+TEST(memsync_transact_clock_starts_when_the_request_is_out)
+{
+    MemorySync *self = nullptr;
+    std::atomic<bool> queued{false};
+    std::thread out, late;
+    MemorySync sync([&](const Bytes &) {
+        queued = true;
+        out = std::thread([&] { // the queue in front of the request takes 2 s to go out
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            queued = false;
+        });
+        late = std::thread([&] { // the Virus answers 0.5 s after it got the request
+            std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+            self->feed(fake_single(0, 0, 1));
+        });
+        return true;
+    });
+    self = &sync;
+    sync.sending = [&] { return queued.load(); };
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 300, 1);
+    out.join();
+    late.join();
+    CHECK_EQ(r.size(), 524u); // 300 ms + 1.5 s from the queueing would have ended at 1.8 s
+}
+
+// E591, like the original (it asks only when its start-up queue is empty): a request does not go out while other
+// messages still wait in the plug-in's queue (bounded), so it is not stuck behind them
+TEST(memsync_transact_asks_only_when_the_queue_is_empty)
+{
+    std::atomic<bool> busy{true};
+    std::thread drain([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        busy = false;
+    });
+    MemorySync *self = nullptr;
+    bool busy_at_send = true;
+    MemorySync sync([&](const Bytes &) {
+        busy_at_send = busy.load();
+        self->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    self = &sync;
+    sync.sending = [&] { return busy.load(); };
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 300, 1);
+    drain.join();
+    CHECK(!busy_at_send);
+    CHECK_EQ(r.size(), 524u);
+}
+
+// a queue that never empties (the Virus refused EP 0x06 for 8.7 s, E591 (3); a broker gone): the wait is bounded
+TEST(memsync_transact_queue_wait_is_bounded)
+{
+    int sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        sends++;
+        return true;
+    });
+    sync.sending = [] { return true; };
+    sync.queue_wait_ms = 200;
+    auto t0 = std::chrono::steady_clock::now();
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 100, 1);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(r.empty());
+    CHECK_EQ(sends, 1);
+    CHECK(ms >= 200 + 100);
+    CHECK(ms < 2500); // 200 ms for the queue (before and after the send together), 100 ms + the 1.5 s pause
+}
+
+TEST(memsync_cancel_ends_the_wait_for_the_queue_at_once)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.sending = [] { return true; };
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        sync.cancel();
+    });
+    auto t0 = std::chrono::steady_clock::now();
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 3);
+    stopper.join();
+    CHECK(r.empty());
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1000));
+}
+
+// E591 (2): an instance that handed its Virus over (#51) waited out its probe and logged "no reply". `present` false:
+// a request does not start, one waiting ends at once, nothing is logged as a miss - and unlike cancel() not for good
+TEST(memsync_no_virus_ends_a_request_at_once)
+{
+    std::atomic<bool> have{true};
+    int sends = 0;
+    bool answer = false;
+    std::vector<std::string> lines;
+    MemorySync *self = nullptr;
+    MemorySync sync([&](const Bytes &) {
+        sends++;
+        if (answer)
+            self->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    self = &sync;
+    sync.present = [&] { return have.load(); };
+    sync.log = [&](const std::string &s) { lines.push_back(s); };
+    std::thread handover([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        have = false;
+    });
+    auto t0 = std::chrono::steady_clock::now();
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 3);
+    handover.join();
+    CHECK(r.empty());
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1000));
+    CHECK_EQ(sends, 1);
+    CHECK(sync.bank_info(1).empty());
+    CHECK_EQ(sends, 1); // no Virus: not even sent
+    Bank cache;
+    CHECK_EQ(sync.sync_bank(1, cache), -2); // a stop, not "bank sync failed"
+    CHECK(lines.empty());                   // and no "no reply" line
+    have = true; // the Virus is back for this instance: requests work again
+    answer = true;
+    CHECK_EQ(sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 500, 1)
+                 .size(),
+             524u);
+}
+
 TEST(memsync_bank_info_and_single)
 {
     FakeVirus v;

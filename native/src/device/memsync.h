@@ -9,6 +9,7 @@
 #include <atomic>
 #include "broker.h"
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -41,7 +42,8 @@ public:
     size_t queued();                               // SysEx kept for a waiting request (tests)
 
     // One request/reply round trip: sends `request` (a SysEx), waits for a SysEx reply whose bytes 6..8 equal
-    // `match` (prefix). Retries `tries` times with `timeout_ms` each. Empty result on failure.
+    // `match` (prefix). Retries `tries` times, each waiting `timeout_ms` + 1.5 s (plus the queue, see `sending`); a
+    // reply to any try of it counts, also one that comes after the next try went out (E591). Empty result on failure.
     Dump transact(const Dump &request, const std::vector<uint8_t> &match, int timeout_ms = 3000, int tries = 3);
     // Ends a waiting transact() at once and makes every later one return empty right away (the plug-in's
     // terminate(): it waited up to 10 s for a request in flight, review 2026-10-19 M6).
@@ -75,10 +77,21 @@ public:
     // optional: one line per bank info / single dump reply of the wrong size or no reply (not after cancel()), so a
     // "bank sync failed" log tells lost packets from a Virus that does not answer (#34)
     std::function<void(const std::string &)> log;
+    // optional (the plug-in): true while its out queue still holds messages. Like the original, a request goes out
+    // only when nothing else waits, and its timeout starts when it is out of the queue, not when it was queued
+    // behind a state upload (E591); both waits together at most queue_wait_ms per try (a queue that does not empty:
+    // the Virus refusing EP 0x06 for 8.7 s, E591 (3), or a broker gone - the request is sent anyway)
+    std::function<bool()> sending;
+    int queue_wait_ms = 15000;
+    // optional (the plug-in): false while this instance has no Virus (handed over to the played instance, #51, or
+    // waiting for another one): a request does not start and one waiting ends at once, counted as a stop like
+    // cancel() (no "no reply" line, sync_bank returns -2) but not for good (E591 (2))
+    std::function<bool()> present;
 
 private:
     void note_reply(const char *what, int bank, int program, size_t got, size_t want, int t);
-    bool was_cancelled();
+    bool was_cancelled(); // cancel(), or no Virus for this instance (present)
+    bool wait_slice(const std::vector<uint8_t> &match, Dump &reply, std::chrono::steady_clock::time_point until);
     Broker *broker_ = nullptr;
     std::function<bool(const std::vector<uint8_t> &)> send_;
     int dev_;

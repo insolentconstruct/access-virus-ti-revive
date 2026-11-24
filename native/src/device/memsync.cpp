@@ -122,6 +122,24 @@ size_t MemorySync::queued()
     return inbox_.size();
 }
 
+// one slice (<= 50 ms, so sending() and present() are looked at) of the wait until `until`: false when it is over -
+// a matching reply in `reply` (also one to an earlier try: the same request, E591 (1)), cancel(), or no Virus
+bool MemorySync::wait_slice(const std::vector<uint8_t> &match, Dump &reply, std::chrono::steady_clock::time_point until)
+{
+    if (present && !present())
+        return false;
+    std::unique_lock<std::mutex> lk(mu_);
+    auto over = [&] {
+        for (auto &m : inbox_)
+            if (m.size() >= 6 + match.size() && std::equal(match.begin(), match.end(), m.begin() + 6)) {
+                reply = m;
+                return true;
+            }
+        return cancelled_;
+    };
+    return !cv_.wait_until(lk, std::min(until, std::chrono::steady_clock::now() + std::chrono::milliseconds(50)), over);
+}
+
 Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match, int timeout_ms, int tries)
 {
     // one request at a time, also across threads: the readiness probe after a reconnect met a bank sync still
@@ -136,28 +154,36 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
             s->inbox_.clear();
         }
     } done{this};
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (cancelled_)
+            return {};
+        inbox_.clear();
+        waiting_ = true; // before the first send: a fast reply must not be lost; kept over all tries (E591 (1))
+    }
+    using clock = std::chrono::steady_clock;
+    Dump reply;
+    const auto queued = [this] { return sending && sending(); };
     for (int t = 0; t < tries; t++) {
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (cancelled_)
-                return {};
-            inbox_.clear();
-            waiting_ = true; // before the send: a fast reply must not be lost
-        }
+        const auto cap = clock::now() + std::chrono::milliseconds(queue_wait_ms);
+        // like the original: ask only when nothing else waits to go out (E591), else the request is stuck behind it
+        while (queued() && clock::now() < cap)
+            if (!wait_slice(match, reply, cap))
+                return reply;
+        if (!wait_slice(match, reply, clock::now())) // cancelled, no Virus, or an earlier try's answer came meanwhile
+            return reply;
         if (!send_(request))
             return {};
-        std::unique_lock<std::mutex> lk(mu_);
-        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-        while (true) {
-            for (auto &m : inbox_)
-                if (m.size() >= 6 + match.size() && std::equal(match.begin(), match.end(), m.begin() + 6))
-                    return m;
-            if (cancelled_ || cv_.wait_until(lk, until) == std::cv_status::timeout || cancelled_)
-                break;
-        }
-        // let a late/truncated reply drain before the next attempt (overlapping requests confuse the Virus)
-        if (cv_.wait_for(lk, std::chrono::milliseconds(1500), [this] { return cancelled_; }))
-            return {};
+        // the timeout starts when the request is out of the queue, not when it was queued (E591 (1))
+        while (queued() && clock::now() < cap)
+            if (!wait_slice(match, reply, cap))
+                return reply;
+        // the timeout, then 1.5 s more before the next try (overlapping requests confuse the Virus, E145): a reply
+        // in that pause counts too, it used to be dropped (E591 (1))
+        const auto until = clock::now() + std::chrono::milliseconds(timeout_ms + 1500);
+        while (clock::now() < until)
+            if (!wait_slice(match, reply, until))
+                return reply;
     }
     return {};
 }
@@ -173,6 +199,8 @@ void MemorySync::cancel()
 // when Live closed the plug-in during the sync)
 bool MemorySync::was_cancelled()
 {
+    if (present && !present()) // no Virus for this instance (handed over, E591 (2)): a stop, not a miss
+        return true;
     std::lock_guard<std::mutex> lk(mu_);
     return cancelled_;
 }
@@ -195,7 +223,9 @@ std::vector<int> MemorySync::bank_info(int bank)
     // a reply of the wrong size is a packet lost on the way: ask again as single() does, one lost packet must not end
     // the whole sync
     for (int t = 0; t < 3; t++) {
-        Dump r = transact({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x39, (uint8_t)bank, 0xF7}, {0x14, (uint8_t)bank});
+        // 5 s like the original's bank info wait (E591; it was 3 s): 3 tries, at most 19.5 s without a reply
+        Dump r = transact({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x39, (uint8_t)bank, 0xF7}, {0x14, (uint8_t)bank},
+                          5000, 3);
         note_reply("bank info", bank, -1, r.size(), BANKINFO_SIZE, t);
         if (r.size() == BANKINFO_SIZE) {
             std::vector<int> v(128);
@@ -213,8 +243,10 @@ Dump MemorySync::single(int bank, int program)
 {
     Dump bad; // the last reply with checksums other than ours
     for (int t = 0; t < 3; t++) {
+        // up to 10 s like the original's single dump wait (E591; it was 3 s). 2 tries (were 3): a late reply to the
+        // first still counts after the second went out, so at most 23 s without a reply instead of 34.5 s
         Dump r = transact({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x30, (uint8_t)bank, (uint8_t)program, 0xF7},
-                          {0x10, (uint8_t)bank, (uint8_t)program});
+                          {0x10, (uint8_t)bank, (uint8_t)program}, 10000, 2);
         note_reply("single", bank, program, r.size(), SINGLE_SIZE, t);
         if (r.size() == SINGLE_SIZE) {
             // the Virus sends both checksums as BankDrop computes them (E552): a mismatch is a reply damaged on the
@@ -243,7 +275,7 @@ Dump MemorySync::single(int bank, int program)
 int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, bool)> &progress,
                           const std::atomic<bool> *stop)
 {
-    if (before_request && !before_request())
+    if ((before_request && !before_request()) || was_cancelled()) // no display message for a Virus we do not have
         return -2;
     // the original keeps "Configuring Virus TI" (Rise Message 7) up while it checks the banks: before every bank info
     // request, fetched or not (E321)
@@ -287,7 +319,7 @@ int MemorySync::read_bank(int bank, Bank &cache, const std::function<void(int)> 
 {
     const std::vector<uint8_t> rise = {0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x74, 0x01, 0x7E, 0x04, 0xF7};
     for (int p = 0; p < 128; p++) {
-        if ((stop && *stop) || (before_request && !before_request()))
+        if ((stop && *stop) || (before_request && !before_request()) || was_cancelled())
             return -2;
         send_(rise);
         Dump d = single(bank, p);
@@ -308,7 +340,7 @@ int MemorySync::read_missing(int bank, Bank &cache, const std::function<void(int
     for (int p = 0; p < 128; p++) {
         if (!cache[p].empty())
             continue;
-        if ((stop && *stop) || (before_request && !before_request()))
+        if ((stop && *stop) || (before_request && !before_request()) || was_cancelled())
             return -2;
         send_(rise);
         Dump d = single(bank, p);

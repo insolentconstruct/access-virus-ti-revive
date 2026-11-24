@@ -141,6 +141,9 @@ public:
     void on_status(std::function<void(bool present, bool elsewhere)> h) { status_ = std::move(h); }
     // another instance has the Virus: in this process (claim_owner) or another program's plug-in (broker state 2)
     bool waiting() const { return wait_reported_.load() || broker_.in_use_elsewhere(); }
+    // this instance holds a Virus: claimed (not handed over to the played instance, #51) and not waiting for it
+    // (E591 (2): only then may it probe or sync; connected() is false for a moment at a reconnect, this is not)
+    bool has_virus() const { return slot_.load() > 0 && !waiting(); }
     // the Virus this instance claimed when several are connected (#45): 1.., 0 = none yet
     int slot() const { return slot_.load(); }
     bool other_owner() const; // another instance of this process talks to another Virus (#50: show the numbers)
