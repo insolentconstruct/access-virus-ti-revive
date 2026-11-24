@@ -5865,3 +5865,23 @@ control mapping and the audible effect on hardware remain open.
 - **Method:** compare recorded parameter writes and follower reads in four DSP1 interpreter runs (112/55 and 112/58 at raw 0/127), and compare the listing's follower operand with the writer addresses and the run's part base
 - **Confidence:** HIGH (relative offsets and recorded reads and writes in this setup) / open (editor mapping and audible hardware behaviour)
 - **Hardware:** no
+
+### E587
+
+Follow-up to E257 and E260's private serial F5/F6 analysis, firmware 5.1.7.00 TUSB payload.
+F5 at CODE:0x06a0 requests the USB connection state. Value zero clears internal bit address
+0x11. A nonzero value sets bit 0x11 and clears bit 0x14. When bit 0x11 differs from its copy
+in bit 0x12, the main loop writes USBCTL to connect and enable the USB function for the
+cleared state (CODE:0x0196), or disconnect it for the set state (CODE:0x0184). The disconnect
+path also clears bit 0x10 and sets IRAM 0x87 to 3. F6 at CODE:0x06af appends two mailbox bytes
+only if the initial count is below 15, and sets P3.5 if the resulting count is exactly 16.
+With preserved state and an initial count in 0–15, count 14 appends both bytes and signals.
+Count 15 appends neither. E260 describes the two-byte frames, 16-byte buffer and P3.5
+handshake, and infers at MED confidence that the data supply the USB serial number for
+iSerialNumber. The host-side sender and hardware effects remain open.
+
+- **Date:** 2026-11-23
+- **Pointer:** firmware 5.1.7.00 TUSB payload (SHA256 prefix e7d5304f818c2e8a), CODE:0x06a0–0x06cc, main loop 0x016d–0x0196, helpers 0x10e7/0x10f0, and TUSB3200A data manual SLES018B, appendix A.5.1.4 (USBCTL)
+- **Method:** static TUSB listing review of the F5 dispatch, main-loop state check and F6 append path. Original F5 analysis dated 2026-09-22, F6 recheck dated 2026-11-23.
+- **Confidence:** HIGH (static connection-state, side effects and append logic) / open (hardware effects)
+- **Hardware:** n/a (static analysis)
