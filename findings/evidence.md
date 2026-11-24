@@ -5828,3 +5828,22 @@ steps, new 7 catch-ups (2285-2398) + 0 steps; block 128 old 10 catch-ups (549-22
 - **Method:** reporter's diag.log (fade lines and 10 s stats windows), model unit test failing before / passing after, mutation check on the changed condition
 - **Confidence:** HIGH (the fades pay frames Logic did not process: host vs Virus frames in the log) / MEDIUM (1461 + 1108 = one loss paid twice, inferred) / open (the fix in Logic)
 - **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in Logic)
+
+### E585
+
+Follow-up to E323 (5) and E331 (1–2), firmware 5.1.7.00. In retained DSP interpreter runs,
+delivering global Frequency (page 115, index 16) = 1 reaches P:$05205b, stores the rate selector at
+P:$05205e, and executes the PLL write at P:$052096. The DSP then updates the ESAI_1 dividers
+(RCCR_1/TCCR_1) and re-arms port D (the DAX pins) after a frame sync (P:$052000). Feeding the host
+emulator's messages from its SysEx receive path into the DSP emulator's HDI08 queue produces the
+same selector and rate-table state. Both DSPs log the PLL change. Either the forwarded SysEx or the
+separate parameter delivery suffices in these runs. In a separate TUSB harness entering SET_CUR
+at CODE:0x1868, an equal stored rate leaves the rate report and audio clock generator unchanged.
+A changed rate produces a new report and rewrites the clock generator. The order of a complete
+USB-to-host-to-DSP transition, the physical frequencies and the cause of E175/E241 remain open.
+
+- **Date:** 2026-11-22
+- **Pointer:** firmware 5.1.7.00 DSP emulator ROM (SHA256 prefix 8e3daea8552f9ecb), P:$05205b/$05205e/$052096/$0520a3–$0520ac/$052000–$052007; TUSB payload (SHA256 prefix e7d5304f818c2e8a), CODE:0x1868/0x02dc/0x11a2
+- **Method:** retained DSP interpreter traces (parameter only, relay only, both and value-0 controls), DSP listing for divider and port writes, and retained TUSB equal/changed-rate harness results. The host and DSP emulators were joined at recorded messages. The TUSB harness entered the handler directly.
+- **Confidence:** HIGH (recorded DSP execution and static register targets) / MED (composed host-to-DSP handoff and TUSB harness result) / open (historical failure cause and hardware timing)
+- **Hardware:** no
