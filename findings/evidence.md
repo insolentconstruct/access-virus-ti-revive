@@ -5885,3 +5885,23 @@ iSerialNumber. The host-side sender and hardware effects remain open.
 - **Method:** static TUSB listing review of the F5 dispatch, main-loop state check and F6 append path. Original F5 analysis dated 2026-09-22, F6 recheck dated 2026-11-23.
 - **Confidence:** HIGH (static connection-state, side effects and append logic) / open (hardware effects)
 - **Hardware:** n/a (static analysis)
+
+### E588
+
+Follow-up to E549 and issue #43, firmware 5.1.7.00. The host 8051 stored-single receive path
+clears the staged flags byte at XDATA:0x4d01 (CODE:0x40db–0x40df) before the stored copy at
+CODE:0x40f0 (through CODE:0x562d), regardless of the incoming value. This is payload byte 1, or
+dump byte 10 counting from zero, the byte whose clearing E549 inferred. In two retained
+write/read runs of a synthetic single at bank 1/program 5, all 512 ordered copied bytes and
+all 524 dump-reply bytes matched the receive/reply model. The model assumes configured device
+ID 0, Receive Dump 1, independent writable logical pages, successful helper returns and a
+completed store before the read. ID 0 was an emulator setup premise. These runs started with
+flags zero. Clearing nonzero flags was confirmed by the maintainer's emulation in #58: inputs
+0x55 and 0x7F both read back as zero at byte 10, with the other 523 bytes matching. Physical
+storage backing, persistence and DSP consumption remain open.
+
+- **Date:** 2026-11-23
+- **Pointer:** E549, [PR #58 maintainer check](https://github.com/derpsn/ti-revive/pull/58#issuecomment-7123210401), firmware 5.1.7.00 host 8051 image (SHA256 prefix dd57749a1efb1b88), CODE:0x40db–0x40df/0x40f0/0x562d, XDATA:0x4d01, and retained emulator comparisons (SHA256 prefixes 5e0c698d5bcdb096, 77d673d7752d4c4a, e2ffbaf7e0d4d6f4)
+- **Method:** static receive-path and reply-serializer review, review of two retained emu8051 write/read runs with flags zero, and the maintainer's nonzero-flag emulation (2026-11-24)
+- **Confidence:** HIGH (static flag clear and recorded emulator results under the stated premises) / MED (composed receive-to-reply model) / open (hardware persistence)
+- **Hardware:** no
