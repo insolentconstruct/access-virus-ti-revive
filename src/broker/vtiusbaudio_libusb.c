@@ -385,6 +385,7 @@ int vla_start(libusb_context *ctx, libusb_device_handle *h, uint32_t rate, vla_i
             vti_log("usbaudio: claim interface %d: %s", i, libusb_error_name(r));
             for (int k = 0; k < i; k++)
                 libusb_release_interface(h, k);
+            S.h = NULL; // nothing to stop: the next start must not touch this handle (freed after a replug)
             return -1;
         }
     }

@@ -1146,6 +1146,8 @@ static void *client_thread(void *arg)
         case VTIMSG_HELLO: // a second HELLO changes nothing: the name and the owner were decided with the first
             break;
         case VTIMSG_OBSERVE: { // read-only observer: give the Virus to the next program if we got it
+            if (c->observer) // once: a second queue would outlive the client (its writer on freed memory)
+                break;
             pthread_mutex_lock(&g_cs_dev);
             pthread_mutex_lock(&g_cs_clients);
             c->observer = 1;

@@ -19,6 +19,8 @@ std::mutex mu;
 std::vector<libusb_transfer *> submitted, pending; // pending: back to the code at the next event round
 std::atomic<bool> fail_submit{false};
 std::atomic<int> claims{0};
+std::atomic<int> fail_claim{-1};          // this interface's claim fails
+std::vector<libusb_device_handle *> touched; // mu: handles given to release / set_alt
 
 void quiet(const char *, ...) {}
 void on_in(const int16_t *, uint32_t, void *) {}
@@ -96,13 +98,25 @@ int LIBUSB_CALL libusb_control_transfer(libusb_device_handle *, uint8_t, uint8_t
 {
     return len;
 }
-int LIBUSB_CALL libusb_claim_interface(libusb_device_handle *, int)
+int LIBUSB_CALL libusb_claim_interface(libusb_device_handle *, int iface)
 {
+    if (iface == fail_claim)
+        return LIBUSB_ERROR_BUSY;
     claims++;
     return 0;
 }
-int LIBUSB_CALL libusb_release_interface(libusb_device_handle *, int) { return 0; }
-int LIBUSB_CALL libusb_set_interface_alt_setting(libusb_device_handle *, int, int) { return 0; }
+int LIBUSB_CALL libusb_release_interface(libusb_device_handle *h, int)
+{
+    std::lock_guard<std::mutex> lk(mu);
+    touched.push_back(h);
+    return 0;
+}
+int LIBUSB_CALL libusb_set_interface_alt_setting(libusb_device_handle *h, int, int)
+{
+    std::lock_guard<std::mutex> lk(mu);
+    touched.push_back(h);
+    return 0;
+}
 const char *LIBUSB_CALL libusb_error_name(int) { return "stub"; }
 }
 
@@ -125,4 +139,23 @@ TEST(vla_stream_without_in_transfers_is_not_running_and_restarts)
     CHECK(!vla_running());
     std::lock_guard<std::mutex> lk(mu);
     CHECK(submitted.empty()); // every transfer came back before it was freed
+}
+
+TEST(vla_claim_failure_forgets_the_handle)
+{
+    // B2: a failed claim (another driver holds the interface) must not leave the handle behind: after a replug the
+    // next start would stop the old stream on the freed handle first
+    auto *gone = reinterpret_cast<libusb_device_handle *>(0x2), *fresh = reinterpret_cast<libusb_device_handle *>(0x3);
+    fail_claim = 1;
+    CHECK_EQ(vla_start(nullptr, gone, 44100, on_in, on_out, nullptr), -1);
+    fail_claim = -1;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        touched.clear(); // interface 0 was given back on `gone` before the error: fine, the handle was still open
+    }
+    CHECK_EQ(vla_start(nullptr, fresh, 44100, on_in, on_out, nullptr), 0);
+    vla_stop();
+    std::lock_guard<std::mutex> lk(mu);
+    for (auto *h : touched)
+        CHECK(h == fresh);
 }
