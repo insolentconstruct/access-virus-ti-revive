@@ -4,11 +4,14 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <poll.h>
+#include <string>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 extern "C" {
+#include "owner.h"
 #include "vtiproto.h"
 void bh_device(int open);
 void bh_serve(int fd);
@@ -45,6 +48,33 @@ bool until(const std::function<bool()> &f, int ms = 2000)
     return f();
 }
 
+void hello(int fd, const std::string &name)
+{
+    std::vector<uint8_t> p = {VTI_PROTO_VERSION, 0, 0, 0};
+    p.insert(p.end(), name.begin(), name.end());
+    msg(fd, VTIMSG_HELLO, p);
+}
+
+// the next VTIMSG_STATE the client gets (other messages are skipped), -1 when none comes within 2 s
+int next_state(int fd)
+{
+    for (;;) {
+        pollfd p{fd, POLLIN, 0};
+        vtimsg h;
+        uint8_t b[VTIMSG_MAX];
+        if (poll(&p, 1, 2000) != 1 || ::read(fd, &h, sizeof h) != (ssize_t)sizeof h)
+            return -1;
+        for (size_t got = 0; got < h.len;) {
+            const ssize_t r = ::read(fd, b + got, h.len - got);
+            if (r <= 0)
+                return -1;
+            got += (size_t)r;
+        }
+        if (h.type == VTIMSG_STATE && h.len >= 4)
+            return b[0];
+    }
+}
+
 int writes()
 {
     uint8_t b[VTIMSG_MAX];
@@ -66,4 +96,69 @@ TEST(broker_second_observe_keeps_one_observer)
     close(fd);
     CHECK(until([] { return bh_clients() == 0; }));
     CHECK_EQ(bh_observers(), 0);
+}
+
+TEST(broker_write_never_passes_original_patch)
+{
+    // B3 (rule 2): the plug-in's sendguard.h rule for every client - a write carrying Multi "Original Patch" (72 00 03)
+    // or status F4 is refused whole; other writes reach the Virus
+    bh_device(1);
+    int fd = client();
+    const std::vector<uint8_t> note = {0x06, 0x29, 0x90, 0x3C, 0x64};
+    const std::vector<uint8_t> orig = {0x06, 0x24, 0xF0, 0x00, 0x20, 0x24, 0x33, 0x01, 0x10,
+                                       0x24, 0x72, 0x00, 0x03, 0x26, 0x05, 0xF7, 0x00};
+    msg(fd, VTIMSG_WRITE, note);
+    CHECK(until([] { return writes() == 1; }));
+    msg(fd, VTIMSG_WRITE, orig);
+    msg(fd, VTIMSG_WRITE, {0x06, 0x2F, 0xF4, 0x00, 0x00});
+    msg(fd, VTIMSG_WRITE, note);
+    CHECK(until([] { return writes() == 2; }));
+    uint8_t last[VTIMSG_MAX];
+    int n = 0;
+    CHECK_EQ(bh_writes(last, &n), 2);
+    CHECK_EQ(n, 4);
+    CHECK_EQ(last[0], 0x29);
+    close(fd);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_owner_hands_over_on_observe_and_close)
+{
+    // B11 (the POSIX side of B6): the owning plug-in becomes an observer -> the next waiting plug-in owns the Virus;
+    // when that one leaves, the next one
+    bh_device(1);
+    int a = client(), b = client(), c = client();
+    hello(a, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(a), 1);
+    hello(b, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(b), 2);
+    hello(c, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(c), 2);
+    msg(a, VTIMSG_OBSERVE, {0});
+    CHECK_EQ(next_state(b), 1);
+    close(b);
+    CHECK_EQ(next_state(c), 1);
+    close(a);
+    close(c);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_second_hello_changes_nothing)
+{
+    // B11 (the POSIX side of B6): the name and the owner are decided with the first HELLO; a client that says it is
+    // the plug-in later does not take the Virus from the plug-in that comes next
+    bh_device(1);
+    int cc = client(), p = client();
+    hello(cc, "tirevive-cc");
+    CHECK_EQ(next_state(cc), 1);
+    hello(cc, VTI_PLUGIN_NAME);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // handled (no reply to wait for)
+    hello(p, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(p), 1); // the owner, not waiting
+    close(cc);
+    close(p);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
 }

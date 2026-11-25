@@ -262,15 +262,20 @@ static int stream_start(void)
     S.rate_lost = 0;
     memset(&S.ps, 0, sizeof S.ps);
     vti_pktstat_set_rate(&S.ps, S.rate);
-    for (int i = 0; i < NW; i++) {
-        S.wt[i] = libusb_alloc_transfer(NP);
-        libusb_fill_iso_transfer(S.wt[i], S.h, EP_OUT, malloc(NP * OUT_PKT), NP * OUT_PKT, NP, out_cb, NULL, 1000);
-        S.wfree[i] = 1;
-    }
-    for (int i = 0; i < NR; i++) {
-        S.rt[i] = libusb_alloc_transfer(NP);
-        libusb_fill_iso_transfer(S.rt[i], S.h, EP_IN, malloc(NP * IN_PKT), NP * IN_PKT, NP, in_cb, NULL, 1000);
-        libusb_set_iso_packet_lengths(S.rt[i], IN_PKT);
+    for (int i = 0; i < NW + NR; i++) { // all before anything starts: a missing one is an error (stream_stop frees)
+        struct libusb_transfer **t = i < NW ? &S.wt[i] : &S.rt[i - NW];
+        const int len = NP * (i < NW ? OUT_PKT : IN_PKT);
+        uint8_t *b = malloc(len);
+        if (!b || !(*t = libusb_alloc_transfer(NP))) {
+            free(b);
+            vti_log("usbaudio: out of memory");
+            return -1;
+        }
+        libusb_fill_iso_transfer(*t, S.h, i < NW ? EP_OUT : EP_IN, b, len, NP, i < NW ? out_cb : in_cb, NULL, 1000);
+        if (i < NW)
+            S.wfree[i] = 1;
+        else
+            libusb_set_iso_packet_lengths(*t, IN_PKT);
     }
     S.ev_started = pthread_create(&S.ev, NULL, event_thread, NULL) == 0;
     int in_ok = 0;

@@ -212,6 +212,7 @@ TEST(broker_info_version)
     b.close();
     char buf[64];
     CHECK(vti_info_text(buf, sizeof buf) > 0 && std::string(buf).rfind("version=", 0) == 0);
+    CHECK_EQ(vti_info_text(buf, 4), 3); // what is in the buffer, never snprintf's would-be length (B7)
 }
 
 // the Virus' identification blocks through the broker (VTIMSG_FLASHINFO, flashinfo.h): the client asks, the broker

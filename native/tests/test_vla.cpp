@@ -20,6 +20,7 @@ std::vector<libusb_transfer *> submitted, pending; // pending: back to the code 
 std::atomic<bool> fail_submit{false};
 std::atomic<int> claims{0};
 std::atomic<int> fail_claim{-1};          // this interface's claim fails
+std::atomic<int> fail_alloc{-1};          // this allocation (counted down) gives NULL
 std::vector<libusb_device_handle *> touched; // mu: handles given to release / set_alt
 
 void quiet(const char *, ...) {}
@@ -63,6 +64,8 @@ void (*vti_log)(const char *fmt, ...) = quiet;
 
 struct libusb_transfer *LIBUSB_CALL libusb_alloc_transfer(int iso_packets)
 {
+    if (fail_alloc >= 0 && fail_alloc-- == 0)
+        return nullptr;
     return (libusb_transfer *)calloc(1, sizeof(libusb_transfer) + (size_t)iso_packets * sizeof(libusb_iso_packet_descriptor));
 }
 void LIBUSB_CALL libusb_free_transfer(struct libusb_transfer *t) { free(t); }
@@ -158,4 +161,20 @@ TEST(vla_claim_failure_forgets_the_handle)
     std::lock_guard<std::mutex> lk(mu);
     for (auto *h : touched)
         CHECK(h == fresh);
+}
+
+TEST(vla_transfer_alloc_failure_is_an_error)
+{
+    // B10: a transfer libusb cannot allocate was filled through NULL; now the start fails and gives everything back
+    auto *h = reinterpret_cast<libusb_device_handle *>(0x4);
+    for (int k : {0, 16}) { // the first OUT and the first IN transfer (16 OUT first)
+        fail_alloc = k;
+        CHECK_EQ(vla_start(nullptr, h, 44100, on_in, on_out, nullptr), -1);
+        CHECK(!vla_running());
+        fail_alloc = -1;
+    }
+    CHECK_EQ(vla_start(nullptr, h, 44100, on_in, on_out, nullptr), 0);
+    vla_stop();
+    std::lock_guard<std::mutex> lk(mu);
+    CHECK(submitted.empty());
 }

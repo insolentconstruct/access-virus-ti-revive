@@ -28,6 +28,7 @@
 #include "vtikeyport.h"
 #include "devslot.h" // one broker per Virus when several are connected (#45)
 #include <windows.h>
+#include <sddl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,7 +41,6 @@ static HANDLE g_log = INVALID_HANDLE_VALUE;
 static int g_verbose;
 static CRITICAL_SECTION g_cs_log, g_cs_dev, g_cs_clients;
 static vti *g_dev;
-static volatile LONG g_dev_failed; // set by the RX path on fatal device errors
 
 #define QUEUE_BYTES (256 * 1024)
 
@@ -58,6 +58,7 @@ typedef struct {
     int observer;            // protocol 4: read-only observer (Nerd mode)
     volatile LONG64 dropped; // observer: messages dropped because its queue was full
     char name[48];           // from HELLO (protocol 4)
+    vti_sxwatch sx;          // its SysEx going on, for the rule 2 write filter (ctrlguard.h)
 } client;
 static client *g_clients[MAX_CLIENTS];
 
@@ -69,6 +70,13 @@ static client *g_clients[MAX_CLIENTS];
 static client *g_plugin_owner; // g_cs_clients
 static int is_plugin(const client *c) { return vti_is_plugin(c->name); }
 static int plugin_waits(const client *c) { return vti_client_waits(is_plugin(c), c == g_plugin_owner); } // g_cs_clients held
+static client *next_plugin_owner(void) // g_cs_clients held, no owner: the next waiting plug-in (another program) takes over
+{
+    for (int i = 0; i < MAX_CLIENTS && !g_plugin_owner; i++)
+        if (g_clients[i] && !g_clients[i]->observer && is_plugin(g_clients[i]))
+            g_plugin_owner = g_clients[i];
+    return g_plugin_owner;
+}
 
 // ------------------------------------------------------------------------------------------------- audio
 static vti_audio_shm *g_shm;
@@ -579,13 +587,39 @@ static int client_count_locked(void)
 
 static int client_count(void)
 {
-    int n = 0;
     EnterCriticalSection(&g_cs_clients);
-    for (int i = 0; i < MAX_CLIENTS; i++)
-        n += g_clients[i] != NULL;
+    const int n = client_count_locked();
     LeaveCriticalSection(&g_cs_clients);
     return n;
 }
+
+// the pipe's access: the user who runs the broker (all its clients run as that user: plug-in, ASIO driver, Control
+// Center) and SYSTEM, nobody else; NULL = the default (read access for everyone and anonymous)
+static SECURITY_ATTRIBUTES *pipe_security(void)
+{
+    static SECURITY_ATTRIBUTES sa;
+    union {
+        TOKEN_USER u;
+        char b[256];
+    } tu;
+    HANDLE tok;
+    DWORD n;
+    char *sid = NULL, sddl[256];
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
+        return NULL;
+    BOOL ok = GetTokenInformation(tok, TokenUser, &tu, sizeof tu, &n) && ConvertSidToStringSidA(tu.u.User.Sid, &sid);
+    CloseHandle(tok);
+    if (!ok)
+        return NULL;
+    snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;SY)(A;;GA;;;%s)", sid);
+    LocalFree(sid);
+    sa.nLength = sizeof sa;
+    return ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, &sa.lpSecurityDescriptor, NULL)
+               ? &sa
+               : NULL;
+}
+
+static int g_exiting; // under g_cs_clients: the idle exit is decided, no client is taken any more
 
 static DWORD WINAPI device_thread(LPVOID unused)
 {
@@ -595,19 +629,22 @@ static DWORD WINAPI device_thread(LPVOID unused)
         if (client_count())
             last_busy = GetTickCount();
         else if (!g_stay && GetTickCount() - last_busy > IDLE_EXIT_MS) {
-            EnterCriticalSection(&g_cs_clients); // no client may connect in between
-            if (!client_count_locked()) {
+            // decided under the client lock, and from then on no client is taken (as on POSIX, audit #27). The lock is
+            // not held to the end: vti_close waits for the USB readers, and a reader in on_rx waits for it
+            EnterCriticalSection(&g_cs_clients);
+            g_exiting = !client_count_locked();
+            LeaveCriticalSection(&g_cs_clients);
+            if (g_exiting) {
+                blog("no clients for %d s: exiting", IDLE_EXIT_MS / 1000);
+                vti_keyport_log_counts();
                 EnterCriticalSection(&g_cs_dev);
                 if (g_dev)
                     vti_close(g_dev);
-                blog("no clients for %d s: exiting", IDLE_EXIT_MS / 1000);
-                vti_keyport_log_counts();
                 ExitProcess(0);
             }
-            LeaveCriticalSection(&g_cs_clients);
         }
         EnterCriticalSection(&g_cs_dev);
-        if (g_dev && (g_dev_failed || vti_is_dead(g_dev))) {
+        if (g_dev && vti_is_dead(g_dev)) {
             blog("device failed: closing");
             vti_close(g_dev);
             g_dev = NULL;
@@ -615,7 +652,6 @@ static DWORD WINAPI device_thread(LPVOID unused)
             broadcast(VTIMSG_STATE, &st, 4, NULL, 0);
         }
         if (!g_dev) {
-            g_dev_failed = 0;
             g_dev = vti_open(on_rx, NULL); // starts the IN readers, then sends the handshake
             if (g_dev) {
                 g_dev_gen++;
@@ -665,7 +701,7 @@ static DWORD WINAPI client_thread(LPVOID arg)
     // the device state goes out after the client's HELLO (its name): a second program's plug-in must not see the Virus
     // even for a moment - it would send its start-up messages into it. Clients say HELLO right after connecting; one
     // that sends nothing within 300 ms gets the state anyway.
-    int state_sent = 0;
+    int state_sent = 0, hello = 0;
     for (int i = 0; i < 30; i++) {
         DWORD avail = 0;
         if (!PeekNamedPipe(c->pipe, NULL, 0, NULL, &avail, NULL) || avail >= sizeof(vtimsg))
@@ -690,6 +726,8 @@ static DWORD WINAPI client_thread(LPVOID arg)
         LeaveCriticalSection(&g_cs_clients);
         switch (h.type) {
         case VTIMSG_HELLO:
+            if (hello++) // a second HELLO changes nothing: the name and the owner were decided with the first
+                break;
             if (h.len > 4) { // protocol 4: the client's name
                 size_t n = h.len - 4u < sizeof c->name - 1 ? h.len - 4u : sizeof c->name - 1;
                 EnterCriticalSection(&g_cs_clients);
@@ -717,7 +755,11 @@ static DWORD WINAPI client_thread(LPVOID arg)
             }
             break;
         case VTIMSG_OBSERVE: { // read-only observer: no RX, no writes; traffic copy, log and status instead
-            uint32_t ver = VTI_PROTO_VERSION, st0 = 0;
+            if (c->observer) // once: a second one would count it twice and replay the pre-roll again
+                break;
+            EnterCriticalSection(&g_cs_dev);
+            uint32_t ver = VTI_PROTO_VERSION, st0 = 0, st1 = g_dev != NULL;
+            LeaveCriticalSection(&g_cs_dev);
             send_msg(c, VTIMSG_STATE, &st0, 4, NULL, 0);
             send_msg(c, VTIMSG_OBSERVE_REPLY, &ver, 4, NULL, 0);
             EnterCriticalSection(&g_cs_pre); // nothing new between the replay and the attach, nothing twice
@@ -733,6 +775,13 @@ static DWORD WINAPI client_thread(LPVOID arg)
             EnterCriticalSection(&g_cs_clients);
             c->observer = 1;
             InterlockedIncrement(&g_obs_count);
+            if (g_plugin_owner == c) { // give the Virus to the next program if we had it
+                g_plugin_owner = NULL;
+                if (next_plugin_owner()) {
+                    blog("the next program's plug-in owns the Virus now");
+                    send_msg(g_plugin_owner, VTIMSG_STATE, &st1, 4, NULL, 0);
+                }
+            }
             LeaveCriticalSection(&g_cs_clients);
             LeaveCriticalSection(&g_cs_pre);
             blog("client is an observer (read-only)");
@@ -741,6 +790,10 @@ static DWORD WINAPI client_thread(LPVOID arg)
         case VTIMSG_WRITE:
             if (h.len >= 1 && !vti_write_allowed(buf[0])) {
                 blog("refused a write to ep%02x (rule 2: the plug-in channel 0x06 only)", buf[0]);
+                break;
+            }
+            if (h.len >= 1 && vti_write_blocked(&c->sx, buf + 1, h.len - 1)) {
+                blog("refused a write of %d bytes (rule 2: Multi parameter 0-3 of page 0x72 or status F4)", h.len - 1);
                 break;
             }
             if (h.len >= 1 && !c->observer && !waits) {
@@ -827,9 +880,7 @@ static DWORD WINAPI client_thread(LPVOID arg)
         users += g_clients[i] && !g_clients[i]->observer;
     if (g_plugin_owner == c) { // hand the Virus to the next waiting plug-in (another program)
         g_plugin_owner = NULL;
-        for (int i = 0; i < MAX_CLIENTS && !g_plugin_owner; i++)
-            if (g_clients[i] && !g_clients[i]->observer && is_plugin(g_clients[i]))
-                g_plugin_owner = next = g_clients[i];
+        next = next_plugin_owner();
     }
     LeaveCriticalSection(&g_cs_clients);
     if (!c->observer) {
@@ -911,15 +962,21 @@ int main(int argc, char **argv)
     CloseHandle(CreateThread(NULL, 0, device_thread, NULL, 0, NULL));
     char pipe[64];
     snprintf(pipe, sizeof pipe, VTI_PIPE_NAME "%s", sfx);
+    SECURITY_ATTRIBUTES *sa = pipe_security();
+    if (!sa)
+        blog("pipe security failed (%lu): default access", GetLastError());
+    // the first instance must be ours (no other process holds the name); later ones are added while ours exist
+    DWORD first = FILE_FLAG_FIRST_PIPE_INSTANCE;
     for (;;) {
-        HANDLE p = CreateNamedPipeA(pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 65536,
-                                    65536, 0, NULL);
+        HANDLE p = CreateNamedPipeA(pipe, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | first,
+                                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                    PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, sa);
         if (p == INVALID_HANDLE_VALUE) {
             blog("CreateNamedPipe failed: %lu", GetLastError());
             Sleep(1000);
             continue;
         }
+        first = 0;
         OVERLAPPED ov = {0};
         ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
         BOOL connected = ConnectNamedPipe(p, &ov);
@@ -934,21 +991,28 @@ int main(int argc, char **argv)
             continue;
         }
         client *c = calloc(1, sizeof *c);
+        if (!c || !(c->queue = malloc(QUEUE_BYTES))) {
+            blog("out of memory: client refused");
+            free(c);
+            DisconnectNamedPipe(p);
+            CloseHandle(p);
+            continue;
+        }
         c->pipe = p;
         c->alive = 1;
-        c->queue = malloc(QUEUE_BYTES);
         c->q_event = CreateEventA(NULL, FALSE, FALSE, NULL);
         InitializeCriticalSection(&c->q);
         int slot = -1;
         EnterCriticalSection(&g_cs_clients);
-        for (int i = 0; i < MAX_CLIENTS && slot < 0; i++)
+        for (int i = 0; i < MAX_CLIENTS && slot < 0 && !g_exiting; i++)
             if (!g_clients[i]) {
                 g_clients[i] = c;
                 slot = i;
             }
+        const int exiting = g_exiting;
         LeaveCriticalSection(&g_cs_clients);
         if (slot < 0) {
-            blog("too many clients");
+            blog(exiting ? "client refused: exiting after the idle time" : "too many clients");
             DisconnectNamedPipe(p);
             CloseHandle(p);
             CloseHandle(c->q_event);

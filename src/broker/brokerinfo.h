@@ -8,7 +8,9 @@
 #define TIREVIVE_VERSION "dev"
 #endif
 
+// the length of the text in `buf` (n > 0), cut to fit: it is sent as is
 static inline int vti_info_text(char *buf, int n)
 {
-    return snprintf(buf, (size_t)n, "version=%s", TIREVIVE_VERSION);
+    const int r = snprintf(buf, (size_t)n, "version=%s", TIREVIVE_VERSION);
+    return r < 0 ? 0 : r < n ? r : n - 1;
 }

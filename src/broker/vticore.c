@@ -18,7 +18,6 @@
 #ifdef __linux__
 #include "resetguard.h"
 #include "giveback.h"
-#include <stdio.h>
 #include <time.h>
 #define RESET_GAP_S 5 // E136, see resetguard.h
 static int gb_claim(void *h, int i) { return libusb_claim_interface((libusb_device_handle *)h, i); }
@@ -37,7 +36,6 @@ static int reset_allowed(void)
 #ifdef __APPLE__
 #include "resetguard.h"
 #include <time.h>
-#include <unistd.h>
 #define REENUM_GAP_S 60 // E136, E312: USB resets close together have hung the Virus until a power cycle
 #endif
 
@@ -551,8 +549,11 @@ vti *vti_open(vti_rx_cb cb, void *user)
     v->linked = 1;
     return v;
 fail:
-    if (v->h)
+    if (v->h) {
+        for (int i = 3; i <= 4; i++) // interface 3 when 4 failed, both when the readers did not start
+            libusb_release_interface(v->h, i); // not claimed: LIBUSB_ERROR_NOT_FOUND, nothing sent
         libusb_close(v->h);
+    }
     libusb_exit(v->ctx);
     free(v);
     return NULL;
@@ -664,14 +665,6 @@ int vti_control(vti *v, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue
                 libusb_error_name(r));
     tap_control(bmRequestType, bRequest, wValue, wIndex, len, r < 0 ? -1 : r, data);
     return r < 0 ? -1 : r;
-}
-
-int vti_audio(vti *v, int on, const char *event_name) // broker audio exists only behind vtibroker (vticore_pipe.c)
-{
-    (void)v;
-    (void)on;
-    (void)event_name;
-    return -1;
 }
 
 int vti_link(vti *v, int on)

@@ -66,10 +66,10 @@ int main(int argc, char **argv)
         if (tone) { // as many output frames as input frames arrived: same clock
             int64_t ow = shm->out_write;
             for (int64_t i = 0; i < wr - pos; i++) {
-                int16_t v = ramp ? (int16_t)((ow + i) & 0x7fff) : (int16_t)(8192 * sin(phase));
+                int16_t smp = ramp ? (int16_t)((ow + i) & 0x7fff) : (int16_t)(8192 * sin(phase));
                 phase = fmod(phase + 2 * 3.14159265358979 * 440.0 / 44100.0, 2 * 3.14159265358979);
-                shm->out[((ow + i) & (VTI_AUDIO_RING - 1)) * 2] = v;
-                shm->out[((ow + i) & (VTI_AUDIO_RING - 1)) * 2 + 1] = v;
+                shm->out[((ow + i) & (VTI_AUDIO_RING - 1)) * 2] = smp;
+                shm->out[((ow + i) & (VTI_AUDIO_RING - 1)) * 2 + 1] = smp;
             }
             InterlockedExchange64((volatile LONG64 *)&shm->out_write, ow + (wr - pos));
         }
