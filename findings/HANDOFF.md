@@ -91,6 +91,11 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    connection), #37 packman83 (rc9 in Logic: Record Enable, Small, I/O 256, 5 Plays on the notes, log). Mac: user runs
    the installer in ~/Downloads/TI-Revive-0.8.44-rc9. Not run anywhere: a Virus that really stops answering, the broker
    reset (D) on macOS/Windows, rc9 loaded in a DAW.
+0b. **Code review fixes (2026-11-25, running):** 4 read-only reviewers found 68 items (data loss in library save >128
+   patches and failed flush, store without backup during a bank sync, unknown SysEx from 267-byte dumps, two broker
+   use-after-free bugs, drag flood, dead code). Checklist with per-item status: git-ignored work/review-todo-2026-11-25.md.
+   4 workers (W1 device/ASIO, W2 model/access, W3 editor/plug-in, W4 broker) fix them uncommitted in the tree; the
+   orchestrator reviews, rebuilds, runs ctest and commits. After a /clear: read that file, review what is ticked.
 1. **Quiet issues:** #47 + #45 reach 7 days on 2026-11-26 (close message, with the user), #53 on 2026-11-30, #42 asked
    nothing since 11-20 (reporter promised a weekend test). #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log.
 2. **#37 after A+B (code in since rc8, E589):** still open: a burst without a Play window (setActive alone, Play again
