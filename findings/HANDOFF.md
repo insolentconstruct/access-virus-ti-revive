@@ -96,7 +96,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    use-after-free bugs, drag flood, dead code). Checklist with per-item status: git-ignored work/review-todo-2026-11-25.md.
    Parallel run crashed the PC (OOM): now ONE worker at a time, one build dir (scratchpad b0), -j4. Order W2 model/
    access -> W3 editor/plug-in -> W4 broker -> W1 device/ASIO; orchestrator reviews + commits after each. B1+B2 in
-   f609a75, W2 done in beb1df0 (E593), W3 running. Uncommitted partial edits of W3/W4 still in the tree. After a /clear: read that file, review what is ticked.
+   f609a75, W2 done in beb1df0 (E593), W3 in 92af40a, W4 broker running (its unfinished B3 filter is in the tree), W1 last. After a /clear: read that file, review what is ticked.
 1. **Quiet issues:** #47 + #45 reach 7 days on 2026-11-26 (close message, with the user), #53 on 2026-11-30, #42 asked
    nothing since 11-20 (reporter promised a weekend test). #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log.
 2. **#37 after A+B (code in since rc8, E589):** still open: a burst without a Play window (setActive alone, Play again
