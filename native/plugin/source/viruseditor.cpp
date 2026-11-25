@@ -1084,7 +1084,7 @@ public:
             tick_tips();
             tick_alert();
             if (!plugin_->gesture_timer_running()) // the plug-in's own timer does it; this only without a run loop
-                plugin_->tick_gestures(); // knob moves on the Virus -> host edits (E304)
+                plugin_->tick_timer(); // knob moves on the Virus -> host edits (E304), the latency check (#37)
             if (int kb, kp; key_load_.due(now_ms(), kb, kp)) // Up/Down in the browser stopped
                 plugin_->load_patch_remembered(kb, kp, plugin_->ui_value(plugin_->layout().frame_parameter, -1));
             drop_switched_selections();
@@ -2094,14 +2094,7 @@ private:
     vti::InfoScroll info_scroll_;  // a page taller than its room (fit_info_page's scroll)
     vti::InfoRect info_track_{};   // where draw_info put the scrollbar, for the mouse
     double info_grab_ = -1;        // dragging the thumb: where it was grabbed, -1 = not
-    static const char *tirevive_version()
-    {
-#ifdef TIREVIVE_VERSION
-        return TIREVIVE_VERSION;
-#else
-        return "";
-#endif
-    }
+    static const char *tirevive_version() { return VTI_NATIVE_VERSION; }
     void open_info(vti::InfoStart which, bool from_menu)
     {
         const vti::InfoState st = plugin_->info_state();
@@ -2430,7 +2423,7 @@ private:
 #else
         fs->setInitialDirectory(vti::u8str(vti::u8path(dir) / vti::u8path(name)).c_str()); // zenity/kdialog: a full path
 #endif
-        auto *plugin = plugin_;
+        Steinberg::IPtr<VirusPlugin> plugin(plugin_); // the macOS sheet ends later: the instance stays until then
         fs->run([plugin](CNewFileSelector *sel) {
             if (sel->getNumSelectedFiles() == 1)
                 plugin->create_library(sel->getSelectedFile(0));
@@ -3056,11 +3049,9 @@ private:
         }
         vti::BuiltMenu m = vti::help_menu(st);
         const int checked = m.checked;
-        show_list(std::move(m.items), checked, 0, where,
-                  [this, actions = std::move(m.actions), args = std::move(m.args)](int i) {
-                      const bool in = i >= 0 && i < (int)actions.size();
-                      menu_action(in ? actions[(size_t)i] : vti::MenuAction::None, in ? args[(size_t)i] : 0);
-                  });
+        auto items = std::move(m.items); // before m moves into the callback (argument order is unspecified)
+        show_list(std::move(items), checked, 0, where,
+                  [this, m = std::move(m)](int i) { menu_action(m.action_at(i), m.arg_at(i)); });
     }
     std::vector<std::string> manual_paths_; // the manuals found when the "?" menu last opened, by kManual*
 
@@ -3147,7 +3138,7 @@ private:
 #else
         fs->setInitialDirectory(vti::u8str(vti::u8path(vti::cc::plugin_dir()).parent_path() / name).c_str());
 #endif
-        auto *plugin = plugin_;
+        Steinberg::IPtr<VirusPlugin> plugin(plugin_); // see create_library_dialog
         fs->run([plugin](CNewFileSelector *sel) {
             if (sel->getNumSelectedFiles() != 1)
                 return;
@@ -3174,11 +3165,9 @@ private:
         st.comparing = st.part >= 0 && plugin_->comparing(st.part);
         vti::BuiltMenu m = vti::edit_menu(st);
         const int checked = m.checked;
-        show_list(std::move(m.items), checked, 0, where,
-                  [this, actions = std::move(m.actions), args = std::move(m.args)](int i) {
-                      const bool in = i >= 0 && i < (int)actions.size();
-                      menu_action(in ? actions[(size_t)i] : vti::MenuAction::None, in ? args[(size_t)i] : 0);
-                  });
+        auto items = std::move(m.items); // before m moves into the callback (argument order is unspecified)
+        show_list(std::move(items), checked, 0, where,
+                  [this, m = std::move(m)](int i) { menu_action(m.action_at(i), m.arg_at(i)); });
     }
     EditorRenderer renderer_;
     std::map<std::string, SharedPointer<CBitmap>> bitmaps_;

@@ -79,7 +79,7 @@ static bool env_no_ping() // R5 test: the old stamping without sync ping / marke
 
 static const char *const USB_IO_PATH = "Global USB/Virus Control USB IO Configuration";
 static const std::string DM_PATH = "VirusControl/Direct Monitoring"; // the D button (directmon.h)
-static const std::string LIVE_MODE_PATH = "VirusControl/Live Mode", PLUGIN_LATENCY_PATH = "VirusControl/Plugin Latency";
+static const std::string LIVE_MODE_PATH = "VirusControl/Live Mode";
 static const char *const SYNC_INFO_PATH = "Global USB/Sync Information Event"; // global 0x54 from the Virus (E205)
 
 // the USB IO configuration of this computer: VTI_IO_CONFIG (tests), else <plug-in folder>/usb-io, else 0
@@ -1223,8 +1223,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     // the host's UI thread (initialize runs there): knob moves -> host edits, window open or not (gesture_timer_)
     auto tick = [this] {
         gesture_timer_ran_.store(true, std::memory_order_relaxed);
-        tick_gestures();
-        check_latency();
+        tick_timer();
     };
 #if SMTG_OS_LINUX
     // no run loop on the host context: no timer, the editor's timer ticks as in 0.8.41 (editor_closed flushes then)
@@ -1380,7 +1379,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         vti::cc::rotate_log(own_cache_dir() + "/../diag.log", vti::cc::kPluginLogLimit); // on for everyone: kept small
         out_->set_diag_path(own_cache_dir() + "/../diag.log");
     }
-    out_->log("Virus TI native: TI Revive %s (%s)\n", TIREVIVE_VERSION, VTI_GIT_REV); // which build (E563)
+    out_->log("Virus TI native: TI Revive %s (%s)\n", VTI_NATIVE_VERSION, VTI_GIT_REV); // which build (E563)
     if (live_notes_) { // after set_diag_path, or the line never reaches diag.log
         char later[64] = "";
         if (out_->live_later.load())
@@ -1667,7 +1666,7 @@ tresult PLUGIN_API VirusPlugin::setupProcessing(ProcessSetup &setup)
 {
     block_ = setup.maxSamplesPerBlock;
     rate_ = setup.sampleRate;
-    apply_timing_mode(false); // Plugin Latency 1/2 follow the block (3 blocks at least, E477)
+    apply_timing_mode(false); // the low-latency option's lead follows the block (E496)
     if (out_) // the audio start and setActive ask for it (rate following, design-rate.md step 5)
         out_->want_rate = virus_rate_for(rate_);
     // the Virus runs at 44.1 or 48 kHz (E323); other host rates get its audio resampled. Converters for both Virus
@@ -1710,18 +1709,16 @@ int VirusPlugin::state_part(const std::string &path, int part) const
     return part > 15 || (p && p->part == "none") ? -1 : part;
 }
 
-// Live Mode / Plugin Latency in force (stamprule.h timing_mode): the lead and the F5s change, the host gets the new
+// Live Mode in force (stamprule.h timing_mode): the lead and the F5s change, the host gets the new
 // latency, and the Virus gets B0 78 00 as from the original at every switch (E449). Only while the transport is
 // stopped by the editor's condition, as in the original; a latency change moves the read position, so it clicks once
 void VirusPlugin::apply_timing_mode(bool notify)
 {
     const bool live = ui_value(LIVE_MODE_PATH, -1) == 1;
-    int n = ui_value(PLUGIN_LATENCY_PATH, -1);
-    if (n < 0 || n > 3)
-        n = 3;
+    const int n = 3; // Plugin Latency: no control sets it, the original keeps it at Normal (E452, E468)
     // the base lead: the original's 3072, or with the low-latency option the lead measured for this block (E496)
     const int base = low_latency_ ? experimental_lead(block_, virus_rate_for(rate_)) : timing_a_;
-    const TimingMode m = timing_mode(live, n, base, block_); // Plugin Latency 1/2: 3 blocks at least (E477)
+    const TimingMode m = timing_mode(live, n, base, block_);
     if (m.a == a_now_.load() && m.stamps == stamps_now_)
         return;
     a_now_ = m.a;
@@ -1920,10 +1917,8 @@ bool VirusPlugin::has_history() const
 
 bool VirusPlugin::diag_enabled()
 {
-    static int on = -1;
-    if (on < 0)
-        on = vti::cc::plugin_log_enabled() ? 1 : 0; // on unless diag.off (since 0.8.41, the Options page switch)
-    return on == 1;
+    static const bool on = vti::cc::plugin_log_enabled(); // on unless diag.off (since 0.8.41, the Options page switch)
+    return on;
 }
 
 void VirusPlugin::note_probe_flush()
@@ -2009,7 +2004,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         tl_follow_.set_margin(timing_m()); // the pull-back guard of #51 knows the read margin (VTI_NATIVE_MARGIN)
     }
     // #37 (E589): the stamp lead above the safety net's floor is room for the timeline to sit behind the ring (a
-    // Play burst's rest stays instead of being faded on the first notes). Every block: Live Mode / Plugin Latency
+    // Play burst's rest stays instead of being faded on the first notes). Every block: Live Mode / the block size
     // change the lead from another thread (apply_timing_mode, a_now_), and the follower is this thread's
     tl_follow_.set_room(keep_rest_ ? timing_a() - DeviceOut::floor_min : 0); // 0: off (Control Center option)
     int64_t newest = ring_newest();
@@ -2061,9 +2056,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             tl_follow_.activated();
         if (anchor_now) {
             if (env_stats() || resync)
-                fprintf(stderr, "timeline %s: err %lld newest %lld block %d\n",
-                        resync ? "resync" : tl_valid_ ? "re-anchor" : "anchor", (long long)err, (long long)newest,
-                        data.numSamples);
+                out_->note_timeline({resync ? "resync" : tl_valid_ ? "re-anchor" : "anchor", err, newest, data.numSamples});
             resync_.start(newest);
             tl_ = target;
             next_tick_ = (double)tl_;
@@ -3030,9 +3023,9 @@ void VirusPlugin::ui_set(const std::string &path, int part, int value)
                 arp_action(part, b.second);
             return;
         }
-    if (path == LIVE_MODE_PATH || path == PLUGIN_LATENCY_PATH) { // the original's timing switches (stamprule.h)
-        // Live Mode only while stopped, as the original's editor allows it: enforced here too, not only by greying
-        if (path == LIVE_MODE_PATH && host_playing_.load(std::memory_order_relaxed)) {
+    if (path == LIVE_MODE_PATH) { // the original's timing switch (stamprule.h)
+        // only while stopped, as the original's editor allows it: enforced here too, not only by greying
+        if (host_playing_.load(std::memory_order_relaxed)) {
             ui_dirty_ = true;
             return;
         }
@@ -4233,6 +4226,23 @@ bool VirusPlugin::store_patch(int part, int bank, int program)
 {
     if (bank < 0 || bank > 3 || program < 0 || program > 127)
         return false;
+    if (syncing_.load() || downloading_.load()) { // see drop_to_ram
+        if (out_)
+            out_->log("Virus TI native: store onto RAM %c refused, bank sync running\n", 'A' + bank);
+        set_lcd("Not saved", "bank sync running", std::string(), std::string()); // the editor ignores the result
+        return false;
+    }
+    {
+        // the slot's patch must be in the cache, else backup_ram has nothing to back up (write policy)
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        auto b = banks_.find(bank);
+        if (b == banks_.end() || program >= (int)b->second.size() || !BankDrop::is_single(b->second[program])) {
+            if (out_)
+                out_->log("Virus TI native: store onto RAM %c %d refused (RAM bank not synced?)\n", 'A' + bank, program + 1);
+            set_lcd("Not saved", std::string("RAM ") + (char)('A' + bank) + " not synced yet", std::string(), std::string());
+            return false;
+        }
+    }
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -4569,6 +4579,13 @@ bool VirusPlugin::undo_drop()
     }
     if (w.empty())
         return false;
+    if (syncing_.load() || downloading_.load()) { // see drop_to_ram
+        if (out_)
+            out_->log("Virus TI native: undo onto RAM %c refused, bank sync running\n", 'A' + w[0].bank);
+        std::lock_guard<std::mutex> lk(banks_mu_); // the undo stays possible, as below
+        drop_.take_undo();
+        return false;
+    }
     if (out_)
         out_->log("Virus TI native: undo of the last operation, %d slot(s) of RAM %c\n", (int)w.size(), 'A' + w[0].bank);
     if (send_ram_writes(w))
@@ -4698,6 +4715,12 @@ bool VirusPlugin::create_library(const std::string &chosen)
 {
     const std::string path = library_file_name(chosen);
     std::string err;
+    std::error_code ec;
+    // ".mid" added here: the dialog asked about overwriting "Pads", not "Pads.mid" (zenity), so an existing one stays
+    if (path != chosen && std::filesystem::exists(vti::u8path(path), ec)) {
+        library_saved(false, vti::u8str(vti::u8path(path).stem()), "file exists", "");
+        return false;
+    }
     if (!write_empty_library(path, err)) {
         library_saved(false, vti::u8str(vti::u8path(path).stem()), err, "");
         return false;

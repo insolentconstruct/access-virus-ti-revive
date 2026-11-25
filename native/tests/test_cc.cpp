@@ -101,6 +101,27 @@ TEST(cc_write_syx)
     fs::remove_all(d);
 }
 
+TEST(cc_write_syx_failure_keeps_the_file) // review 2026-11-25 E9: a full disk fails only at the flush (close)
+{
+#ifndef _WIN32
+    std::error_code ec;
+    if (!fs::exists("/dev/full", ec))
+        SKIP("no /dev/full");
+    const fs::path d = scratch() / "full";
+    fs::remove_all(d);
+    fs::create_directories(d);
+    const std::string path = (d / "bank.syx").string();
+    std::string err;
+    CHECK(write_syx({Dump{0xF0, 0x01, 0xF7}}, path, err));
+    fs::create_symlink("/dev/full", path + ".tmp");
+    CHECK(!write_syx({Dump{0xF0, 0x02, 0xF7}}, path, err) && !err.empty());
+    // not a symlink first: reading /dev/full never ends
+    CHECK(!fs::is_symlink(path) && fs::file_size(path) == 3);
+    CHECK(!fs::exists(fs::symlink_status(path + ".tmp")));
+    fs::remove_all(d);
+#endif
+}
+
 TEST(cc_cache_dir_like_the_plugin)
 {
     std::string c = cache_dir();

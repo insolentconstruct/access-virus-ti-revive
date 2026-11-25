@@ -218,7 +218,7 @@ public:
     // the timeline's anchors and jumps for the VTI_NATIVE_STATS log: process() notes them, the worker prints them (no
     // stdio on the audio thread). `value`: the newest ring frame (anchor) or the jump
     struct TimelineNote {
-        const char *what; // "anchor", "re-anchor", "jump", "fade", "kept" or "preshift" (string literals)
+        const char *what; // "anchor", "re-anchor", "resync", "jump", "fade", "kept" or "preshift" (string literals)
         int64_t err, value;
         int block;
     };
@@ -501,6 +501,7 @@ public:
     void editor_opened();  // the editor's open(): knob moves from the Virus become host edits
     void editor_closed();  // its close(): open edits end
     void tick_gestures();  // the gesture timer (UI thread): beginEdit / performEdit / endEdit
+    void tick_timer() { tick_gestures(); check_latency(); } // the gesture timer's tick, or the editor's without one
     // the editor ticks only while the plug-in's own gesture timer does not run (a Linux host without a run loop)
     bool gesture_timer_running() const { return gesture_timer_ran_.load(std::memory_order_relaxed); }
     bool undo_drop(); // "Undo last operation": writes back what the last drop overwrote
