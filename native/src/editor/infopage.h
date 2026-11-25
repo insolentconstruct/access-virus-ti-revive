@@ -67,6 +67,8 @@ inline const std::vector<ChangeNote> &changelog()
           "Logic). Logic reads ahead by a different amount at each Play: TI Revive keeps room for that and closes "
           "the rest with one short crossfade instead of crackling jumps on the first notes. The note exactly at Play "
           "still comes late: leave two bars of silence before the first notes.",
+          "When the Virus stops answering (#48, #51): late answers are kept, a MIDI channel that went silent after a "
+          "USB error is restarted, and if the Virus still does not answer the display says so (switch it off and on).",
           "Library saves (#41): a change is kept only when its file was written, every save goes into the log, and "
           "a failed one shows \"Library not saved:\" on the plug-in display (before, it failed silently)."}},
         {"0.8.43",
