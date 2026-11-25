@@ -5,7 +5,7 @@ NEXT. At most 150 lines; the Stop hook (`.claude/hooks/handoff-check.sh`) refuse
 how goes into the dated log [`log/2026-11.md`](log/2026-11.md) (newest first); older logs are in [`log/`](log/).
 Device/protocol knowledge goes into [`evidence.md`](evidence.md). Update this file in the same commit as the work._
 
-Last update: 2026-11-24 (later): #37 contest of 4 research agents (libusb / Logic / timeline / original): all agree the cause is Logic (tracks that are not live are processed ahead, block switches 256<->2048 while playing in the rc7 log), not libusb or Catalina (USB 9:1 packets, 0 errors). Asked the reporter to test Record Enable + Process Buffer Range Small (issuecomment-7125502214). Design A 'keep the rest inside the lead room' + B (every forward move and 1-frame step faded) approved by the user: failing tests first (agent writing them into test_timelinefollow.cpp, model in work/issue37-keep), user checks the tests before code. Setup tip logic-live added (setuptips.h + test). Earlier today: rc7 reply 7123137920; PR #59 (insolentconstruct, E585-E588, supersedes the closed #55-#58) merged into round-0.8.44 (rebase merge, 679a06e; the repo allows only rebase merges), thanked (issuecomment-7136860882); our keep-rest entry renumbered E589 and rebased onto it (d6ff162); Thank-you section on the site with the next build from main.
+Last update: 2026-11-25: rc9 (v0.8.44-rc9 at d255cc1, CI 45626198935 green) = rc8 + E591/E592 lost-answer fixes; release text + What's New updated; posted #51/#48/#37; installed Linux + win11, Mac package pushed (user installs). #48: Virus on a USB3 hub that must stay, answered why reopening helps. #37 design A+B is IMPLEMENTED since rc8 (d6ff162, option 'Clean first notes after Play'), nothing waits on a test review.
 
 ## Where things stand
 
@@ -86,17 +86,22 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
 
 ## NEXT
 
-0. **#51 rc7 result (2026-11-24):** clicks fixed (no pull-backs, steps every 2.5-3 min); NEW: Studio Pro opened a song with two instances, the unprocessed one held Virus 1, the played one waited = silence until File > Revert (E590). FIX in code (slotpick.h slot_yield: an owner not processed for 2 s yields to a played instance of the same process); TI2 OK 2026-11-24 (nativehost --duplicate 99 --idle-first: handed over in ~3 s, sound; both played: first keeps it); hil.sh ALL PASS (work/hil/20261124-rc8-e590); rc8 tagged v0.8.44-rc8 at 9fa0706 (first CI run failed on build.py's f-string before Python 3.12, fixed; unreleased tag moved), CI 45451819686 green, pre-release up (8 assets); posted #51 (issuecomment-7139915890: our first-claim bug explained, rc8, log via the website). Waits: edy013 (rc8 in Studio Pro + log); rc8 not yet installed on win11 VM / Mac; post #51 (transparent: our bug, first claim won). Reporter's log lost (e-mail reply): ask to attach via the website (RAM D 34 sync failure).
-1. **Wait on rc7 (v0.8.44-rc7):** #51, #48 (when distorted + rc7), PR #59 DONE (merged 2026-11-24, E585-E588). #43: 7 quiet days reached 2026-11-24 but insolentconstruct commented (not the reporter): close decision with the user. rc7 not yet installed on the win11 VM and the Mac (routine after a release). #41 DONE (closed 2026-11-23).
-   #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log ('pulled back' gone? E578/E579).
-2. **NEXT CODE: #37 design A + B (user-approved 2026-11-24)**: A = after a pre-shifted Play keep the rest while err stays inside the stamp-lead room (timeline behind by R plays stamped notes exactly; sim S051/S052: leads 1100-2000 sample-exact on the model), predictor = max of last 4 bursts + 128 + block/8, beyond the room one crossfade back to mid-room; B = forward moves always faded, 1-frame steps through Crossfade. Model on the rc7 Plays: block 512 from the third Play 0 hard / 0 steps / 8 of 9 clean (rc7: 6 hard, 325 steps, 0 clean); 2048: 4 of 7 clean. Cost: live keys up to ~40 ms later for that pass. IMPLEMENTED (d6ff162, 2026-11-24): E589; tests first (9 failing on the stub incl. guards for E337/#51/drift/no marker, step spacing 128, E581 xrun test now crossfaded), then timelinefollow.h rest reservoir + moved(), crossfade.h gain table, virusplugin.cpp (set_room every block, direct read fades 1-frame steps, 'kept' log line, live stamp S + rest). vtitests 928/928, all targets build; gui_duplicate_editors fails (also with the installed 23-Nov plug-in, not investigated). Not run: hardware, Logic, mutation, coverage, risk.py, hil.sh. Switch (user 2026-11-24): Control Center option keep-rest, ON by default, keep-rest.off = rc7 behaviour (diag.cpp table, read in initialize(), set_room(0)); README + site options sentence; CLI toggle checked in a throwaway home; GUI Options page not looked at. Other agent ideas kept: steps via read_resampled at 44.1 kHz (direct path skips a frame per step, virusplugin.cpp:2303), correction only in silence (last_sound), AU mSampleTime/mHostTime probe (auwrapper.mm:1528), broker SCHED_FIFO 10 below Darwin's range (unverified). Waits: #37 reporter (Record Enable + Small, 5 Plays on the notes, log).
-   Still open beside A/B: a burst without a Play window (setActive alone, Play again without stop, buffer switch, Logic live/not-live switch) waits 0.5 s (22-395 pulled back; timeline agent's design C: ungate the pre-shift, needs a per-block trace first); our own 6022 us process() at block 64 during the RAM bank sync (lock with the sync?).
+0. **Wait on rc9 (2026-11-25):** #51 edy013 (RAM D fills? handover line if the double instance returns), #48 encoderaudio
+   (rc9 with the hub; open for us: does a session reopen also restart the broker's MIDI IN read, or only the plug-in's
+   connection), #37 packman83 (rc9 in Logic: Record Enable, Small, I/O 256, 5 Plays on the notes, log). Mac: user runs
+   the installer in ~/Downloads/TI-Revive-0.8.44-rc9. Not run anywhere: a Virus that really stops answering, the broker
+   reset (D) on macOS/Windows, rc9 loaded in a DAW.
+1. **Quiet issues:** #47 + #45 reach 7 days on 2026-11-26 (close message, with the user), #53 on 2026-11-30, #42 asked
+   nothing since 11-20 (reporter promised a weekend test). #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log.
+2. **#37 after A+B (code in since rc8, E589):** still open: a burst without a Play window (setActive alone, Play again
+   without stop, buffer switch, Logic live/not-live switch) waits 0.5 s (design C: ungate the pre-shift, needs a
+   per-block trace first); our own 6 ms process() stall at block 64 during the bank sync. Not heard in Logic yet.
 3. Release text (build.yml + infopage.h): written for marker, pre-shift, first Play, #51, library saves, xrun crossfade,
-   Logic nudge; add E581 and anything later before the final tag. Local build shows a stale hash in its version line
+   Logic nudge, E581, keep-rest, #51 handover, E591/E592 (rc9); add anything later before the final tag. Local build shows a stale hash in its version line
    (cmake configure-time; cosmetic).
 4. Website: rebuild (FAQ 'Every note sounds twice' is in build.py + README since 694a51e) after tirevive-site-check;
    fix the Mac install gaps (Open Anyway for pkg AND .command, restart after parking drivers, Access .pkg); check on
-   our Mac with a Safari download first. Installs: rc6 on the win11 VM and the Mac not done.
+   our Mac with a Safari download first.
    Wish (#39, timemachine70 2026-11-20, answered issuecomment-7039532288): resize the plug-in window by dragging
    (today only right-click > Size 100-200 %, viruseditor.h canResize false); a later round.
 7. Open from round 0.8.42: the 53 ms stall on the sim's Virus 2 (sim wants a rerun with VTISIM_WARMUP=1); two real
