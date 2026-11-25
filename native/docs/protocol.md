@@ -178,6 +178,6 @@ On close the original resets globals (73 00 3B/3A/3C/7A).
   Core Audio nominal rate itself and follows changes by other programs.
 - The shared ring (`vtiaudioshm.h`) carries `rate` and `rate_gen` (+1 per switch, written before the first frame at
   the new rate); readers re-anchor and send a new sync ping on a new generation. Stamps are in Virus frames at the
-  current rate; the frame constants (lead, ring margins) are not scaled, time constants are (`frames_for_ms`).
+  current rate; the frame constants (lead, ring margins) are not scaled, time constants are (each where it is used, e.g. `keepalive.h` set_rate).
 - Packet sizes are judged against the wanted rate (`pktstat.h`): 43-46 frames at 44.1 kHz, 47-49 at 48 kHz; a long
   run of the other rate's sizes is the lost rate (E241: SET_CUR again, plus the global 73 00 10 with the wanted value).

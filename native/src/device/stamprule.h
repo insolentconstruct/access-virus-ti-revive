@@ -107,7 +107,7 @@ public:
     bool note_on(int channel, int key, bool flagged, int64_t pos = 0, int64_t window = 0)
     {
         const int c = channel & 15, k = key & 127;
-        if (flagged && window > 0 && off_set_[c][k] && pos - off_pos_[c][k] < window)
+        if (flagged && window > 0 && off_set_[c][k] && pos >= off_pos_[c][k] && pos - off_pos_[c][k] < window)
             flagged = false; // a clip note-off of this key is still on its way: play after it
         live_[c][k] = flagged;
         return flagged;
@@ -179,7 +179,8 @@ struct TimingMode {
 // Plugin Latency 1 and 2 keep at least three host blocks of lead: at block 512 the safety net moved every 4th chord
 // 5-7 ms late in about half the sessions at leads 1088 and 1216 (E476, E477; the net floors a note at newest +
 // 1024), exact at 1536 (E479). The default keeps the original's 3072 at every block. Users cannot pick Plugin
-// Latency in 0.8.39 (the original's layout has no control for it, E452, E468): groundwork for a lower-lead option.
+// Latency (the original's layout has no control for it, E452, E468; the plug-in passes 3 since 0.8.44, so levels 0-2
+// are reached by the tests only): groundwork for a lower-lead option.
 constexpr int MIN_LEAD_BLOCKS = 3;
 inline TimingMode timing_mode(bool live_mode, int plugin_latency, int base_a, int block = 0)
 {

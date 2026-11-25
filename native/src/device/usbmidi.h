@@ -41,7 +41,7 @@ public:
     explicit UsbMidiParser(Handler h) : h_(std::move(h)) {}
     static constexpr size_t MAX_SYSEX = 65536; // the Virus' largest message is a 524-byte single dump
 
-    // bytes of SysEx waiting for their end (all cables)
+    // bytes of SysEx waiting for their end (all cables); test hook: the tests check the buffer's bound
     size_t pending_bytes() const
     {
         size_t n = 0;

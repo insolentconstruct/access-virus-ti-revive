@@ -1,11 +1,9 @@
 // broker.cpp - see broker.h (POSIX: Unix socket; Windows: the broker's named pipe, overlapped I/O).
 #include "broker.h"
 extern "C" {
+#include "devslot.h"
 #include "owneruid.h"
 #include "vtiproto.h"
-extern "C" {
-#include "devslot.h"
-}
 }
 #include <algorithm>
 #include <cerrno>
@@ -24,7 +22,6 @@ extern "C" {
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#include <thread>
 #define environ (*_NSGetEnviron())
 #endif
 
@@ -105,6 +102,30 @@ static bool start_broker(int slot)
     return true;
 }
 
+// the pipe's server runs as this user or as SYSTEM, like the POSIX check (vti_peer_trusted): another user's program
+// could have made the pipe name first. A check that cannot run (no server process id, process or token not readable)
+// lets the connection through: it must never lock the user out of their Virus.
+static bool server_trusted(HANDLE pipe)
+{
+    ULONG pid = 0;
+    HANDLE proc = GetNamedPipeServerProcessId(pipe, &pid) ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)
+                                                         : nullptr;
+    HANDLE tok = nullptr, me = nullptr;
+    struct {
+        TOKEN_USER u;
+        BYTE sid[SECURITY_MAX_SID_SIZE];
+    } peer, mine;
+    DWORD n;
+    bool trusted = true;
+    if (proc && OpenProcessToken(proc, TOKEN_QUERY, &tok) && GetTokenInformation(tok, TokenUser, &peer, sizeof peer, &n) &&
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &me) && GetTokenInformation(me, TokenUser, &mine, sizeof mine, &n))
+        trusted = EqualSid(peer.u.User.Sid, mine.u.User.Sid) || IsWellKnownSid(peer.u.User.Sid, WinLocalSystemSid);
+    for (HANDLE x : {me, tok, proc})
+        if (x)
+            CloseHandle(x);
+    return trusted;
+}
+
 static intptr_t os_connect(const std::string &endpoint, int slot, std::string &error)
 {
     (void)endpoint; // the broker's named pipe only
@@ -134,6 +155,11 @@ static intptr_t os_connect(const std::string &endpoint, int slot, std::string &e
     }
     if (h == INVALID_HANDLE_VALUE) {
         error = "cannot connect to the TI Revive broker (" + pipe + ", error " + std::to_string(GetLastError()) + ")";
+        return -1;
+    }
+    if (!server_trusted(h)) {
+        CloseHandle(h);
+        error = "the TI Revive broker pipe " + pipe + " belongs to another user";
         return -1;
     }
     return (intptr_t)h;
@@ -268,6 +294,13 @@ static void os_release(intptr_t fd)
 
 bool Broker::open(std::string &error)
 {
+    if (connected())
+        return true;
+    close(); // the reader of a lost connection is joined, its handle released
+    {
+        std::lock_guard<std::mutex> g(ctl_); // a new connection: no reply comes for a request sent on the old one
+        audio_got_ = audio_sent_;
+    }
     {
         std::lock_guard<std::mutex> g(wr_); // senders on other threads see the handle whole (review 2026-10-19 M7)
         fd_ = os_connect(endpoint_, slot_, error);
@@ -394,34 +427,44 @@ int Broker::flash_info(std::vector<uint8_t> &out, int timeout_ms)
 
 int Broker::audio(bool on, int timeout_ms, uint32_t rate)
 {
+    uint32_t n;
     {
         std::lock_guard<std::mutex> g(ctl_);
-        audio_replied_ = false;
+        audio_waiting_.insert(n = ++audio_sent_);
     }
     uint32_t v = on ? 1 : 0;
     std::string name; // Windows: the broker signals a named event per block (we poll the ring; it must exist)
 #ifdef _WIN32
-    static HANDLE ev;
-    char nm[64];
-    snprintf(nm, sizeof nm, "Local\\vtinative_audio_%lu", (unsigned long)GetCurrentProcessId());
-    if (!ev)
-        ev = CreateEventA(nullptr, FALSE, FALSE, nm);
-    name = nm;
+    name = audio_event_name();
+    // made once per process (thread-safe static) and kept: the broker opens it by name while any instance streams
+    [[maybe_unused]] static HANDLE ev = CreateEventA(nullptr, FALSE, FALSE, name.c_str());
 #endif
     std::string tail(name.c_str(), name.size() + 1); // event name with its NUL, then u32 rate (protocol 5)
     for (int i = 0; i < 4; i++)
         tail.push_back((char)(rate >> (8 * i)));
-    if (!send(VTIMSG_AUDIO, &v, 4, tail.data(), tail.size())) // u32 on + event name + rate
-        return -1;
+    const bool sent = send(VTIMSG_AUDIO, &v, 4, tail.data(), tail.size()); // u32 on + event name + rate
     std::unique_lock<std::mutex> l(ctl_);
-    if (!ctl_cv_.wait_for(l, std::chrono::milliseconds(timeout_ms), [&] { return audio_replied_; }))
-        return -1;
-    return audio_reply_;
+    const bool got = sent && ctl_cv_.wait_for(l, std::chrono::milliseconds(timeout_ms),
+                                              [&] { return audio_replies_.count(n) > 0; });
+    audio_waiting_.erase(n);
+    const int r = got ? audio_replies_[n] : -1;
+    audio_replies_.erase(n);
+    return r;
 }
+
+#ifdef _WIN32
+std::string Broker::audio_event_name()
+{
+    return "Local\\vtinative_audio_" + std::to_string(GetCurrentProcessId());
+}
+#endif
 
 bool Broker::observe(ObserveHandler h, std::string &error, bool replay)
 {
-    observe_ = std::move(h); // set before the request: messages follow the reply at once
+    {
+        std::lock_guard<std::mutex> g(cb_mu_); // set before the request: messages follow the reply at once
+        observe_ = std::move(h);
+    }
     const uint8_t flags = 1;
     if (!send(VTIMSG_OBSERVE, replay ? &flags : nullptr, replay ? 1 : 0)) {
         error = "broker connection lost";
@@ -482,10 +525,12 @@ void Broker::read_loop()
             break;
         case VTIMSG_OBS_TRAFFIC:
         case VTIMSG_OBS_LOG:
-        case VTIMSG_OBS_STATUS:
+        case VTIMSG_OBS_STATUS: {
+            std::lock_guard<std::mutex> g(cb_mu_);
             if (observe_)
                 observe_(h.type, buf.data(), h.len);
             break;
+        }
         case VTIMSG_INFO: { // "key=value" fields separated by tabs: keep the version
             std::string t((const char *)buf.data(), h.len), key = "version=";
             for (size_t at = 0; at <= t.size();) {
@@ -515,8 +560,10 @@ void Broker::read_loop()
         case VTIMSG_AUDIO_REPLY:
             if (h.len >= 4) {
                 std::lock_guard<std::mutex> g(ctl_);
-                memcpy(&audio_reply_, buf.data(), 4);
-                audio_replied_ = true;
+                int32_t r;
+                memcpy(&r, buf.data(), 4);
+                if (audio_waiting_.count(++audio_got_)) // a late reply to a request that timed out is dropped
+                    audio_replies_[audio_got_] = r;
                 ctl_cv_.notify_all();
             }
             break;

@@ -84,7 +84,7 @@ public:
         return fired || marker;
     }
 
-    int last_state() const { return state_; }    // the last window: 1 slipped, 0 normal, -1 undecided
+    int last_state() const { return state_; }    // test hook, the last window: 1 slipped, 0 normal, -1 undecided
     double last_ratio() const { return ratio_; } // of the last decided window
     bool marker_seen() const { return marker_seen_; } // the slipped marker fired in this stream
 

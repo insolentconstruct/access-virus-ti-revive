@@ -147,6 +147,8 @@ TEST(audioin_read_at_maps_usb1_usb2)
     CHECK(raw[2 * VTI_AUDIO_IN_CH] == 0);
     a.read_raw_at(raw, 1, -5);
     CHECK(raw[0] == 0);
+    a.read_raw_at(raw, 1, 40000 - VTI_AUDIO_RING + 1023); // the same safe window as read_at: the synth writes there next
+    CHECK(raw[0] == 0);
 }
 
 TEST(audioin_usb3_and_peaks)
@@ -228,6 +230,27 @@ TEST(audioin_read_large_blocks)
     a.read(l1, r1, l2, r2, n, latency);
     CHECK_EQ(a.drops(), 1);
     CHECK_EQ(a.position(), r.shm->in_frames - latency + n);
+}
+
+// blocks above 5376 frames: the fallback target 2 * n + 256 left no room in the ring (re-anchored every block), above
+// 8064 it reached back past the ring's oldest frame (overwritten audio); the target is kept inside the ring
+TEST(audioin_read_blocks_too_large_for_the_target)
+{
+    Ring r;
+    AudioIn a;
+    CHECK(r.shm && a.open(r.name.c_str()));
+    static float l1[8192], r1[8192], l2[8192], r2[8192];
+    r.produce(40000);
+    for (int i = 0; i < 20; i++) {
+        a.read(l1, r1, l2, r2, 6144, 2 * 6144 + 256);
+        r.produce(r.shm->in_frames + 6144);
+    }
+    CHECK_EQ(a.drops(), 0);
+    AudioIn b;
+    CHECK(b.open(r.name.c_str()));
+    const int64_t newest = r.shm->in_frames;
+    b.read(l1, r1, l2, r2, 8192, 2 * 8192 + 256);
+    CHECK(l1[0] == Ring::sample(newest - 8192, 2) * K && l1[8191] == Ring::sample(newest - 1, 2) * K);
 }
 
 TEST(audioin_output_ring)

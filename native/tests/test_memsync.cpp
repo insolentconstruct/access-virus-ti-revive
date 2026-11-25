@@ -623,6 +623,7 @@ TEST(memsync_bank_file_round_trip)
     CHECK(!load_bank_file(write("header.bin", {'X', 'I', 'D', 'I', 0, 1, 8, 0}), none));
     CHECK(!load_bank_file(write("huge.bin", {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0x00, 0x01, 0x00, 0x00}), none));
     CHECK(!load_bank_file(write("short.bin", {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0, 0, 2, 0x0C, 0xF0}), none));
+    CHECK(!load_bank_file(write("cut.bin", {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0, 0, 0, 1, 0xF7}), none)); // 1 of 128
     fs::remove_all(dir);
 }
 
@@ -978,6 +979,7 @@ TEST(memsync_bank_file_limits)
     Bytes big(12 + 4096, 0x11);
     const uint8_t head[12] = {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0x00, 0x00, 0x10, 0x00}; // one dump of 4096 bytes
     std::copy(head, head + 12, big.begin());
+    big.insert(big.end(), 127 * 4, 0); // programs 2..128 empty
     Bank b;
     CHECK(load_bank_file(t.write("4096.bin", big), b));
     CHECK_EQ(b[0].size(), 4096u);

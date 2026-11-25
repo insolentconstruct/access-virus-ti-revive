@@ -41,11 +41,11 @@ namespace vti {
 
 #define shm_ ((vti_audio_shm *)map_)
 
-// the broker publishes in_frames after the data (release); read it with acquire semantics
-static inline int64_t load_acquire(volatile int64_t *p)
+// the broker publishes in_frames after the data and rate_gen after the rate (release); read them with acquire semantics
+template <class T> static inline T load_acquire(volatile T *p)
 {
 #ifdef _MSC_VER
-    int64_t v = *p; // aligned 64-bit loads are atomic on x64; the barrier keeps later reads after it
+    T v = *p; // aligned 32- and 64-bit loads are atomic on x64; the barrier keeps later reads after it
     _ReadWriteBarrier();
     return v;
 #else
@@ -468,7 +468,7 @@ bool AudioIn::rate_changed(int &rate)
 {
     if (!shm_)
         return false;
-    const int64_t gen = shm_->rate_gen;
+    const int64_t gen = load_acquire(&shm_->rate_gen); // then rate(): the rate written before this generation
     const bool changed = rate_gen_seen_ >= 0 && gen != rate_gen_seen_;
     rate_gen_seen_ = gen;
     if (changed)
@@ -526,6 +526,9 @@ void AudioIn::read(float *l1, float *r1, float *l2, float *r2, int n, int latenc
         silence(0);
         return;
     }
+    // a target the ring holds with 1024 frames to spare (blocks above 5376 frames: 2 * n + 256 did not fit), and at
+    // least one block
+    latency = std::max(n, std::min(latency, VTI_AUDIO_RING - n - 1024));
     int64_t newest = load_acquire(&shm_->in_frames);
     int64_t fill = newest - pos_;
     // (re)anchor when starting, after an underrun or when far behind (DAW stalled): far = a quarter ring beyond the
@@ -562,7 +565,7 @@ void AudioIn::read_raw_at(int16_t *dst, int n, int64_t pos) const
     int64_t newest = newest_frame();
     for (int i = 0; i < n; i++) {
         int64_t f = pos + i;
-        if (!map_ || newest < 0 || f >= newest || f < newest - VTI_AUDIO_RING || f < 0)
+        if (!map_ || newest < 0 || f >= newest || f < newest - VTI_AUDIO_RING + 1024 || f < 0)
             memset(dst + i * VTI_AUDIO_IN_CH, 0, VTI_AUDIO_IN_CH * sizeof(int16_t));
         else
             memcpy(dst + i * VTI_AUDIO_IN_CH, shm_->in + (f & (VTI_AUDIO_RING - 1)) * VTI_AUDIO_IN_CH,

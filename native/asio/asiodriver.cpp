@@ -13,6 +13,7 @@
 // The IASIO interface is declared here from the ASIO ABI (a COM-style vtable; the CLSID doubles as the interface id,
 // as every ASIO host expects). Registration: regsvr32 (DllRegisterServer) writes the COM class and
 // HKLM\SOFTWARE\ASIO\TI Revive Audio (until 0.8.42 "TI Revive Virus Audio").
+#include "device/asioclock.h"
 #include "device/audioin.h"
 #include "device/broker.h"
 #ifndef NOMINMAX
@@ -121,6 +122,7 @@ const int OUT_PREFILL = 512; // the broker starts playing with this much queued 
 // the largest buffer the driver offers and takes: the read loop re-syncs when it falls 8192 frames behind, so 8192
 // blocks re-synced (muted) almost every time (audit #25)
 const long MAX_BUF = 2048;
+thread_local const void *t_clock; // the Driver whose clock thread this is (a host callback calling stop())
 const int64_t START_MUTE = 4410; // frames of silence after a (re)start: the first USB block can carry a full-scale spike
 
 void split64(uint64_t v, unsigned long &hi, unsigned long &lo)
@@ -227,16 +229,14 @@ public:
         }
         // no wish (0): the rate that is set stays - the host's setSampleRate decides right after (review step 4)
         // the flag as soon as the broker streams: a failed open() below must still get its audio off (audit #33)
-        audio_on_ = broker_.audio(true, 3000, 0) == 1;
+        audio_on_ = broker_.audio(true, vti::Broker::kAudioWaitMs, 0) == 1;
         if (!audio_on_ || !audio_.open()) {
             error_ = "the Virus' USB audio is not available (TI Revive WinUSB driver installed?)";
             return 0;
         }
         int seen;
         audio_.rate_changed(seen); // the rate the ring was opened with is no change
-        char nm[64]; // Broker::audio registered this per-process event; the broker signals it for every input block
-        snprintf(nm, sizeof nm, "Local\\vtinative_audio_%lu", (unsigned long)GetCurrentProcessId());
-        ev_ = OpenEventA(SYNCHRONIZE, FALSE, nm);
+        ev_ = OpenEventA(SYNCHRONIZE, FALSE, vti::Broker::audio_event_name().c_str());
         inited_ = true;
         dlog("%p init: broker open, audio on", (void *)this);
         return 1;
@@ -256,7 +256,8 @@ public:
         pos_ = -1;
         running_ = true;
         dlog("%p start: buffer %ld", (void *)this, bufsize_);
-        thread_ = std::thread([this] { clock(); });
+        const unsigned run = ++run_;
+        thread_ = std::thread([this, run] { clock(run); });
         return ASE_OK;
     }
     ASIOError stop() override
@@ -264,8 +265,9 @@ public:
         if (running_)
             dlog("%p stop", (void *)this);
         running_ = false;
-        if (thread_.joinable())
-            thread_.join();
+        run_++;
+        if (thread_.joinable()) // a host that stops us from a callback is on the clock thread: it ends after the callback
+            t_clock == this ? thread_.detach() : thread_.join();
         return ASE_OK;
     }
     ASIOError getChannels(long *in, long *out) override
@@ -307,7 +309,7 @@ public:
             return ASE_NotPresent;
         if (audio_.rate() == (int)r)
             return ASE_OK;
-        int res = broker_.audio(true, 3000, (uint32_t)r);
+        int res = broker_.audio(true, vti::Broker::kAudioWaitMs, (uint32_t)r);
         if (!running_) { // while running the clock thread owns rate_changed() and resyncs itself (reset request)
             int seen;
             audio_.rate_changed(seen); // our own switch: no reset request for it
@@ -383,7 +385,7 @@ public:
     ASIOError controlPanel() override
     {
         MessageBoxA(nullptr,
-                    "TI Revive Audio (ASIO)\n\n44.1 kHz, the buffer size is set in your DAW (256 recommended).\n"
+                    "TI Revive Audio (ASIO)\n\n44.1 or 48 kHz, the buffer size is set in your DAW (256 recommended).\n"
                     "Inputs: Virus analog in, USB 1, USB 2. Outputs: the Virus outputs.\n\n"
                     "The Virus is the clock master; the audio runs through the TI Revive broker.",
                     DRIVER_NAME, MB_OK | MB_ICONINFORMATION);
@@ -404,6 +406,7 @@ private:
     long bufsize_ = 0;
     ASIOCallbacks *callbacks_ = nullptr;
     std::atomic<bool> running_{false};
+    std::atomic<unsigned> run_{0}; // the clock thread that may go on: a stop() and start() inside a callback starts another
     std::thread thread_;
     std::atomic<uint64_t> samples_{0}, stamp_ns_{0};
     long index_ = 0;
@@ -411,8 +414,12 @@ private:
 
     // the clock: the broker signals every block it received from the Virus (~441 frames / 10 ms); each complete
     // buffer of new frames becomes one buffer switch. Outputs are queued towards the synth right after it.
-    void clock()
+    void clock(unsigned run)
     {
+        t_clock = this;
+        // the host may stop, dispose and restart us inside any callback: after each one, nothing of this run is touched
+        auto live = [&] { return running_ && run_ == run; };
+        ASIOCallbacks *const cb = callbacks_; // disposeBuffers() clears callbacks_
         DWORD task = 0;
         HANDLE mm = AvSetMmThreadCharacteristicsA("Pro Audio", &task);
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -424,9 +431,9 @@ private:
         uint64_t st_t0 = now_ns(), st_last = 0, gap_max = 0, cb_max = 0;
         int64_t q_min = INT64_MAX, q_max = INT64_MIN;
         long st_n = 0, st_resync = 0;
-        bool can_reset = callbacks_->asioMessage &&
-                         callbacks_->asioMessage(kAsioSelectorSupported, kAsioResetRequest, nullptr, nullptr) == 1;
-        while (running_) {
+        uint64_t done = 0; // frames handed to the host before the current buffer
+        bool can_reset = cb->asioMessage && cb->asioMessage(kAsioSelectorSupported, kAsioResetRequest, nullptr, nullptr) == 1;
+        while (live()) {
             if (ev_)
                 WaitForSingleObject(ev_, 20);
             else
@@ -434,27 +441,31 @@ private:
             int now_rate;
             if (audio_.rate_changed(now_rate)) { // the owning plug-in switched the stream: the host must follow
                 dlog("%p the stream switched to %d Hz", (void *)this, now_rate);
-                if (callbacks_->sampleRateDidChange)
-                    callbacks_->sampleRateDidChange((double)now_rate);
-                if (can_reset && !reset_sent) {
-                    callbacks_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
+                if (cb->sampleRateDidChange)
+                    cb->sampleRateDidChange((double)now_rate);
+                if (live() && can_reset && !reset_sent) {
+                    cb->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
                     reset_sent = true;
                 }
+                if (!live())
+                    break;
             }
             int64_t newest = audio_.newest_frame();
             if (newest < 0)
                 continue;
             if (pos_ >= 0 && newest < pos_ && can_reset && !reset_sent) {
                 // the ring started over (a new stream, the Virus came back): the host restarts the driver
-                callbacks_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
+                cb->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
                 reset_sent = true;
+                if (!live())
+                    break;
             }
-            if (pos_ < 0 || newest - pos_ > 8192 || newest < pos_) { // start, a stall, a new stream: resync
+            if (vti::asio_resync(pos_, newest)) {
                 pos_ = newest - bs;
                 mute_until = pos_ + START_MUTE;
                 st_resync++;
             }
-            while (running_ && newest - pos_ >= bs) {
+            while (live() && newest - pos_ >= bs) {
                 audio_.read_raw_at(raw.data(), bs, pos_);
                 if (pos_ < mute_until)
                     memset(raw.data(), 0, raw.size() * sizeof(int16_t));
@@ -462,29 +473,30 @@ private:
                     if (b.isInput) {
                         int32_t *d = (int32_t *)b.buffers[index_];
                         for (long i = 0; i < bs; i++)
-                            d[i] = (int32_t)raw[(size_t)i * vti::AudioIn::IN_CHANNELS + b.channelNum] * 65536;
+                            d[i] = vti::asio_in32(raw[(size_t)i * vti::AudioIn::IN_CHANNELS + b.channelNum]);
                     }
                 uint64_t t = now_ns();
+                samples_ = done; // getSamplePosition: this buffer's first frame and its time, as one pair
                 stamp_ns_ = t;
                 if (st_last && t - st_last > gap_max)
                     gap_max = t - st_last;
                 st_last = t;
-                callbacks_->bufferSwitch(index_, 1);
+                cb->bufferSwitch(index_, 1);
+                if (!live())
+                    break;
                 cb_max = std::max<uint64_t>(cb_max, now_ns() - t);
                 memset(out.data(), 0, out.size() * sizeof(int16_t));
                 for (auto &b : bufs_)
                     if (!b.isInput) {
                         const int32_t *s = (const int32_t *)b.buffers[index_];
-                        for (long i = 0; i < bs; i++) {
-                            int64_t v = ((int64_t)s[i] + 32768) >> 16; // 32 -> 16 bit, rounded
-                            out[(size_t)i * OUT_CH + b.channelNum] = (int16_t)(v > 32767 ? 32767 : v);
-                        }
+                        for (long i = 0; i < bs; i++)
+                            out[(size_t)i * OUT_CH + b.channelNum] = vti::asio_out16(s[i]);
                     }
                 int64_t q = audio_.out_queued();
                 q_min = std::min(q_min, q), q_max = std::max(q_max, q);
                 audio_.write_out(out.data(), bs);
                 st_n++;
-                samples_ += bs;
+                done += bs;
                 pos_ += bs;
                 index_ ^= 1;
             }

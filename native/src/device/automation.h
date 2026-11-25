@@ -41,7 +41,7 @@ public:
         }
         return sent;
     }
-    int waiting() const { return count_; }
+    int waiting() const { return count_; } // test hook: the tests check the queue's bound
 
 private:
     double rate_, burst_, budget_ = 0;

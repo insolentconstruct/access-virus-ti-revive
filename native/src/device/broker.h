@@ -48,14 +48,13 @@ public:
     // which Virus when several are connected (src/broker/devslot.h, #45): broker N serves the N-th one, on its own
     // pipe/socket ("-N" appended; slot 1 = today's names). Set before open().
     void set_slot(int slot) { slot_ = slot; }
-    int slot() const { return slot_; }
     // Become a read-only observer (after open): the broker refuses our writes and sends a copy of the traffic,
     // its log lines and a status line once a second to `h`. False if the broker does not confirm (older than
     // protocol 4: it would have kept us as the owner of the Virus, so the connection is closed).
     // `replay`: first the newest traffic the broker kept from before this moment (a broker older than 0.8.38 ignores it).
     bool observe(ObserveHandler h, std::string &error, bool replay = false);
 
-    // the reader thread calls them under cb_mu_: when a setter returns, no call of the old handler still runs (a
+    // the reader thread calls them (and observe()'s handler) under cb_mu_: when a setter returns, no call of the old handler still runs (a
     // MemorySync destructor on a live broker freed what a running handler used, audit 2026-11-17 #8). A handler must
     // not set a handler itself.
     void on_rx(RxHandler h)
@@ -79,7 +78,14 @@ public:
     // (vtiaudioshm.h, VTI_AUDIO_SHM_LINUX), 0 = no audio function, -1 = error / not the owner.
     // `rate` = the Virus rate the plug-in wants (44100/48000, protocol 5; older brokers ignore it and stream 44.1 kHz).
     // The broker may keep another one (not the owner, debounce): the real rate is in the shared ring.
-    int audio(bool on, int timeout_ms = 3000, uint32_t rate = 44100);
+    // The default wait is longer than the broker's own worst case (Windows audio_start: 3 s for the first block, then
+    // up to 3 s for its stream thread to end); a reply that comes after the wait is dropped, never taken for the next.
+    static constexpr int kAudioWaitMs = 8000;
+    int audio(bool on, int timeout_ms = kAudioWaitMs, uint32_t rate = 44100);
+#ifdef _WIN32
+    // the per-process event audio() registers; the broker signals it for every input block (the ASIO driver waits on it)
+    static std::string audio_event_name();
+#endif
 
     // The Virus' identification blocks (model, OS version), read by the broker with the original driver's fixed
     // read-only flash sequence (flashinfo.h, E026/E040; owner only, cached per device open). Returns the byte count
@@ -99,8 +105,9 @@ public:
 
 private:
     intptr_t fd_ = -1; // POSIX socket / Windows pipe HANDLE (overlapped)
-    int audio_reply_ = 0;
-    bool audio_replied_ = false;
+    uint32_t audio_sent_ = 0, audio_got_ = 0; // AUDIO requests sent / replies read: answered in order, unnumbered
+    std::set<uint32_t> audio_waiting_;        // request numbers an audio() still waits for
+    std::map<uint32_t, int> audio_replies_;   // request number -> result
     int flash_reply_ = 0;
     bool flash_replied_ = false;
     std::vector<uint8_t> flash_;
@@ -108,7 +115,6 @@ private:
     std::string name_, endpoint_, broker_version_;
     int slot_ = 1;
     mutable std::mutex info_mu_;
-    ObserveHandler observe_;
     std::thread reader_;
     std::mutex wr_;
     mutable std::mutex ctl_;
@@ -118,9 +124,10 @@ private:
     uint32_t seq_ = 0;
     std::atomic<bool> present_{false}, elsewhere_{false}, stop_{false}, reader_done_{true};
     std::atomic<uint32_t> arrivals_{0};
-    std::mutex cb_mu_; // rx_ and state_: set by any thread, called by the reader
+    std::mutex cb_mu_; // rx_, state_ and observe_: set by any thread, called by the reader
     RxHandler rx_;
     StateHandler state_;
+    ObserveHandler observe_;
     bool send(uint16_t type, const void *a, size_t alen, const void *b = nullptr, size_t blen = 0);
     void read_loop();
 };

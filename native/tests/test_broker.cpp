@@ -378,6 +378,41 @@ TEST(broker_audio_carries_the_rate)
     b.close();
 }
 
+// AUDIO replies carry no sequence number: the late reply of a request that timed out must not answer the next one
+TEST(broker_audio_drops_a_late_reply)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    fb.answer_audio = false;
+    CHECK_EQ(b.audio(true, 50), -1);
+    std::atomic<int> r{99};
+    std::thread t([&] { r = b.audio(true, 3000); });
+    CHECK(eventually([&] { return fb.messages(VTIMSG_AUDIO).size() == 2; }));
+    fb.reply(VTIMSG_AUDIO_REPLY, FakeBroker::u32(0)); // the first request's answer, late
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    fb.reply(VTIMSG_AUDIO_REPLY, FakeBroker::u32(1)); // the second request's
+    t.join();
+    CHECK_EQ(r.load(), 1);
+    b.close();
+}
+
+// open() on an open broker: one connection, one reader (a second std::thread over a joinable one = std::terminate)
+TEST(broker_open_twice)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    CHECK(b.open(err));
+    CHECK(b.connected());
+    CHECK_EQ(fb.messages(VTIMSG_HELLO).size(), (size_t)1);
+    b.close();
+}
+
 TEST(broker_old_broker_refuses_observer)
 {
     FakeBroker fb;

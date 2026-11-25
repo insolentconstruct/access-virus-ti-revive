@@ -18,7 +18,7 @@ public:
 
     // the limit is 5 s at the device's rate (E323: the Virus may run at 48 kHz)
     void set_rate(int rate) { max_fill_ = 5 * (int64_t)rate; }
-    int64_t max_fill() const { return max_fill_; }
+    int64_t max_fill() const { return max_fill_; } // test hook
 
     // `sample_time` = the device time of the buffer's first frame (Core Audio's inInputTime), `ring` = the frames the
     // ring holds before this buffer. Returns the frames of silence to append before the buffer so that the ring stays

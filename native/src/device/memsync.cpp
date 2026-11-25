@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <thread>
 #include <cstdio>
 #include <memory>
 #include <filesystem>
@@ -16,6 +15,12 @@ namespace vti {
 
 static const uint8_t EP_PLUGIN_OUT = 0x06, CABLE_PLUGIN = 2;
 static const size_t SINGLE_SIZE = 524, BANKINFO_SIZE = 267;
+
+// the Virus' display message 74 01 7E n (Actions/Rise Message n: 4 "syncing", 7 "Configuring Virus TI")
+static std::vector<uint8_t> rise_message(int dev, uint8_t n)
+{
+    return {0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev, 0x74, 0x01, 0x7E, n, 0xF7};
+}
 
 bool load_bank_file(const std::string &path, Bank &bank)
 {
@@ -26,8 +31,10 @@ bool load_bank_file(const std::string &path, Bank &bank)
     bool ok = fread(hdr, 1, 8, f) == 8 && !memcmp(hdr, "MIDI", 4);
     for (int p = 0; ok && p < 128; p++) {
         uint8_t l[4];
-        if (fread(l, 1, 4, f) != 4)
+        if (fread(l, 1, 4, f) != 4) {
+            ok = false; // cut short: a saved bank has all 128 entries
             break;
+        }
         size_t n = (size_t)l[0] << 24 | l[1] << 16 | l[2] << 8 | l[3];
         if (n > 4096) {
             ok = false;
@@ -281,7 +288,7 @@ int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, b
         return -2;
     // the original keeps "Configuring Virus TI" (Rise Message 7) up while it checks the banks: before every bank info
     // request, fetched or not (E321)
-    send_({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x74, 0x01, 0x7E, 0x07, 0xF7});
+    send_(rise_message(dev_, 7));
     auto info = bank_info(bank);
     if (info.empty())
         return was_cancelled() ? -2 : -1;
@@ -300,7 +307,7 @@ int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, b
             for (int t = 0; t < 3; t++) {
                 if (t > 0 && before_request && !before_request())
                     return -2;
-                send_({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x74, 0x01, 0x7E, 0x04, 0xF7});
+                send_(rise_message(dev_, 4));
                 d = single(bank, p);
                 if (d.empty() || RemoteDevice::single_fingerprint(d) == info[p])
                     break;
@@ -319,7 +326,7 @@ int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, b
 
 int MemorySync::read_bank(int bank, Bank &cache, const std::function<void(int)> &progress, const std::atomic<bool> *stop)
 {
-    const std::vector<uint8_t> rise = {0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x74, 0x01, 0x7E, 0x04, 0xF7};
+    const std::vector<uint8_t> rise = rise_message(dev_, 4);
     for (int p = 0; p < 128; p++) {
         if ((stop && *stop) || (before_request && !before_request()) || was_cancelled())
             return -2;
@@ -337,7 +344,7 @@ int MemorySync::read_bank(int bank, Bank &cache, const std::function<void(int)> 
 int MemorySync::read_missing(int bank, Bank &cache, const std::function<void(int)> &progress,
                              const std::atomic<bool> *stop)
 {
-    const std::vector<uint8_t> rise = {0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x74, 0x01, 0x7E, 0x04, 0xF7};
+    const std::vector<uint8_t> rise = rise_message(dev_, 4);
     int read = 0;
     for (int p = 0; p < 128; p++) {
         if (!cache[p].empty())
