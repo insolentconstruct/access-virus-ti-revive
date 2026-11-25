@@ -118,6 +118,8 @@ Versions 10..12 are only written into edit-buffer dumps (bank byte 7 = 0); store
 Virus' firmware converts them. Without the default page C/D, patches below version 8 are left unchanged. After an
 upgrade both checksums are recomputed: byte 265 = sum of bytes 5..264 & 0x7F, byte 522 = sum of bytes 5..521
 (including byte 265) & 0x7F. Checked by tests/test_upgrade.cpp (3080 generated dumps, all versions).
+A library dump of a version no format is known for is left out (never sent): above 12, or 8 and up in a 267-byte
+(Virus C, pages A/B only) dump - those have no pages C/D, and the upgrade adds them only below version 8.
 
 ## editor rendering rules (verified against a screenshot of the original, Easy page 97.0 % identical pixels)
 - Knob/slider bitmaps are vertical filmstrips: frames = bitmap height / control height, frame = (v-min)/(max-min).

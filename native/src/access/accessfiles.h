@@ -60,11 +60,13 @@ public:
     std::vector<KnobTemplate> knob_templates() const;
 
 private:
-    std::vector<uint8_t> find_dump(uint8_t cmd, size_t size, size_t name_at, const char *name,
-                                   std::vector<uint8_t> *binary = nullptr, size_t *offset = nullptr) const;
-    std::vector<uint8_t> find_page_b() const;
-    mutable std::once_flag page_b_once_; // default_page_b() is called from several threads
-    mutable std::vector<uint8_t> page_b_;
+    std::vector<uint8_t> binary() const; // the plug-in binary (~15 MB, read on each call); empty if missing
+    struct Embedded {
+        std::vector<uint8_t> init_single, init_multi, page_b;
+    };
+    const Embedded &embedded() const; // found in one read of binary() at the first call, then kept
+    mutable std::once_flag embedded_once_; // called from several threads
+    mutable Embedded embedded_;
     std::map<std::string, std::vector<uint8_t>> files_; // key: lower-case name
     std::string source_;
     bool pe32_ = false; // load_pe read a 32-bit (PE32) image

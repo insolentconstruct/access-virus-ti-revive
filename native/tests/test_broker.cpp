@@ -410,6 +410,7 @@ Bytes fake_single(int bank, int program, int seed)
     std::copy(head, head + 9, d.begin());
     for (size_t i = 9; i < 523; i++)
         d[i] = (uint8_t)((i * 5 + seed * 11) & 0x7F);
+    d[9] = 12; // a format version the Virus uses (libraries leave unknown ones out)
     for (int i = 0; i < 10; i++)
         d[249 + i] = (uint8_t)("Fake Patch"[i]);
     d[523] = 0xF7;

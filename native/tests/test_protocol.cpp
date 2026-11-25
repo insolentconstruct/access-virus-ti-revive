@@ -3,6 +3,7 @@
 // valuelist texts, the start-up messages (GlobalInit / ParamInit) and the automation list. Runs in CI.
 #include "check.h"
 #include "model/remotedevice.h"
+#include <algorithm>
 #include <cstring>
 using namespace vti;
 using Bytes = std::vector<uint8_t>;
@@ -172,4 +173,51 @@ TEST(protocol_automation_list)
     CHECK(!load_automation(Bytes{'<', 'x'}, none, err) && !err.empty());
     const char *empty = "<AutomationList/>";
     CHECK(!load_automation(Bytes(empty, empty + strlen(empty)), none, err));
+}
+
+// review 2026-11-25 M6: an init text of a mapped list gave the menu position instead of the value, and a ParamInit
+// without a part went out for part -1 (0xFF inside a SysEx, channel 16 on a controller)
+TEST(protocol_mapped_init_and_parts)
+{
+    const char *xml = R"(<Remotedevice device="Proto" version="1">
+ <ParameterSets><ParameterSet name="Arp">
+  <Parameter name="Clock" minValue="0" maxValue="20" valuelist="Clocks" part="all" defaultmessage="cc" controllerindex="20"/>
+ </ParameterSet></ParameterSets>
+ <Valuelists><Valuelist name="Clocks" type="mapped"><Entry index="0" value="7">Off</Entry><Entry index="1" value="4">Slow</Entry></Valuelist></Valuelists>
+ <MIDIMessages><MIDIMessage id="cc" name="cc">
+  <byte index="0" content="controller"/>
+  <byte index="1" content="controllerid"><parameter mapindex="20" content="Arp/Clock"/></byte>
+  <byte index="2" content="value"/>
+ </MIDIMessage></MIDIMessages>
+ <Initialisation>
+  <ParamInit param="Arp/Clock" value="Slow" part="2"/>
+  <ParamInit param="Arp/Clock" value="Slow"/>
+  <ParamInit param="Arp/Clock" value="Slow" part="17"/>
+ </Initialisation>
+</Remotedevice>)";
+    RemoteDevice d;
+    std::string err;
+    CHECK(d.load(Bytes(xml, xml + strlen(xml)), err));
+    CHECK(d.value_of("Arp/Clock", "Slow") == 4);
+    auto init = d.init_messages();
+    init.erase(std::remove_if(init.begin(), init.end(), [](const Bytes &m) { return m.empty() || m[0] == 0xF0; }),
+               init.end()); // the display messages are not in this description
+    CHECK(init.size() == 1 && init[0] == (Bytes{0xB1, 20, 4}));
+}
+
+// review 2026-11-25 M7: indexes from the file were used unchecked (a negative byte or checksum start index read
+// before the dump, a soft knob index of -1 resized the list to SIZE_MAX + 1): such a file is refused
+TEST(protocol_load_refuses_bad_indexes)
+{
+    auto load = [](const std::string &body) {
+        const std::string xml = "<Remotedevice device=\"Proto\" version=\"1\">" + body + "</Remotedevice>";
+        RemoteDevice d;
+        std::string err;
+        const bool ok = d.load(Bytes(xml.begin(), xml.end()), err);
+        return ok || err.empty() ? std::string() : err;
+    };
+    CHECK(!load(R"(<MIDIMessages><MIDIMessage id="x"><byte index="-1" content="sysexstart"/></MIDIMessage></MIDIMessages>)").empty());
+    CHECK(!load(R"(<MIDIMessages><MIDIMessage id="x"><byte index="3" content="checksum" method="add7" stopindex="2"/></MIDIMessage></MIDIMessages>)").empty());
+    CHECK(!load(R"(<SoftknobMapping><Mapping index="-1" parameter="A/B"/></SoftknobMapping>)").empty());
+    CHECK(load(R"(<MIDIMessages><MIDIMessage id="x"><byte index="3" content="checksum" method="add7" startindex="0" stopindex="2"/></MIDIMessage></MIDIMessages><SoftknobMapping><Mapping index="1" parameter="A/B"/></SoftknobMapping>)").empty());
 }

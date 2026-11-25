@@ -72,13 +72,6 @@ public:
         return n;
     }
 
-private:
-    struct Part {
-        Patch revert;
-        std::vector<Patch> recent;
-    };
-    std::array<Part, PARTS> parts_;
-
     // the same patch from another place: everything but bank/program (7, 8) and the checksums (265, 522)
     static bool same(const Patch &a, const Patch &b)
     {
@@ -89,6 +82,13 @@ private:
                 return false;
         return true;
     }
+
+private:
+    struct Part {
+        Patch revert;
+        std::vector<Patch> recent;
+    };
+    std::array<Part, PARTS> parts_;
 };
 
 } // namespace vti

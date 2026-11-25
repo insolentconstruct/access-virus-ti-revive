@@ -6048,3 +6048,23 @@ that really stops answering (the recovery and the warning), the broker reset on 
 - **Method:** unit tests failing before / passing after (946 tests), TI2 runs with only the plug-in's own traffic
 - **Confidence:** HIGH (A-C on the TI2 and in tests) / MED (D, E: tested in units only for the failure case)
 - **Hardware:** yes (our TI2 Desktop, Linux; the failure cases not reproduced)
+
+### E593
+
+Library files: what TI Revive keeps out and refuses (code review 2026-11-25, items M1, M2, M3, M5 of the round 0.8.44
+review). (1) A single dump whose version byte has no known format stays out of the library: above 12 (the latest,
+formats.md), and 8 or higher in a 267-byte dump (only a Virus C dump, version below 8, gets pages C/D from the upgrade;
+before, a 267-byte dump of version 8 was padded and later sent with its old F7 at byte 266 and stray bytes after it).
+The original lists such dumps (E356, it does not check the version); what they do on the Virus is unknown, so they never
+go on the wire (rule 2). A read-only scan of the user's own libraries found only 267-byte v7 and 524-byte v8/v9/v11/v12
+dumps, so no real patch is affected. (2) A dump ends at its first status byte: one cut off before its F7 no longer
+swallows the next intact dump. (3) save_library refuses ("More than 128 patches") instead of writing positions 0..127
+only and dropping the rest; a .syx library is written back as .syx; sort/swap refuse a library of more than 128
+entries. (4) The write is checked after the stream is closed (a full disk failed only at the flush and the rename then
+replaced the library with an empty file); the .tmp is removed on every failure.
+
+- **Date:** 2026-11-25
+- **Pointer:** native/src/access/library.cpp (load_library_file, save_library); native/src/model/bankdrop.h (LibraryEdit::swap, sort); native/docs/formats.md; native/tests/test_library.cpp, test_bankdrop.cpp; E356, E298
+- **Method:** code review + unit tests (vtitests, Linux); scan of the user's library files (local, read-only)
+- **Confidence:** HIGH (code behaviour, tests) / open (what the original does with a version-13+ or 267-byte v8+ dump on the device)
+- **Hardware:** no

@@ -25,7 +25,8 @@ bool load_library_file(const std::string &path, PatchLibrary &lib, const std::ve
 // `page_b`: AccessFiles::default_page_b() - with it, old Virus C (267-byte) dumps are upgraded to the TI format
 std::vector<PatchLibrary> load_libraries(const std::string &dir, const std::vector<uint8_t> &page_b = {});
 // writes `lib.dumps` to `lib.path` in the original's file layout (SMF type 0, one track, a SysEx per patch with
-// delta 120, bank byte 1, program = position, division 96); gaps are left out
+// delta 120, bank byte 1, program = position, division 96); gaps are left out. A .syx path gets the same dumps as raw
+// SysEx. Refused (false, nothing written) when a patch sits past position 127 (a .syx of several banks)
 bool save_library(const PatchLibrary &lib, std::string &error);
 // a library change kept only when its file was written (#41): `after` goes to lib.path (lib.dumps is ignored); true and
 // `cur` = `after` when written, else `cur` stays as it was (the browser then shows what the file holds) and `error` says why

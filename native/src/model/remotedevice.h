@@ -28,7 +28,6 @@ struct Parameter {
     int min = 0, max = 127, def = 0;
     std::string valuelist, part, condition, message, shortname, displayname;
     int controller = -1; // controllerindex
-    bool automatable = false, performance = false;
     // meta parameters (editordevice.xml meta="true"): link other parameters (filter link, FX switches, LFO clocks)
     bool meta = false, retrigger = false, catch_always = true;
     std::vector<MetaClient> clients;
