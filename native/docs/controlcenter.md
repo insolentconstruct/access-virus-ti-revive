@@ -103,6 +103,16 @@ installation in `/Applications` works too (checked on the M3: 106 files, layout 
 - Backups go to `<Documents>/Access Music/Virus TI/Backups/<date time>/` (next to `Patches`, so the plug-in's
   browser does not list every backup). The files are in the original's library format: copy one into `Patches` to
   open it in the plug-in's browser; Access' Virus Control reads them too.
+- A backup is not a snapshot (about 1 s per program not in the cache): at the end of each bank the tool asks the bank
+  info once more, reads the programs stored meanwhile again (once) and, if they still changed, says that the library
+  may mix old and new patches (R11-4).
+- A restore saves the bank as the Virus has it first, as the library `RAM X before restore <date time>.mid` in the
+  `Backups` folder (rule 2; if it cannot be saved, nothing is written). A stop or an error names the programs written
+  and that library (R11-3). With a broker of protocol 6 each restored dump counts only after the broker reported it
+  sent (`VTIMSG_WRITTEN`, whose second u32 counts the WRITE messages it did not send: refused by rule 2, not the
+  owner, failed); a piece not sent ends the restore. An older broker sends no reports: the result says "not
+  confirmed" (R11-7). Cache files are written through a temporary file of their own per save (process id and a
+  counter), so the plug-in and the tool never mix their writes (R11-5).
 - `.syx` export: the single dumps back to back, as patch librarians expect. `.mid` export renumbers the patches by
   position (bank byte 1, program = position) and recomputes the checksums, like the plug-in's library save.
 

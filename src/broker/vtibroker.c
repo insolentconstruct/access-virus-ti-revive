@@ -78,6 +78,8 @@ typedef struct {
     vti_sxwatch sx;          // its SysEx going on, for the rule 2 write filter (ctrlguard.h)
     uint32_t proto;          // the protocol of its HELLO (0 = none)
     uint32_t written;        // T7: data bytes of all its WRITE messages handled (VTIMSG_WRITTEN)
+    uint32_t unsent;         // R11-7: its WRITE messages not sent (refused by rule 2, not the owner, failed)
+    int sent;                // the WRITE message being handled went to the Virus
 } client;
 static client *g_clients[MAX_CLIENTS];
 
@@ -842,6 +844,7 @@ static DWORD WINAPI client_thread(LPVOID arg)
             break;
         }
         case VTIMSG_WRITE:
+            c->sent = 0;
             if (h.len >= 1 && !vti_write_allowed(buf[0])) {
                 blog("refused a write to ep%02x (rule 2: the plug-in channel 0x06 only)", buf[0]);
                 break;
@@ -857,6 +860,7 @@ static DWORD WINAPI client_thread(LPVOID arg)
                 if (g_dev && vti_link_on_now(vti_linked(g_dev))) // the last user had unlinked it (E524)
                     vti_link(g_dev, 1);
                 int r = g_dev ? vti_write_keep(g_dev, buf[0], buf + 1, h.len - 1, keep_tx, &c->pipe) : -1;
+                c->sent = !r;
                 if (!r)
                     vti_sx_wrote(&g_sxhold, c, &c->sx, tx_ms());
                 else // what reached the Virus is unknown: hold nobody for it
@@ -925,7 +929,9 @@ static DWORD WINAPI client_thread(LPVOID arg)
         }
         if (h.type == VTIMSG_WRITE && c->proto >= VTI_PROTO_WRITTEN && !c->observer) { // T7: every one, refused too
             c->written += h.len ? h.len - 1u : 0;
-            send_msg(c, VTIMSG_WRITTEN, &c->written, 4, NULL, 0);
+            c->unsent += !c->sent;
+            uint32_t w[2] = {c->written, c->unsent};
+            send_msg(c, VTIMSG_WRITTEN, w, sizeof w, NULL, 0);
         }
     }
     blog("client disconnected%s", c->observer ? " (observer)" : "");

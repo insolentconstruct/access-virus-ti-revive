@@ -455,7 +455,7 @@ private:
             vti::Broker broker;
             if (!connect(broker))
                 return set(&Shared::status, "Connect the Virus, switch it on and try again.");
-            std::string err;
+            std::string err, warning;
             int fetched = 0;
             bool ok = vti::cc::backup_ram(broker, "1234", out, [&](int bank, int p, bool f, const vti::Dump &d) {
                 fetched += f;
@@ -463,10 +463,10 @@ private:
                 snprintf(s, sizeof s, "Backing up RAM %c: %d / 128%s%s", 'A' + bank - 1, p + 1, f ? "  read: " : "",
                          f ? vti::cc::patch_name(d).c_str() : "");
                 set(&Shared::status, s);
-            }, err, &stop_);
+            }, err, &stop_, &warning);
             if (ok)
                 set(&Shared::status, "Backup done (" + std::to_string(fetched) + " programs read from the Virus): " +
-                                         out);
+                                         out + (warning.empty() ? "" : ". " + warning));
             else
                 set(&Shared::status, "Backup not finished: " + err);
             if (ok) // the next backup gets its own folder
@@ -548,14 +548,18 @@ private:
             status(std::string("RAM ") + b + ": checking which programs differ...");
             std::string err;
             int written = 0;
+            vti::cc::RestoreReport rep;
             bool ok = vti::cc::restore_ram(broker, bank, lib->dumps, [&](int done, int total) {
                 status(std::string("Restoring RAM ") + b + ": " + std::to_string(done) + " / " +
                                          std::to_string(total) + " written and read back");
-            }, written, err, &stop_);
+            }, written, err, &stop_, &rep);
             if (ok)
                 status(std::string("RAM ") + b + " restored from " + name + ": " +
                                          std::to_string(written) + " programs written" +
-                                         (written ? "." : " (all were the same already)."));
+                                         (written ? "." : " (all were the same already).") +
+                                         (rep.backup.empty() ? "" : " Before: \"" + rep.backup + "\" in the Backups folder.") +
+                                         (rep.confirmed ? "" : " Writes not confirmed (the TI Revive service is older "
+                                                               "than this Control Center); each one was read back."));
             else
                 status(std::string("RAM ") + b + " not restored completely (" + std::to_string(written) +
                                          " written): " + err);

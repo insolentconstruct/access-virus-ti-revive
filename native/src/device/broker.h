@@ -83,6 +83,11 @@ public:
     }
     // the broker has handled every byte up to `end` (a write's *end)
     bool written(uint32_t end) const { return !acks_ || (int32_t)(acked_ - end) >= 0; }
+    // the broker has reported a write (protocol 6): written() means something from here on
+    bool reports_writes() const { return acks_; }
+    // R11-7: the broker's count of our WRITE messages it did not send (refused by rule 2, not the owner, a failed
+    // transfer), from the reports; it changes no later than written() for the same write. 0 without reports.
+    uint32_t unsent() const { return unsent_; }
     // called by the reader after each report (under cb_mu_, as on_rx)
     void on_written(std::function<void()> h)
     {
@@ -148,6 +153,7 @@ private:
     std::atomic<bool> present_{false}, elsewhere_{false}, stop_{false}, reader_done_{true};
     std::atomic<uint32_t> arrivals_{0};
     std::atomic<uint32_t> sent_{0}, acked_{0}; // T7: data bytes written on this connection / reported done
+    std::atomic<uint32_t> unsent_{0};          // R11-7: WRITE messages the broker reported not sent
     std::atomic<bool> acks_{false};            // the broker has reported (protocol 6)
     std::mutex cb_mu_; // rx_, state_, observe_ and written_: set by any thread, called by the reader
     RxHandler rx_;

@@ -13,6 +13,7 @@
 #include <thread>
 #ifndef _WIN32
 #include <csignal>
+#include <unistd.h>
 #include <sys/resource.h>
 #endif
 
@@ -1416,6 +1417,41 @@ TEST(memsync_bank_file_save_errors)
         CHECK_EQ(std::filesystem::file_size(old), 3u); // the old file is kept
     }
 #endif
+}
+
+// R11-5: the plug-in and the Control Center (and two plug-in instances in one DAW) save the same cache files; with
+// one fixed "<file>.tmp" two writers interleaved into one temp file, and a hybrid of the right length loaded fine.
+// Each save has its own temp name (process id and a counter), the rename stays atomic, nothing is left behind.
+TEST(memsync_bank_file_temp_name_is_unique_per_writer)
+{
+    const std::string a = bank_temp_path("x/RAM A"), b = bank_temp_path("x/RAM A");
+    CHECK(a != b);
+#ifndef _WIN32
+    CHECK(a.rfind("x/RAM A.tmp." + std::to_string(getpid()) + ".", 0) == 0);
+#endif
+    TempDir t("vtitests-memsync-tmpname");
+    const std::string path = (t.dir / "RAM A").string();
+    Bank one, two;
+    for (int p = 0; p < 128; p++) {
+        one[p] = fake_single(1, p, p);
+        two[p] = fake_single(1, p, p + 1000);
+    }
+    std::atomic<int> failed{0};
+    auto writer = [&](const Bank &bk) {
+        for (int i = 0; i < 100; i++)
+            failed += !save_bank_file(path, bk);
+    };
+    std::thread t1(writer, std::cref(one)), t2(writer, std::cref(two));
+    t1.join();
+    t2.join();
+    CHECK_EQ(failed.load(), 0);
+    Bank in;
+    CHECK(load_bank_file(path, in) && (in == one || in == two)); // one writer's bank, never a mix
+    CHECK_EQ((int)std::distance(std::filesystem::directory_iterator(t.dir), std::filesystem::directory_iterator()), 1); // no temp file left
+    std::filesystem::create_directories(t.dir / "dir");
+    t.write("dir/keep", {1});
+    CHECK(!save_bank_file((t.dir / "dir").string(), one)); // a failed rename removes its temp file
+    CHECK_EQ((int)std::distance(std::filesystem::directory_iterator(t.dir), std::filesystem::directory_iterator()), 2);
 }
 
 // #50: the RAM cache is per Virus number - Virus 1 in the cache folder itself, Virus 2.. in virus-N below it - and an

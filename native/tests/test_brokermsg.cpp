@@ -354,8 +354,8 @@ TEST(broker_open_sysex_hold_is_bounded)
 }
 
 namespace {
-// the u32 of the next VTIMSG_WRITTEN (others skipped), -1 when none comes within `ms`
-int64_t next_written(int fd, int ms = 1000)
+// the u32 of the next VTIMSG_WRITTEN (others skipped), -1 when none comes within `ms`; `unsent`: its second u32
+int64_t next_written(int fd, int ms = 1000, uint32_t *unsent = nullptr)
 {
     for (;;) {
         pollfd p{fd, POLLIN, 0};
@@ -371,8 +371,11 @@ int64_t next_written(int fd, int ms = 1000)
         }
         uint32_t v;
         memcpy(&v, b, 4);
-        if (h.type == VTIMSG_WRITTEN && h.len >= 4)
+        if (h.type == VTIMSG_WRITTEN && h.len >= 4) {
+            if (unsent)
+                memcpy(unsent, b + 4, h.len >= 8 ? 4 : 0);
             return v;
+        }
     }
 }
 } // namespace
@@ -385,16 +388,23 @@ TEST(broker_reports_each_write_done)
     int a = client();
     hello(a, VTI_PLUGIN_NAME);
     CHECK_EQ(next_state(a), 1);
+    uint32_t unsent = 99;
     msg(a, VTIMSG_WRITE, note(0x3C));
-    CHECK_EQ(next_written(a), 4);
+    CHECK_EQ(next_written(a, 1000, &unsent), 4);
+    CHECK_EQ(unsent, 0u);
     msg(a, VTIMSG_WRITE, {0x06, 0x2F, 0xF4, 0x00, 0x00}); // rule 2: refused, still reported
-    CHECK_EQ(next_written(a), 8);
+    CHECK_EQ(next_written(a, 1000, &unsent), 8);
+    CHECK_EQ(unsent, 1u); // R11-7: the count of WRITE messages not sent tells the client so (a restore ends)
+    msg(a, VTIMSG_WRITE, {0x07, 0x2F, 0x00, 0x00, 0x00}); // rule 2: not the plug-in endpoint
+    CHECK_EQ(next_written(a, 1000, &unsent), 12);
+    CHECK_EQ(unsent, 2u);
     bh_busy(1);
     msg(a, VTIMSG_WRITE, note(0x3E));
     CHECK(until([] { return bh_inside() == 1; }));
     CHECK_EQ(next_written(a, 100), -1); // still below us
     bh_busy(0);
-    CHECK_EQ(next_written(a), 12);
+    CHECK_EQ(next_written(a, 1000, &unsent), 16);
+    CHECK_EQ(unsent, 2u);
     close(a);
     CHECK(until([] { return bh_clients() == 0; }));
     bh_device(0);

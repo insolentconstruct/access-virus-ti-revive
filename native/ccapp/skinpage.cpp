@@ -1094,16 +1094,18 @@ private:
                 return;
             }
             int fetched = 0;
+            std::string warning;
             bool ok = vti::cc::backup_ram(broker, "1234", out, [&](int bank, int p, bool f, const vti::Dump &) {
                 fetched += f;
                 char s[64];
                 snprintf(s, sizeof s, "Backing up RAM %c: %d / 128", 'A' + bank - 1, p + 1);
                 std::lock_guard<std::mutex> l(mu_);
                 status_ = s;
-            }, err, &cancel_);
+            }, err, &cancel_, &warning);
             std::lock_guard<std::mutex> l(mu_);
             done_ = ok;
-            status_ = ok ? "Done: " + std::to_string(fetched) + " read, RAM A..D saved"
+            status_ = ok ? "Done: " + std::to_string(fetched) + " read, RAM A..D saved" +
+                               (warning.empty() ? "" : ". " + warning)
                          : cancel_ ? "Backup cancelled" : "Not finished: " + err;
         });
     }

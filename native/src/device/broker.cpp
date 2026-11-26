@@ -309,7 +309,7 @@ bool Broker::open(std::string &error)
     {
         std::lock_guard<std::mutex> g(wr_); // senders on other threads see the handle whole (review 2026-10-19 M7)
         fd_ = os_connect(endpoint_, slot_, error);
-        sent_ = acked_ = 0; // a new connection: the broker counts from 0, and may be an older one (T7)
+        sent_ = acked_ = unsent_ = 0; // a new connection: the broker counts from 0, and may be an older one (T7)
         acks_ = false;
     }
     if (fd_ < 0)
@@ -596,8 +596,12 @@ void Broker::read_loop()
             break;
         case VTIMSG_WRITTEN: // T7: our WRITE messages are handled up to this byte count
             if (h.len >= 4) {
-                uint32_t n;
+                uint32_t n, u;
                 memcpy(&n, buf.data(), 4);
+                if (h.len >= 8) { // R11-7; before acked_, so a write seen done already shows its refusal
+                    memcpy(&u, buf.data() + 4, 4);
+                    unsent_ = u;
+                }
                 acked_ = n;
                 acks_ = true; // after acked_: room() never sees reports on with a stale count
                 std::lock_guard<std::mutex> g(cb_mu_);

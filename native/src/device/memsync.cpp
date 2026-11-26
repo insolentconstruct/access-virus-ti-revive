@@ -10,6 +10,11 @@
 #include <cstdio>
 #include <memory>
 #include <filesystem>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace vti {
 
@@ -85,9 +90,20 @@ std::string ram_cache_note(int slot, int banks)
     return "RAM cache: " + whose + " folder, " + std::to_string(banks) + " of 4 banks";
 }
 
+std::string bank_temp_path(const std::string &path)
+{
+    static std::atomic<unsigned> n{0};
+#ifdef _WIN32
+    const long pid = (long)_getpid();
+#else
+    const long pid = (long)getpid();
+#endif
+    return path + ".tmp." + std::to_string(pid) + "." + std::to_string(n++);
+}
+
 bool save_bank_file(const std::string &path, const Bank &bank)
 {
-    std::string tmp = path + ".tmp";
+    const std::string tmp = bank_temp_path(path);
     FILE *f = u8fopen(tmp, "wb");
     if (!f)
         return false;
@@ -102,6 +118,9 @@ bool save_bank_file(const std::string &path, const Bank &bank)
     std::error_code ec;
     if (ok)
         std::filesystem::rename(u8path(tmp), u8path(path), ec);
+    std::error_code rm;
+    if (!ok || ec) // a unique name is not overwritten by the next save: remove it
+        std::filesystem::remove(u8path(tmp), rm);
     return ok && !ec;
 }
 

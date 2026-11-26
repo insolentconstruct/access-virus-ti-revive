@@ -177,7 +177,7 @@ static int backup(int argc, char **argv)
         return 1;
     printf("Backup of the RAM banks to %s\n(unchanged programs come from the cache, the others take about 1 s each)\n",
            out.c_str());
-    std::string err;
+    std::string err, warning;
     int fetched = 0;
     bool ok = vti::cc::backup_ram(broker, banks, out, [&](int bank, int p, bool f, const vti::Dump &d) {
         fetched += f;
@@ -186,12 +186,14 @@ static int backup(int argc, char **argv)
         else if (p == 127)
             printf("  RAM %c checked\n", 'A' + bank - 1);
         fflush(stdout);
-    }, err);
+    }, err, nullptr, &warning);
     if (!ok) {
         fprintf(stderr, "tirevive-cc: %s\n", err.c_str());
         return 1;
     }
     printf("Done: %d programs read from the Virus, libraries in %s\n", fetched, out.c_str());
+    if (!warning.empty())
+        fprintf(stderr, "tirevive-cc: %s\n", warning.c_str());
     return 0;
 }
 
@@ -222,16 +224,21 @@ static int restore(int argc, char **argv)
         return 1;
     std::string err;
     int written = 0;
+    vti::cc::RestoreReport rep;
     bool ok = vti::cc::restore_ram(broker, b - 'A' + 1, lib.dumps, [&](int done, int total) {
         printf("  RAM %c: %d of %d written\n", b, done, total);
         fflush(stdout);
-    }, written, err);
+    }, written, err, nullptr, &rep);
     if (!ok) {
         fprintf(stderr, "tirevive-cc: %s (%d written)\n", err.c_str(), written);
         return 1;
     }
     printf("Done: %d programs written to RAM %c and read back%s\n", written, b,
            written ? "" : " (all programs were the same already)");
+    if (!rep.backup.empty())
+        printf("RAM %c as it was before: library \"%s\" in the Backups folder\n", b, rep.backup.c_str());
+    if (!rep.confirmed)
+        printf("Writes not confirmed (the TI Revive service is older than this tool); each one was read back.\n");
     return 0;
 }
 
