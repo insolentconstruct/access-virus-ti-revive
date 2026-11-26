@@ -60,7 +60,17 @@ inline const std::vector<ChangeNote> &changelog()
 {
     static const std::vector<ChangeNote> notes = {
         {"0.8.44",
-         {"Sync at the start (#37): TI Revive finds the Virus' sync marker also while the Virus already plays, so a "
+         {"A clean bank sync like the original: while the RAM banks are read or checked, the notes you play are not "
+          "played and the MIDI clock pauses. After banks were changed elsewhere the start stays silent for about a "
+          "second per changed patch.",
+          "A patch the Virus does not send is given up after 3 asks and the sync goes on; the banks are checked again "
+          "at every connection, also when the Virus is switched on after the DAW.",
+          "RAM writes and backups: a slot is read from the Virus before it is overwritten when the plug-in's copy may "
+          "be old (always for SAVE); SAVE with Compare on keeps the edit; closing waits for queued RAM writes; the "
+          "Control Center backs a bank up before a restore and refuses while a plug-in uses the Virus.",
+          "Steadier USB and audio: sending waits for the Virus like the original, audio comes in 4 ms pieces, and "
+          "original projects bring their per-part routing and detune.",
+          "Sync at the start (#37): TI Revive finds the Virus' sync marker also while the Virus already plays, so a "
           "project that plays right after opening gets its timing at once (before, only after the music paused).",
           "Play from stop (#37): when the DAW reads ahead at Play, TI Revive learns how far and at the next Play "
           "shifts back by that much, so the audio no longer jumps after Play (tested in REAPER on Linux, not in "
