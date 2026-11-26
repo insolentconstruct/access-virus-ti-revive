@@ -103,7 +103,9 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    OWNER). vtitests 1081, brokertests 13, ctest 8/8 (serial + -j4), Linux broker + mingw exes clean; macOS not built.
    Then (user 2026-11-26) clean sync like the original (E161 update): no notes/F8 during a bank sync, no pause.
    hil.sh on the TI2 with this build installed (backup of 0.8.43 in work/installed-backup-0.8.43): H1-H6 pass
-   (work/hil/2026-11-26-clean-sync; first note now ~12 s, limit 15 s, d1160ca). Running: block x rate sweep.
+   (work/hil/2026-11-26-clean-sync; first note now ~12 s, limit 15 s, d1160ca). Sweep blocks 32-512 x 44.1/48 kHz:
+   10/10 pass, 0 drops, margin min 307 (work/hil/2026-11-26-sweep). Full sync with notes: 512/512, silent, cache
+   identical (E161). Round build stays installed; NEXT: the user's own tests (DAW smoke, TI2 items below), then CI.
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
    own TI2: a request that never answers (T1), reconnect + late Virus (T3/T4), state upload with notes (T7/T8/T9),
