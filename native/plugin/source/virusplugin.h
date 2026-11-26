@@ -124,6 +124,8 @@ public:
     std::atomic<int64_t> timeline{-1};
     // non-realtime messages (state upload) still waiting, or written and not yet reported done by the broker (T7)
     bool busy() const { return queued_.load() > 0; }
+    // process()'s real-time ring still holds events (clock, notes, automation) the worker has not written yet
+    bool events_waiting() const { return rt_r_.load() != rt_w_.load(); }
     int queued() const { return queued_.load(); } // start-up messages and state still to go (the start page's ring)
     bool dumping() const { return dump_pending_.load(); } // a dump in pieces: nothing else may go between them
     // USB control request through the broker (device descriptor / strings)

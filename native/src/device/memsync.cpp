@@ -172,6 +172,7 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
         MemorySync *s;
         ~Done()
         {
+            s->open_ = false;
             std::lock_guard<std::mutex> lk(s->mu_);
             s->waiting_ = false;
             s->inbox_.clear();
@@ -199,6 +200,7 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
             std::lock_guard<std::mutex> lk(mu_);
             inbox_.clear();
             waiting_ = true;
+            open_ = true; // before the send: the answer can come at once
         }
         if (!send_(request))
             return {};

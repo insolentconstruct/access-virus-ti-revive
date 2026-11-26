@@ -583,6 +583,9 @@ hardware (TI2 Desktop) - details and raw numbers in [`findings/evidence.md`](fin
 - Notes play while the bank sync runs: the sync pauses while you play (dump requests delay the Virus' notes by
   ~130 ms) and continues in the gaps; notes are only held back for the first ~4 s, when the Virus would play them
   up to 1.6 s late (E144).
+- While the plug-in waits for the answer to a dump request (about a second each, while it reads presets it has not
+  cached yet), it holds its MIDI clock and the DAW's automation, like the original. The arpeggiator and clock-synced
+  LFOs can stop for that moment; automation goes out with its latest value right after.
 - A patch chosen in the browser from another bank, followed by Program +/- on the Virus, no longer loads the patch
   of the old bank. Since 0.8.37 the plug-in keeps the bank it sent with the patch: the Virus reports only the new
   program number. (E383)

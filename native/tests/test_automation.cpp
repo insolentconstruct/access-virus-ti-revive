@@ -84,6 +84,26 @@ TEST(automation_latest_value_wins)
     CHECK_EQ(s.q->waiting(), 0);
 }
 
+// research T9 (R4-2): while a dump request is open process() drains nothing (max 0); the changes keep coalescing, and
+// after the answer every moved parameter goes out once with its latest value, the first block at most the burst
+TEST(automation_held_during_a_request_latest_value_after)
+{
+    Sim s;
+    for (int b = 0; b < 86; b++) { // ~1 s of an answer, 40 lanes moving every block
+        for (uint32_t id = 1; id <= 40; id++)
+            s.change(id, (b + (int)id) & 127);
+        s.block(0);
+    }
+    CHECK_EQ(s.total, 0);
+    s.block();
+    CHECK(s.total <= 64); // the burst: no flood after the hold (rule 2)
+    for (int b = 0; b < 86; b++)
+        s.block();
+    CHECK_EQ(s.total, 40); // one message per lane, not 86
+    for (uint32_t id = 1; id <= 40; id++)
+        CHECK(s.last_sent[id] == ((85 + (int)id) & 127));
+}
+
 TEST(automation_final_values_arrive)
 {
     // a burst of many parameters, then silence: every parameter's last value is sent eventually (no stuck values)

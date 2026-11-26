@@ -7,6 +7,7 @@
 #include "device/hostmidi.h"
 #include <cmath>
 #include <limits>
+#include <vector>
 
 using namespace vti;
 
@@ -38,6 +39,25 @@ TEST(hostmidi_clock_tempo_is_sane)
     CHECK(bend14(-std::numeric_limits<double>::infinity()) == 0);
     CHECK(clock_tempo(5000.0) == 999.0); // at most ~5 ticks per 512-sample block
     CHECK(clock_tempo(0.5) == 1.0);
+}
+
+// research T9 (R9-3): while a dump request is open the clock ticks are left out (each F8 can make the DSP queue a
+// sync report behind the answer, E251), and the grid moves on, so the clock resumes on its beat, not shifted
+TEST(hostmidi_clock_held_keeps_its_grid)
+{
+    std::vector<int64_t> ticks;
+    auto emit = [&](int64_t t) { ticks.push_back(t); };
+    const double per = 918.75; // 120 BPM at 44.1 kHz
+    double next = clock_ticks(100.0, 100.0 + 3 * per, per, false, emit);
+    CHECK_EQ(ticks.size(), 3u);
+    CHECK(ticks[0] == 100 && ticks[1] == 1019 && ticks[2] == 1938);
+    next = clock_ticks(next, 100.0 + 10 * per, per, true, emit); // held: none
+    CHECK_EQ(ticks.size(), 3u);
+    CHECK(next == 100.0 + 10 * per);
+    next = clock_ticks(next, 100.0 + 12 * per, per, false, emit);
+    CHECK_EQ(ticks.size(), 5u);
+    CHECK(ticks[3] == std::lround(100.0 + 10 * per)); // the 11th tick of the grid
+    CHECK(next == 100.0 + 12 * per);
 }
 
 // Issue #18: the mod wheel did nothing in Ableton Live - a VST3 plug-in gets a controller only when it maps it to a

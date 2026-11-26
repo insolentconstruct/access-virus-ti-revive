@@ -46,6 +46,18 @@ inline double clock_tempo(double bpm)
     return std::max(1.0, std::min(999.0, bpm));
 }
 
+// The MIDI clock ticks of one block, from `next` up to `end` (frames on the timeline): emit(stamp) per tick unless
+// `hold` (a dump request is open, research T9: every F8 can make the DSP queue a sync report behind the answer,
+// E251; the original sends no F8 while busy). The grid moves on while held, so the clock resumes on its beat.
+// Returns the next tick.
+template <class Emit> double clock_ticks(double next, double end, double per_tick, bool hold, Emit &&emit)
+{
+    for (; next < end; next += per_tick)
+        if (!hold)
+            emit((int64_t)std::lround(next));
+    return next;
+}
+
 // Controllers the host hands over as parameters (VST3 IMidiMapping; the VST3 numbers: 0..127 controllers, 128
 // channel aftertouch, 129 pitch bend). A VST3 host sends a plug-in no controller it has not mapped - with only
 // aftertouch and pitch bend mapped, the mod wheel never reached the Virus (issue #18). The original, a VST2, got

@@ -354,6 +354,70 @@ TEST(memsync_transact_asks_only_when_the_queue_is_empty)
     CHECK_EQ(r.size(), 524u);
 }
 
+// research T9 (R1-3, R4-2, R9-3): the plug-in holds its MIDI clock and automation while a request is open, like the
+// original that drops F8 while busy. request_open() is true from the first send until transact returns (reply,
+// timeout, cancel), also over the tries; not while the request still waits for the queue (it is not out yet)
+TEST(memsync_request_open_from_the_send_to_the_answer)
+{
+    std::atomic<bool> busy{true};
+    MemorySync *self = nullptr;
+    bool open_while_queued = true, open_at_send = false, open_while_waiting = false;
+    std::thread answer;
+    MemorySync sync([&](const Bytes &) {
+        open_at_send = self->request_open();
+        answer = std::thread([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            open_while_waiting = self->request_open();
+            self->feed(fake_single(0, 0, 1));
+        });
+        return true;
+    });
+    self = &sync;
+    std::thread drain([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        open_while_queued = sync.request_open();
+        busy = false;
+    });
+    sync.sending = [&] { return busy.load(); };
+    CHECK(!sync.request_open());
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 1000, 1);
+    drain.join();
+    answer.join();
+    CHECK_EQ(r.size(), 524u);
+    CHECK(!open_while_queued); // waiting for the queue: the clock goes on, so the queue can empty
+    CHECK(open_at_send);
+    CHECK(open_while_waiting);
+    CHECK(!sync.request_open()); // answered: clock and automation go on
+}
+
+TEST(memsync_request_open_ends_with_a_timeout_or_a_cancel)
+{
+    MemorySync *self = nullptr;
+    bool open_at_second_try = false;
+    int sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        if (++sends == 2)
+            open_at_second_try = self->request_open();
+        return true;
+    });
+    self = &sync;
+    sync.pause_ms = 0;
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 50, 2);
+    CHECK(r.empty() && sends == 2);
+    CHECK(open_at_second_try); // open over the tries
+    CHECK(!sync.request_open()); // timed out: not open for good
+    bool open_before_cancel = false;
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        open_before_cancel = sync.request_open();
+        sync.cancel();
+    });
+    r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 1);
+    stopper.join();
+    CHECK(r.empty() && open_before_cancel);
+    CHECK(!sync.request_open());
+}
+
 // a queue that never empties (the Virus refused EP 0x06 for 8.7 s, E591 (3); a broker gone): the wait is bounded
 TEST(memsync_transact_queue_wait_is_bounded)
 {

@@ -63,6 +63,10 @@ public:
     // (not a cancel, a handover, a send that failed, or a reply of the wrong size). The plug-in's cue for AnswerWatch
     // (E591): a sync that ended with -1 because of it, or the readiness probe.
     bool missed() const { return missed_; }
+    // a request is out and its transact has not returned (answer, timeout over all tries, cancel): the plug-in's
+    // process() holds its MIDI clock and automation meanwhile, like the original drops F8 while busy (research T9).
+    // Lock-free, read on the audio thread
+    bool request_open() const { return open_.load(std::memory_order_relaxed); }
     // Ends a waiting transact() at once and makes every later one return empty right away (the plug-in's
     // terminate(): it waited up to 10 s for a request in flight, review 2026-10-19 M6).
     void cancel();
@@ -139,6 +143,7 @@ private:
     bool cancelled_ = false; // under mu_
     bool waiting_ = false;   // under mu_: a transact is running, feed() keeps Access SysEx
     std::atomic<bool> missed_{false}; // set under tx_mu_, read by the plug-in after the transact
+    std::atomic<bool> open_{false};   // set under tx_mu_ (request_open)
 };
 
 } // namespace vti

@@ -1473,8 +1473,10 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     });
     sync_->log = [this](const std::string &line) { out_->log("Virus TI native: %s\n", line.c_str()); }; // #34
     // E591: every request (probe, bank sync, downloads) goes out only when the queue is empty, like the original, and
-    // its timeout starts once it is written; an instance without a Virus (handed over, waiting) asks nothing
-    sync_->sending = [this] { return out_->busy(); };
+    // its timeout starts once it is written; an instance without a Virus (handed over, waiting) asks nothing. The
+    // real-time ring too (research T9, R4-2: the original asks only when all its rings are nearly empty); the worker
+    // writes it within ms, and transact bounds the wait (queue_wait_ms), so constant playing cannot block a request
+    sync_->sending = [this] { return out_->busy() || out_->events_waiting(); };
     // and the Virus itself (R6-2): one lost during the bank sync stops it like a cancel, not "failed" for good, and
     // the check runs again when it is back (every return comes with on_device(true), also a bounce)
     sync_->present = [this] { return out_->connected() && out_->has_virus(); };
@@ -2227,6 +2229,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             add(3072, ping, 11);
         }
     }
+    // one of our dump requests is out (MemorySync, research T9): clock and automation wait, notes play
+    const bool request_open = sync_ && sync_->request_open();
     // MIDI clock at the host tempo (120 BPM without a process context), 24 ticks per quarter
     const double tempo = clock_tempo(data.processContext && (data.processContext->state & ProcessContext::kTempoValid)
                                          ? data.processContext->tempo
@@ -2266,11 +2270,14 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             add(restart_.stamp(), restart_.f2(), 3);
             add(restart_.stamp(), restart_.tick(), 11);
         }
+        // no F8 while a dump request is open (research T9, R9-3): each one can make the DSP queue a sync report
+        // behind the answer in its one send FIFO (E251), the original sends none while busy. Their F5 stamps go with
+        // them; the stamp clock is the DSP's own (E245-E247), so notes keep their timing
         static const uint8_t f8 = 0xF8;
-        while (next_tick_ < (double)(tl_ + block_frames)) {
-            add((int64_t)std::lround(next_tick_), &f8, 1);
-            next_tick_ += per_tick;
-        }
+        next_tick_ = clock_ticks(next_tick_, (double)(tl_ + block_frames), per_tick, request_open,
+                                 [&](int64_t t) { add(t, &f8, 1); });
+        // FE stays: notes play during a request, and the DSP releases every voice ~1.1 s after the last FE (E237);
+        // an answer can take up to 10 s. FE triggers no sync report (only F8 does, E251)
         static const uint8_t fe = 0xFE; // Active Sensing every 300 ms, like the original (E025); see keepalive.h
         fe_.run(tl_ + block_frames, [&](int64_t t) { add(t, &fe, 1); });
     }
@@ -2328,10 +2335,12 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             }
         }
     }
-    // send waiting automation within the budget, oldest first (at the block start)
+    // send waiting automation within the budget, oldest first (at the block start). Not while a dump request is open
+    // (research T9, R4-2: the original sends automation only after its queued SysEx): it keeps coalescing, the latest
+    // value per parameter goes after the answer, at most the burst at once. Pedals above go at once (notes play)
     automation_.refill(data.numSamples, rate_);
     if (out_)
-        automation_.drain(96 - evs.n, [&](uint32_t id) {
+        automation_.drain(request_open ? 0 : 96 - evs.n, [&](uint32_t id) {
             if (id >= MIDI_MAP_BASE) { // a mapped controller: at its own offset if it came in this block
                 MappedPending::Slot sl;
                 if (!mapped_.take((int)((id - MIDI_MAP_BASE) >> 12) & 15, (int)(id & 0xFFF), sl))
@@ -3707,6 +3716,9 @@ bool VirusPlugin::wait_until_quiet()
 {
     // playing has priority: no dump request while notes arrive (the Virus delays notes behind requests, E144). After
     // 30 s of pauses in total a short gap is enough for the next request, so constant playing cannot block the sync.
+    // Unlike the original, which drops notes for its whole sync (E161), notes stay playable on purpose (README: you
+    // can play while it runs); the cost is E144's late notes (~130 ms) when a request overlaps them after the 30 s.
+    // Only clock and automation are held while a request is open (process(), research T9).
     bool shown = false;
     const int64_t t0 = now_ms();
     auto gap = [&] { return sync_paused_ms_ + (now_ms() - t0) >= 30000 ? 300 : 1500; };

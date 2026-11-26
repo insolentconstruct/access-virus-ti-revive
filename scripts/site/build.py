@@ -802,6 +802,7 @@ def features_section():
         <li>The Virus drops the message right after a multi dump. The plug-in pauses after one, so new projects reset
         the synth reliably.</li>
         <li>Bank sync requests make the Virus play its notes late. The sync pauses while you play and continues in the gaps.</li>
+        <li>While the plug-in waits for the answer to a dump request (about a second each, while it reads presets it has not cached yet), it holds its MIDI clock and the DAW's automation, like the original. The arpeggiator and clock-synced LFOs can stop for that moment; automation goes out with its latest value right after.</li>
         <li>Switch the Virus off and on, or replug it, while the DAW runs: the editor shows the original's &ldquo;No Virus
         TI can be found&rdquo; page meanwhile, then the plug-in waits until the Virus is ready and plays in time again.
         Two DAWs share it: one plays, the other waits and takes over. Linux: after a cable replug, or when the Virus is
