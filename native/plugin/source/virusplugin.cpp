@@ -138,25 +138,53 @@ void DeviceOut::stop_worker()
 // waiting instance sends nothing. A waiting instance that takes over sends its own start-up (Mode back to REMOTE).
 void DeviceOut::leave_virus()
 {
+    // the RAM writes that will not go out now: named in the log (research T11), dropped with the rest of the queue
+    // in the same step, so none starts in between
+    auto cut_rest = [this](const char *why) {
+        std::vector<int> slots;
+        std::string backup;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            slots = ram_unsent();
+            backup = ram_backup_;
+            dump_ram_ = -1; // logged here, not again when the worker drops it
+            queued_ -= (int)queue_.size();
+            queue_.clear();
+        }
+        ram_cut(slots, backup, why);
+    };
     if (!owner_ || !open_ || !broker_.device_present()) {
         log("Virus TI native: closing without the close sequence (owner %d, open %d, present %d)\n", (int)owner_.load(),
             (int)open_.load(), (int)broker_.device_present());
+        cut_rest("the plug-in closed without a Virus");
         return;
     }
     log("Virus TI native: close sequence (cables 1, Mode SINGLE)\n");
-    abandon_dump_ = true; // a dump on its way must not hold up the close, and it is not wanted any more
+    // a dump on its way must not hold up the close, and it is not wanted any more - unless it is a RAM write
+    abandon_dump_ = ABANDON_OTHER;
+    size_t ram;
     {
         // nor what is still queued (the state of a session closed right after it started): behind it the close would
-        // never go out
+        // never go out. RAM writes stay: a drop, swap or sort cut short leaves the bank half written (T11)
         std::lock_guard<std::mutex> lk(mu_);
-        queued_ -= (int)queue_.size();
-        queue_.clear();
+        queued_ -= vti::keep_ram_writes(queue_);
+        ram = ram_unsent().size();
     }
     cv_.notify_all();
     auto sent = [this](int ms) {
         for (int i = 0; i < ms && queued_.load() > 0; i += 5)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
     };
+    if (ram) {
+        log("Virus TI native: %zu RAM write(s) still on their way - they go out first (at most %d s)\n", ram,
+            vti::RAM_CLOSE_WAIT_MS / 1000);
+        int ms = 0;
+        for (; ms < vti::RAM_CLOSE_WAIT_MS && queued_.load() > 0 && open_ && broker_.device_present(); ms += 5)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        cut_rest(ms >= vti::RAM_CLOSE_WAIT_MS ? "the close's wait ran out" : "the Virus or the broker went away");
+        abandon_dump_ = ABANDON_ALL; // the close goes now
+        cv_.notify_all();
+    }
     for (auto &m : close_messages_first())
         send(m);
     sent(1000); // right after a multi dump the Virus is given time first (queue_hold_until_); usually at once
@@ -233,7 +261,7 @@ void DeviceOut::send(std::vector<uint8_t> msg)
     send(std::move(msg), CABLE_PLUGIN);
 }
 
-void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable, bool keep)
+void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable, bool keep, bool ram)
 {
     if (msg.empty()) // nothing to write, and the worker's write accounting (pending_send_) expects bytes
         return;
@@ -243,9 +271,48 @@ void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable, bool keep)
     }
     std::lock_guard<std::mutex> lk(mu_);
     part_dump_queued(msg);
-    queue_.push_back({std::move(msg), false, cable, keep});
+    queue_.push_back({std::move(msg), false, cable, keep, false, ram});
     queued_++;
     cv_.notify_one();
+}
+
+void DeviceOut::send_ram(std::vector<uint8_t> dump, const std::string &backup)
+{
+    {
+        // the backups of every RAM operation still queued (a second one can queue behind the first)
+        std::lock_guard<std::mutex> lk(mu_);
+        if (ram_unsent().empty())
+            ram_backup_ = backup;
+        else if (!backup.empty() && ram_backup_.find(backup) == std::string::npos)
+            ram_backup_ += (ram_backup_.empty() ? "" : " and ") + backup;
+    }
+    send(std::move(dump), CABLE_PLUGIN, false, true);
+}
+
+std::vector<int> DeviceOut::ram_unsent()
+{
+    std::vector<int> s = vti::ram_writes(queue_);
+    if (dump_.active() && dump_ram_ >= 0)
+        s.insert(s.begin(), dump_ram_);
+    return s;
+}
+
+// research T11: RAM writes dropped before they reached the Virus (closed, broker or Virus gone): which slots, and where
+// the backup of what the sequence overwrites is; the bank's cache counts as not confirmed until the next check
+void DeviceOut::ram_cut(const std::vector<int> &slots, const std::string &backup, const char *why)
+{
+    if (slots.empty())
+        return;
+    log("Virus TI native: RAM write cut short (%s), not written: %s\n", why, vti::ram_slot_list(slots).c_str());
+    log("Virus TI native: %s; the bank check at the next connection corrects the browser\n",
+        backup.empty() ? "no RAM backup was made for it (it overwrote no patch the cache knew)"
+                       : ("the earlier patches of the slots it writes are in " + backup).c_str());
+    std::set<int> banks;
+    for (int s : slots)
+        banks.insert(s / 128);
+    if (ram_cut_)
+        for (int b : banks)
+            ram_cut_(b);
 }
 
 int DeviceOut::send_state(std::vector<std::vector<uint8_t>> records)
@@ -303,9 +370,17 @@ int DeviceOut::drop_while_away()
 {
     if (!had_virus_) // never there: the start-up and the state wait for it (E591 (2))
         return 0;
-    std::lock_guard<std::mutex> lk(mu_);
-    const int n = vti::drop_while_away(queue_);
-    queued_ -= n;
+    std::vector<int> ram;
+    std::string backup;
+    int n;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        ram = vti::ram_writes(queue_); // not kept: the Virus that comes back may hold other patches by then
+        backup = ram_backup_;
+        n = vti::drop_while_away(queue_);
+        queued_ -= n;
+    }
+    ram_cut(ram, backup, "the Virus went away");
     return n;
 }
 
@@ -313,11 +388,18 @@ int DeviceOut::drop_while_away()
 // when it is back, and the remaining pieces would go out without their header (review 2026-10-19 M2).
 void DeviceOut::drop_dump()
 {
+    std::vector<int> ram;
+    std::string backup;
     {
         std::lock_guard<std::mutex> lk(mu_);
+        if (dump_.active() && dump_ram_ >= 0)
+            ram.push_back(dump_ram_);
+        backup = ram_backup_;
+        dump_ram_ = -1;
         dump_ = DumpPacer();
         held_.take();
     }
+    ram_cut(ram, backup, "the Virus or the broker went away");
     if (dump_pending_) {
         dump_pending_ = false;
         queued_--;
@@ -665,8 +747,17 @@ void DeviceOut::run()
                 continue;
             }
         }
-        if (abandon_dump_.exchange(false))
-            drop_dump();
+        if (const int a = abandon_dump_.exchange(ABANDON_NONE)) { // leave_virus
+            bool ram;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                ram = a == ABANDON_OTHER && dump_.active() && dump_ram_ >= 0;
+                if (ram)
+                    held_.take(); // the automation held for it goes, as with any dump at the close
+            }
+            if (!ram) // a RAM write in pieces goes on (T11)
+                drop_dump();
+        }
         if (!open_) {
             std::string err;
             if (!rx_set_) {
@@ -914,6 +1005,7 @@ void DeviceOut::run()
                     rt_run_.turn();
                     msg = std::move(queue_.front().msg);
                     cable = queued_cable(msg.data(), msg.size(), queue_.front().cable); // dumps: cable 3 (cablerule.h)
+                    dump_ram_ = queue_.front().ram ? vti::ram_slot(msg) : -1; // read only while dump_ runs
                     queue_.pop_front();
                     if (cable == 3 && msg.size() > 3 * (DumpPacer::PIECE / 4)) { // a dump: in pieces from the next round
                         auto pk = usbmidi_pack(msg, cable);
@@ -1524,6 +1616,11 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
             changed = ui_state_set(p, device_status_value(st, p)) || changed;
         if (changed)
             ui_dirty_ = true;
+    });
+    out_->on_ram_cut([this](int bank) { // worker or terminate's thread (T11)
+        if (bank >= 0 && bank < 4)
+            ram_confirmed_[bank] = false; // the cache shows writes that did not reach the Virus: the next check corrects
+        ui_dirty_ = true;
     });
     out_->on_device([this](bool present) { // worker thread
         out_->log("Virus TI native: device %s\n", present ? (device_seen_ ? "reconnected" : "connected") : "disconnected");
@@ -4792,8 +4889,9 @@ bool VirusPlugin::ram_busy(const char *what, int bank, const char *lcd)
     return true;
 }
 
-bool VirusPlugin::backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename)
+bool VirusPlugin::backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename, std::string &where)
 {
+    where.clear();
     std::map<int, std::vector<RamBackup::Patch>> before;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
@@ -4833,7 +4931,8 @@ bool VirusPlugin::backup_ram(std::vector<BankDrop::Write> &w, const std::string 
                                             std::to_string(failed.slot + 1) + " not readable");
         return false;
     }
-    const std::vector<RamBackup::Patch> lost = RamBackup::lost(w, before);
+    // several writes: every slot they overwrite, a cut sequence must not lose a moved patch (T11)
+    const std::vector<RamBackup::Patch> lost = RamBackup::to_back_up(w, before);
     if (lost.empty())
         return true;
     char date[16] = "undated";
@@ -4898,9 +4997,13 @@ bool VirusPlugin::backup_ram(std::vector<BankDrop::Write> &w, const std::string 
             lib_roots_.push_back("Personal Libraries");
         }
         banks_[LIB_BASE + i] = lib.dumps;
+        // by name, not path: users post their logs (no home folders, AGENTS.md rule 5)
+        where += (where.empty() ? "\"" : "\" and \"") + lib.name;
         if (out_)
             out_->log("Virus TI native: RAM backup, %d patch(es) into \"%s\"\n", t.count, lib.name.c_str());
     }
+    if (!where.empty())
+        where += "\" in Personal Libraries";
     ui_dirty_ = true;
     return true;
 }
@@ -4930,11 +5033,12 @@ bool VirusPlugin::send_ram_writes(std::vector<BankDrop::Write> w, const std::str
 // them on cable 3 like any dump. Then the cache and its file, like a SAVE.
 bool VirusPlugin::write_ram(std::vector<BankDrop::Write> &w, const std::string &rename)
 {
-    if (stop_warm_ || !backup_ram(w, rename) || stop_warm_)
+    std::string where;
+    if (stop_warm_ || !backup_ram(w, rename, where) || stop_warm_)
         return false;
     if (out_)
         for (auto &x : w)
-            out_->send(x.dump);
+            out_->send_ram(x.dump, where); // a close lets them go out first (T11)
     std::set<int> touched;
     std::map<int, Bank> caches;
     {

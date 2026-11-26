@@ -220,3 +220,70 @@ TEST(rambackup_rename_uses_the_fresh_patch)
     RamBackup::rename_fresh(w, cached, Patch(), "NewName"); // nothing read: unchanged
     CHECK(w.dump == was);
 }
+
+// T11 (R7-1): a multi-slot write cut short (plug-in closed, broker gone) leaves a moved patch nowhere, so its backup
+// holds every slot it overwrites, not only what lost() names
+TEST(rambackup_swap_backs_up_both_slots)
+{
+    auto before = bank_a(4);
+    std::vector<BankDrop::Write> w = {{0, 0, single(1, 0, 1)}, {0, 1, single(1, 1, 0)}};
+    auto b = RamBackup::to_back_up(w, before);
+    CHECK(b.size() == 2);
+    CHECK(b.size() == 2 && RamBackup::same_sound(b[0], before[0][0]) && RamBackup::same_sound(b[1], before[0][1]));
+}
+
+TEST(rambackup_sort_backs_up_every_slot_it_overwrites)
+{
+    auto before = bank_a(6);
+    // a permutation of slots 0..3 (a sort), slot 4 written unchanged, slot 5 not written
+    std::vector<BankDrop::Write> w = {{0, 0, single(1, 0, 3)}, {0, 1, single(1, 1, 2)}, {0, 2, single(1, 2, 1)},
+                                      {0, 3, single(1, 3, 0)}, {0, 4, single(1, 4, 4)}};
+    CHECK(RamBackup::lost(w, before).empty());
+    auto b = RamBackup::to_back_up(w, before);
+    CHECK(b.size() == 4); // the unchanged slot 4 overwrites nothing
+    for (int p = 0; p < 4 && b.size() == 4; p++)
+        CHECK(RamBackup::same_sound(b[p], before[0][p]));
+}
+
+TEST(rambackup_multi_write_each_patch_once_and_unknown_slots_skipped)
+{
+    auto before = bank_a(4);
+    before[0][3] = single(1, 3, 1); // slot 3 holds the same patch as slot 1
+    std::vector<BankDrop::Write> w = {{0, 1, single(1, 1, 90)}, {0, 3, single(1, 3, 91)}, {0, 50, single(1, 50, 92)},
+                                      {2, 0, single(3, 0, 93)}};
+    CHECK(RamBackup::to_back_up(w, before).size() == 1); // slot 50 empty, RAM C not in the cache
+}
+
+TEST(rambackup_single_write_keeps_the_lost_rule)
+{
+    auto before = bank_a(4);
+    before[0][3] = single(1, 3, 2); // the patch of slot 2 is in slot 3 too
+    std::vector<BankDrop::Write> save = {{0, 2, single(1, 2, 100)}};
+    CHECK(RamBackup::to_back_up(save, before).empty()); // still in the bank: nothing to back up (T2)
+    std::vector<BankDrop::Write> save1 = {{0, 1, single(1, 1, 100)}};
+    CHECK(RamBackup::to_back_up(save1, before).size() == 1);
+}
+
+TEST(rambackup_confirmed_swap_backs_up_from_the_cache_without_reads)
+{
+    // the backup of a confirmed bank's swap comes from the cache: no fresh read (a sort would read the whole bank)
+    auto before = bank_a(4);
+    Reads r;
+    std::vector<BankDrop::Write> swap = {{0, 0, single(1, 0, 1)}, {0, 1, single(1, 1, 0)}};
+    CHECK(RamBackup::refresh(swap, before, [](int) { return true; }, r.fn()));
+    CHECK(r.asked.empty());
+    CHECK(RamBackup::to_back_up(swap, before).size() == 2);
+}
+
+TEST(rambackup_unconfirmed_swap_backs_up_what_the_virus_has)
+{
+    auto before = bank_a(4); // stale: the Virus holds other patches in slots 0 and 1
+    Reads r;
+    r.virus[{0, 0}] = single(1, 0, 50);
+    r.virus[{0, 1}] = single(1, 1, 51);
+    std::vector<BankDrop::Write> swap = {{0, 0, single(1, 0, 1)}, {0, 1, single(1, 1, 0)}};
+    CHECK(RamBackup::refresh(swap, before, [](int) { return false; }, r.fn()));
+    CHECK(r.asked.size() == 2);
+    auto b = RamBackup::to_back_up(swap, before);
+    CHECK(b.size() == 2 && RamBackup::same_sound(b[0], r.virus[{0, 0}]) && RamBackup::same_sound(b[1], r.virus[{0, 1}]));
+}

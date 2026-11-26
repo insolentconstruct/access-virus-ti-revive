@@ -41,6 +41,7 @@
 #include "device/heldnotes.h"
 #include "device/statehold.h"
 #include "device/awayqueue.h"
+#include "device/ramqueue.h"
 #include "device/outputdelay.h"
 #include "device/timelinefollow.h"
 #include "device/crossfade.h"
@@ -104,7 +105,12 @@ public:
     // the same on another USB-MIDI cable of the plug-in endpoint: the original sends remote template records on
     // cable 3 (E199), everything else on cable 2. keep: it stays queued while a Virus this instance had is away (no
     // state brings it back at the return, awayqueue.h)
-    void send(std::vector<uint8_t> msg, uint8_t cable, bool keep = false);
+    void send(std::vector<uint8_t> msg, uint8_t cable, bool keep = false, bool ram = false);
+    // a dump into a RAM slot (write_ram): marked, so a close lets it go out before its close sequence (ramqueue.h,
+    // research T11). `backup`: where the patches the writes overwrite were backed up, for the line of a cut write
+    void send_ram(std::vector<uint8_t> dump, const std::string &backup);
+    // a RAM write that did not reach the Virus (bank 0..3; worker or terminate's thread): its cache is not confirmed
+    void on_ram_cut(std::function<void(int bank)> h) { ram_cut_ = std::move(h); }
     // a whole state upload: replaces the records of an earlier upload that are still queued (only the newest state
     // counts; a waiting instance got two before its takeover, E149). Returns how many queued records it dropped.
     int send_state(std::vector<std::vector<uint8_t>> records);
@@ -331,6 +337,7 @@ private:
         uint8_t cable = 2; // USB-MIDI cable
         bool keep = false; // kept while a Virus this instance had is away (awayqueue.h)
         bool held = false; // held during a dump and put back (requeue_held): a newer value drops it (drop_superseded)
+        bool ram = false;  // a RAM write (send_ram): a close keeps it (ramqueue.h)
     };
     std::deque<Queued> queue_;
     std::atomic<int> queued_{0};
@@ -378,7 +385,14 @@ private:
     int blocked_logged_ = 0;
     std::atomic<bool> stop_{false};
     std::atomic<bool> open_{false};
-    std::atomic<bool> abandon_dump_{false}; // leave_virus: the worker drops a dump on its way
+    // leave_virus: the worker drops a dump on its way - ABANDON_OTHER unless it is a RAM write, ABANDON_ALL in any case
+    enum { ABANDON_NONE, ABANDON_OTHER, ABANDON_ALL };
+    std::atomic<int> abandon_dump_{ABANDON_NONE};
+    int dump_ram_ = -1;      // under mu_: the RAM slot (ramqueue.h) of the dump in pieces, -1 = none or no RAM write
+    std::string ram_backup_; // under mu_: send_ram's `backup`
+    std::function<void(int)> ram_cut_;
+    void ram_cut(const std::vector<int> &slots, const std::string &backup, const char *why); // log + ram_cut_; no mu_
+    std::vector<int> ram_unsent(); // under mu_: the RAM writes queued or in pieces
     AudioIn audio_;
     AudioGate audio_gate_; // open while audio_ is mapped; closed (waiting for readers) before it is unmapped
     bool audio_ok() const { return audio_gate_.is_open(); }
@@ -972,8 +986,9 @@ private:
                          std::function<void()> on_fail = nullptr);
     bool write_ram(std::vector<BankDrop::Write> &w, const std::string &rename); // backup, dumps, cache + cache files
     // the patches `w` would overwrite into the day's "RAM Backup" library (rambackup.h); false = not backed up, the
-    // caller writes nothing (write policy 2026-10-31). Reads slots from the Virus first where needed (blocks)
-    bool backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename);
+    // caller writes nothing (write policy 2026-10-31). Reads slots from the Virus first where needed (blocks).
+    // `where`: the backup libraries by name ("" = nothing backed up), for the log line of a cut write (T11)
+    bool backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename, std::string &where);
     // true (log + LCD `lcd` "bank sync running" / "the last RAM operation still runs") while a sync or a RAM
     // operation runs
     bool ram_busy(const char *what, int bank, const char *lcd = "RAM not written:");
