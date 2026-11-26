@@ -3178,6 +3178,23 @@ void VirusPlugin::end_compare(int part)
     ui_dirty_ = true;
 }
 
+// R7-2: while comparing, state_ holds the compared patch but the project keeps the edit; a SAVE, copy or rename must
+// act on the edit, so the part goes back to it first (as Compare off does), and the Virus plays what was stored
+void VirusPlugin::back_to_edit(int part)
+{
+    std::vector<uint8_t> edited;
+    {
+        std::lock_guard<std::mutex> lk(compare_mu_);
+        if (!compare_.stop(part, edited))
+            return;
+    }
+    NoUndo g; // the edit was the part's sound before Compare: no new step
+    t_keep_reference++;
+    load_dump(edited, part);
+    t_keep_reference--;
+    ui_dirty_ = true;
+}
+
 bool VirusPlugin::arp_action(int part, int action)
 {
     if (action < 0 || action >= ARP_ACTION_COUNT || part < 0 || part > 15)
@@ -4406,6 +4423,7 @@ bool VirusPlugin::copy_part(int from, int to)
 {
     if (from == to || from < 0 || from > 15 || to < 0 || to > 15)
         return false;
+    back_to_edit(from);
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -4465,6 +4483,7 @@ bool VirusPlugin::load_dump(std::vector<uint8_t> d, int part)
 
 bool VirusPlugin::rename_part(int part, const std::string &name)
 {
+    back_to_edit(part);
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -4502,6 +4521,7 @@ bool VirusPlugin::store_patch(int part, int bank, int program)
             return false;
         }
     }
+    back_to_edit(part); // after the refusals: a refused SAVE leaves the compare on
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -5170,6 +5190,7 @@ void VirusPlugin::lcd_hint(bool on, const std::string &line1, const std::string 
 
 bool VirusPlugin::store_to_library(int part, int library, int slot)
 {
+    back_to_edit(part);
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);

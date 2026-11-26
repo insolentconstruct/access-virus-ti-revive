@@ -998,6 +998,7 @@ private:
     std::mutex compare_mu_;
     CompareState compare_; // compare_mu_; load_dump and setState set the references
     void end_compare(int part); // an edit or a load while the part compares: the edit becomes an undo step
+    void back_to_edit(int part); // SAVE, copy, rename: the part returns to its edit (what the project keeps)
     // a library operation: `op` makes the library's new patches from the current ones (empty = refused); the old
     // ones are kept for the undo, the file is saved
     bool edit_library(int library, const char *what, const std::function<LibraryEdit::Lib(const LibraryEdit::Lib &)> &op);
