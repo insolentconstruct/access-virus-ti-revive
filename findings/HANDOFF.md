@@ -117,7 +117,9 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    FAIL first, then rerun ALL PASS: NOT a stall (E604) - the clean sync re-read 80 RAM D slots changed in L5 (~1 s each),
    reproduced on Linux, cache identical after; the stopped-sync log line now gives the count. Virus on Linux;
    RELEASE 0.8.44 (user 2026-11-26: skip L7/W2-64/1024, ship): release text + What's New done (ac2d5eb);
-   NEXT: site check (agent running) -> fixes -> merge -F -> verify -> tag v0.8.44 -> CI -> site.yml -> installs; checklist scripts/checklists/round-0.8.44.json published as
+   site check DONE (sync no longer 'play while it runs', ROM banks, 6/3 asks E594, CC refuses while a plug-in plays,
+   handover E590, tests 1081, backup test scope; T9 automation hold has no E entry, wording no longer says 'like the
+   original'). #47 #45 closed (user). NEXT: merge -F -> verify -> tag v0.8.44 -> CI -> site.yml -> installs -> #37 logs; checklist scripts/checklists/round-0.8.44.json published as
    https://claude.ai/artifact/FhiP1yThnqamYEPb36HBig (marks in rounds/0.8.44/marks).
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
