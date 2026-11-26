@@ -1805,7 +1805,7 @@ Entries: 599. Marks after an entry: its lowest confidence level when below HIGH,
 - [E591](evidence.md#e591) Lost SysEx answers ("Virus ready after 11.5 s (no reply to the probe)", "bank info RAM A: no reply", "single ... (LOW)
 - [E592](evidence.md#e592) The fixes for E591's lost SysEx answers (round 0.8.44, after rc8), done by three agents and reviewed by the ... (MED)
 
-## Linux (244)
+## Linux (245)
 
 - [E015](evidence.md#e015) Passthrough was not live during the p0 knob test: host kernel had all 5 interfaces (1-9:1.0..1.4) bound to ...
 - [E016](evidence.md#e016) Linux snd-usb-audio (host kernel 7.0.0-38) claims all 5 interfaces, including vendor-class MI_03/MI_04 (class ...
@@ -1847,6 +1847,7 @@ Entries: 599. Marks after an entry: its lowest confidence level when below HIGH,
 - [E158](evidence.md#e158) The third USB output (C10) on our TI2: with "Global USB/Virus Control USB IO Configuration" = 1 ("3 Outs / No ...
 - [E159](evidence.md#e159) The third USB output in the native plug-in (C10/E158 as a feature), tested with the user on the TI2 (Linux, ... (open)
 - [E160](evidence.md#e160) FX 1 changes on a held note (issue #4, nasguile: "the effect doesn't take hold; you have to re-trigger the ... (open)
+- [E161](evidence.md#e161) How the original holds notes at start-up and while it is busy (closes E153's open part)
 - [E163](evidence.md#e163) The reconnect path (the Virus switched off and on while the plug-in runs)
 - [E164](evidence.md#e164) USB IO configuration 2 ("3 Outs / 1 Input"): with the value 2 sent at start-up (VTI_IO_CONFIG=2, nothing ...
 - [E166](evidence.md#e166) Plug-ins of two programs and a Virus that is not there at the start
@@ -2052,7 +2053,7 @@ Entries: 599. Marks after an entry: its lowest confidence level when below HIGH,
 - [E600](evidence.md#e600) How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 ... (MED; open; not on hardware)
 - [E601](evidence.md#e601) The link global 0x52 in the re-send after missed answers (fix item T16, research R9-1 of 2026-11-26) (open; not on hardware)
 
-## Models: Snow, Polar, Keyboard, TI2 (281)
+## Models: Snow, Polar, Keyboard, TI2 (282)
 
 - [E013](evidence.md#e013) Remotedevice XML (3 blobs) embedded in Virus Control.dll at file offsets 0xc248a4, 0xcbee00 (TI ...
 - [E091](evidence.md#e091) macOS installer recon (originals/Virus TI Software Suite 5.1.7.00.pkg, xar from 2017, payloads unpacked to ...
@@ -2074,6 +2075,7 @@ Entries: 599. Marks after an entry: its lowest confidence level when below HIGH,
 - [E158](evidence.md#e158) The third USB output (C10) on our TI2: with "Global USB/Virus Control USB IO Configuration" = 1 ("3 Outs / No ...
 - [E159](evidence.md#e159) The third USB output in the native plug-in (C10/E158 as a feature), tested with the user on the TI2 (Linux, ... (open)
 - [E160](evidence.md#e160) FX 1 changes on a held note (issue #4, nasguile: "the effect doesn't take hold; you have to re-trigger the ... (open)
+- [E161](evidence.md#e161) How the original holds notes at start-up and while it is busy (closes E153's open part)
 - [E162](evidence.md#e162) 0.8.9 on macOS: the release package (TI-Revive-0.8.9-mac.zip from v0.8.9, copied to the user's MacBook Air M3 ...
 - [E163](evidence.md#e163) The reconnect path (the Virus switched off and on while the plug-in runs)
 - [E164](evidence.md#e164) USB IO configuration 2 ("3 Outs / 1 Input"): with the value 2 sent at start-up (VTI_IO_CONFIG=2, nothing ...
