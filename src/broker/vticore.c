@@ -613,7 +613,15 @@ struct write_ctx {
     vti *v;
     uint8_t ep;
     int err; // last libusb error that was not a timeout
+    vti_keep_fn keep;
+    void *u;
 };
+
+static int write_keep(void *ctx) // a packet waits on a busy Virus: go on unless it is gone or the caller says stop
+{
+    struct write_ctx *c = ctx;
+    return !c->v->dead && (!c->keep || c->keep(c->u));
+}
 
 static int write_packet(void *ctx, const uint8_t *data, int n, int *done)
 {
@@ -638,23 +646,30 @@ static void tap_control(uint8_t rt, uint8_t req, uint16_t val, uint16_t idx, uin
     g_tap(2, 0, rec, 12, data, (rt & 0x80) ? (r > 0 ? r : 0) : len);
 }
 
-int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len)
+int vti_write_keep(vti *v, uint8_t ep, const uint8_t *data, int len, vti_keep_fn keep, void *u)
 {
     if (g_tap) // before the transfer: the order on the wire
         g_tap(0, ep, data, len, NULL, 0);
     int max = ep == VTI_EP_MI03_OUT ? 8 : 32; // wMaxPacketSize (lsusb -v)
-    struct write_ctx c = {v, ep, 0};
+    struct write_ctx c = {v, ep, 0, keep, u};
     int timeouts = 0;
-    // a timed-out packet was NAKed, never taken (the link is lossless, E239): try it again, up to 5 s in a row
-    int r = vti_write_chunks(&c, write_packet, data, len, max, 5, &timeouts);
+    // a timed-out packet was NAKed, never taken (the link is lossless, E239): try it again while the Virus is busy
+    int r = vti_write_chunks(&c, write_packet, data, len, max, VTI_WRITE_TRIES, &timeouts, write_keep);
     if (timeouts)
-        vti_log("vti: write ep %02x: %d timeout(s), %s\n", ep, timeouts, r ? "gave up" : "then accepted");
+        vti_log("vti: write ep %02x: %d timeout(s), %s\n", ep, timeouts,
+                !r ? "then accepted" : r == VTI_WRITE_STOPPED ? "stopped (device or client gone)" : "gave up");
+    if (r == VTI_WRITE_STUCK) { // the existing failed-device path closes and reopens it (writeretry.h)
+        vti_log("vti: write ep %02x: refused for %d s: treating the Virus as failed\n", ep, VTI_WRITE_TRIES);
+        v->dead = 1;
+    }
     if (r && c.err)
         vti_log("vti: write ep %02x: %s\n", ep, libusb_error_name(c.err));
     if (r && vti_libusb_stalled(c.err)) // a stalled OUT endpoint refuses every later write until its halt is cleared
         libusb_clear_halt(v->h, ep);
     return r;
 }
+
+int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len) { return vti_write_keep(v, ep, data, len, NULL, NULL); }
 
 int vti_control(vti *v, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint8_t *data,
                 uint16_t len)

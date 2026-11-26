@@ -165,17 +165,27 @@ void vti_close(vti *v)
 }
 
 struct write_ctx {
+    vti *v;
     iface *f;
     uint8_t ep;
     DWORD err; // last error that was not the pipe timeout
+    vti_keep_fn keep;
+    void *u;
 };
+
+static int write_keep(void *ctx) // a packet waits on a busy Virus: go on unless it is gone or the caller says stop
+{
+    struct write_ctx *c = ctx;
+    return !c->v->dead && (!c->keep || c->keep(c->u));
+}
 
 static int write_packet(void *ctx, const uint8_t *data, int n, int *done)
 {
     struct write_ctx *c = ctx;
     ULONG got = 0;
-    // WinUSB splits into wMaxPacketSize packets itself; on the pipe timeout (1 s, set at open) `got` holds what
-    // the Virus took before it, the retry continues from there
+    // one wMaxPacketSize packet per call (R12-10): a whole message in one call left the resume point to how exactly
+    // WinUSB counts a cancelled multi-packet transfer; one packet is either taken (got = n, also when the ACK raced
+    // the 1 s pipe timeout's cancel) or not (0), so the retry repeats or skips nothing
     BOOL ok = WinUsb_WritePipe(c->f->usb, c->ep, (PUCHAR)data, (ULONG)n, &got, NULL);
     *done = (int)got;
     if (ok)
@@ -200,20 +210,30 @@ static void tap_control(uint8_t rt, uint8_t req, uint16_t val, uint16_t idx, uin
     g_tap(2, 0, rec, 12, data, (rt & 0x80) ? (r > 0 ? r : 0) : len);
 }
 
-int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len)
+int vti_write_keep(vti *v, uint8_t ep, const uint8_t *data, int len, vti_keep_fn keep, void *u)
 {
     if (g_tap) // before the transfer: the order on the wire
         g_tap(0, ep, data, len, NULL, 0);
-    struct write_ctx c = {iface_for(v, ep), ep, 0};
-    int timeouts = 0;
-    // a timed-out packet was NAKed, never taken (the link is lossless, E239): try again, up to 5 s in a row
-    int r = vti_write_chunks(&c, write_packet, data, len, len > 0 ? len : 1, 5, &timeouts);
+    struct write_ctx c = {v, iface_for(v, ep), ep, 0, keep, u};
+    int max = ep == VTI_EP_MI03_OUT ? 8 : 32, timeouts = 0; // wMaxPacketSize, as the libusb backend
+    // a timed-out packet was NAKed, never taken (the link is lossless, E239): try it again while the Virus is busy
+    int r = vti_write_chunks(&c, write_packet, data, len, max, VTI_WRITE_TRIES, &timeouts, write_keep);
     if (timeouts)
-        vti_log("vti: write ep %02x: %d timeout(s), %s\n", ep, timeouts, r ? "gave up" : "then accepted");
+        vti_log("vti: write ep %02x: %d timeout(s), %s\n", ep, timeouts,
+                !r ? "then accepted" : r == VTI_WRITE_STOPPED ? "stopped (device or client gone)" : "gave up");
+    if (r == VTI_WRITE_STUCK) { // the existing failed-device path closes and reopens it (writeretry.h)
+        vti_log("vti: write ep %02x: refused for %d s: treating the Virus as failed\n", ep, VTI_WRITE_TRIES);
+        v->dead = 1;
+    }
     if (r && c.err)
         vti_log("vti: write ep %02x: error %lu\n", ep, c.err);
+    // a stalled OUT pipe refuses every later write until its halt is cleared (R3-5; the libusb backend does it, E503)
+    if (r && c.err == ERROR_GEN_FAILURE)
+        WinUsb_ResetPipe(c.f->usb, ep);
     return r;
 }
+
+int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len) { return vti_write_keep(v, ep, data, len, NULL, NULL); }
 
 int vti_control(vti *v, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint8_t *data,
                 uint16_t len)

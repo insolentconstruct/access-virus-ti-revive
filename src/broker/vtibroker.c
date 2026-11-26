@@ -40,7 +40,22 @@
 static HANDLE g_log = INVALID_HANDLE_VALUE;
 static int g_verbose;
 static CRITICAL_SECTION g_cs_log, g_cs_dev, g_cs_clients;
+// The TX path (T5, R12-5): a write to a busy Virus can wait many seconds (writeretry.h), and it used to hold g_cs_dev
+// all that time, so control requests, audio, client close and the failed-device check waited for it. Now every
+// write holds g_cs_tx for its whole message instead (one message is never mixed with another on the wire), and the
+// device is opened and closed with g_cs_tx and g_cs_dev both held, so either lock keeps g_dev valid. g_cs_dev alone
+// stays for everything else. Order: g_cs_tx, then g_cs_dev, then g_cs_clients; never g_cs_tx while holding g_cs_dev.
+static CRITICAL_SECTION g_cs_tx;
+static volatile LONG g_quit; // exiting: a write waiting on a busy Virus stops (keep_tx)
 static vti *g_dev;
+
+// a write waiting on a busy Virus goes on while the broker runs and (pipe != NULL) its client is still connected;
+// shortcut: a client gone with unread messages in its pipe still peeks fine, its message then ends at the bound
+static int keep_tx(void *pipe)
+{
+    DWORD avail;
+    return !g_quit && (!pipe || PeekNamedPipe(*(HANDLE *)pipe, NULL, 0, NULL, &avail, NULL));
+}
 
 #define QUEUE_BYTES (256 * 1024)
 
@@ -637,21 +652,29 @@ static DWORD WINAPI device_thread(LPVOID unused)
             if (g_exiting) {
                 blog("no clients for %d s: exiting", IDLE_EXIT_MS / 1000);
                 vti_keyport_log_counts();
+                g_quit = 1;
+                EnterCriticalSection(&g_cs_tx);
                 EnterCriticalSection(&g_cs_dev);
                 if (g_dev)
                     vti_close(g_dev);
                 ExitProcess(0);
             }
         }
+        // the TX lock only to close or open the device: a write waiting on a busy Virus does not hold up the rest
         EnterCriticalSection(&g_cs_dev);
-        if (g_dev && vti_is_dead(g_dev)) {
+        const int swap = !g_dev || vti_is_dead(g_dev);
+        LeaveCriticalSection(&g_cs_dev);
+        if (swap)
+            EnterCriticalSection(&g_cs_tx);
+        EnterCriticalSection(&g_cs_dev);
+        if (swap && g_dev && vti_is_dead(g_dev)) {
             blog("device failed: closing");
             vti_close(g_dev);
             g_dev = NULL;
             uint32_t st = 0;
             broadcast(VTIMSG_STATE, &st, 4, NULL, 0);
         }
-        if (!g_dev) {
+        if (swap && !g_dev) {
             g_dev = vti_open(on_rx, NULL); // starts the IN readers, then sends the handshake
             if (g_dev) {
                 g_dev_gen++;
@@ -670,6 +693,8 @@ static DWORD WINAPI device_thread(LPVOID unused)
             g_rate_lever = 1;
         int open = g_dev != NULL;
         LeaveCriticalSection(&g_cs_dev);
+        if (swap)
+            LeaveCriticalSection(&g_cs_tx);
         static ULONGLONG last_status;
         if (GetTickCount64() - last_status >= 1000) {
             last_status = GetTickCount64();
@@ -799,11 +824,11 @@ static DWORD WINAPI client_thread(LPVOID arg)
             if (h.len >= 1 && !c->observer && !waits) {
                 if (buf[0] == VTI_EP_MI04_OUT && !c->notes && vti_has_note_on(buf + 1, h.len - 1))
                     c->notes = 1;
-                EnterCriticalSection(&g_cs_dev);
+                EnterCriticalSection(&g_cs_tx); // the whole message, without g_cs_dev (above)
                 if (g_dev && vti_link_on_now(vti_linked(g_dev))) // the last user had unlinked it (E524)
                     vti_link(g_dev, 1);
-                int r = g_dev ? vti_write(g_dev, buf[0], buf + 1, h.len - 1) : -1;
-                LeaveCriticalSection(&g_cs_dev);
+                int r = g_dev ? vti_write_keep(g_dev, buf[0], buf + 1, h.len - 1, keep_tx, &c->pipe) : -1;
+                LeaveCriticalSection(&g_cs_tx);
                 if (g_verbose || r)
                     blog("write ep%02x %d bytes -> %d", buf[0], h.len - 1, r);
             }
@@ -864,9 +889,9 @@ static DWORD WINAPI client_thread(LPVOID arg)
     if (c->notes) { // a DAW that crashed or was killed cannot send its note-offs any more
         uint8_t off[256];
         int n = vti_pack_notes_off(off, sizeof off);
-        EnterCriticalSection(&g_cs_dev);
-        int r = g_dev && n > 0 ? vti_write(g_dev, VTI_EP_MI04_OUT, off, n) : -1;
-        LeaveCriticalSection(&g_cs_dev);
+        EnterCriticalSection(&g_cs_tx);
+        int r = g_dev && n > 0 ? vti_write_keep(g_dev, VTI_EP_MI04_OUT, off, n, keep_tx, NULL) : -1;
+        LeaveCriticalSection(&g_cs_tx);
         blog("all notes off (the client had played notes) -> %d", r);
     }
     audio_request(c, 0, NULL, 0);
@@ -884,10 +909,10 @@ static DWORD WINAPI client_thread(LPVOID arg)
     }
     LeaveCriticalSection(&g_cs_clients);
     if (!c->observer) {
-        EnterCriticalSection(&g_cs_dev);
+        EnterCriticalSection(&g_cs_tx); // a write
         if (g_dev && vti_link_off_now(vti_linked(g_dev), users))
             vti_link(g_dev, 0);
-        LeaveCriticalSection(&g_cs_dev);
+        LeaveCriticalSection(&g_cs_tx);
     }
     if (next) {
         blog("the next program's plug-in owns the Virus now");
@@ -921,6 +946,7 @@ int main(int argc, char **argv)
     g_t0 = GetTickCount64();
     InitializeCriticalSection(&g_cs_log);
     InitializeCriticalSection(&g_cs_dev);
+    InitializeCriticalSection(&g_cs_tx);
     InitializeCriticalSection(&g_cs_pre);
     vti_set_tap(obs_traffic); // everything to the Virus, the broker's own writes and control requests included
     InitializeCriticalSection(&g_cs_clients);

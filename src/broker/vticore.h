@@ -49,6 +49,10 @@ void vti_set_tap(vti_tap_cb cb);
 
 // Interrupt OUT of raw bytes, split into wMaxPacketSize chunks. Returns 0 on success.
 int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len);
+// The same, and keep(u) is asked while a packet waits on a busy Virus: 0 = stop (the client left, the broker exits).
+// Returns 0 when the whole message went, else a VTI_WRITE_* code of writeretry.h (the rest of it was not sent).
+typedef int (*vti_keep_fn)(void *u);
+int vti_write_keep(vti *v, uint8_t ep, const uint8_t *data, int len, vti_keep_fn keep, void *u);
 
 // Control transfer on the default pipe (8-byte setup + data). Returns bytes transferred or -1.
 int vti_control(vti *v, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint8_t *data,

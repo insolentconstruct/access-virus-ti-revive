@@ -80,6 +80,13 @@ typedef struct {
 static client *g_clients[MAX_CLIENTS];
 static pthread_mutex_t g_cs_clients = PTHREAD_MUTEX_INITIALIZER, g_cs_dev = PTHREAD_MUTEX_INITIALIZER,
                        g_cs_log = PTHREAD_MUTEX_INITIALIZER;
+// The TX path (T5, R12-5): a write to a busy Virus can wait many seconds (writeretry.h), and it used to hold g_cs_dev
+// all that time, so control requests, audio, client close and the failed-device check waited for it. Now every
+// write holds g_cs_tx for its whole message instead (one message is never mixed with another on the wire), and the
+// device is opened and closed with g_cs_tx and g_cs_dev both held, so either lock keeps g_dev valid. g_cs_dev alone
+// stays for everything else. Order: g_cs_tx, then g_cs_dev, then g_cs_clients; never g_cs_tx while holding g_cs_dev.
+static pthread_mutex_t g_cs_tx = PTHREAD_MUTEX_INITIALIZER;
+static volatile int g_quit; // exiting: a write waiting on a busy Virus stops (keep_tx)
 static vti *g_dev;
 static int g_verbose, g_stay;
 
@@ -879,12 +886,32 @@ static void audio_stop(void) // g_cs_dev held
              (unsigned long long)g_out_underruns, (unsigned long long)g_out_dropped);
 }
 
+// a write waiting on a busy Virus goes on while the broker runs and (client != NULL) its client is still connected:
+// a closed socket shows as POLLHUP even with unread messages in it (Linux AF_UNIX); TCP (Wine) as POLLRDHUP
+static int keep_tx(void *client_fd)
+{
+    if (g_quit)
+        return 0;
+    if (!client_fd)
+        return 1;
+#ifdef POLLRDHUP
+    struct pollfd p = {*(int *)client_fd, POLLRDHUP, 0};
+#else
+    struct pollfd p = {*(int *)client_fd, 0, 0};
+#endif
+    return poll(&p, 1, 0) <= 0 || !(p.revents & (POLLHUP | POLLERR | POLLNVAL
+#ifdef POLLRDHUP
+                                                 | POLLRDHUP
+#endif
+                                                 ));
+}
+
 #ifdef __APPLE__
 static int midi_write(const uint8_t *data, int len) // pump thread: plug-in channel packets from the MDW ring
 {
-    pthread_mutex_lock(&g_cs_dev);
-    int r = g_dev ? vti_write(g_dev, VTI_EP_MI04_OUT, data, len) : -1;
-    pthread_mutex_unlock(&g_cs_dev);
+    pthread_mutex_lock(&g_cs_tx);
+    int r = g_dev ? vti_write_keep(g_dev, VTI_EP_MI04_OUT, data, len, keep_tx, NULL) : -1;
+    pthread_mutex_unlock(&g_cs_tx);
     return r;
 }
 #endif
@@ -920,6 +947,8 @@ static void *device_thread(void *unused)
             if (g_exiting) {
                 blog("no clients for %d s: exiting", IDLE_EXIT_S);
                 vti_keyport_log_counts();
+                g_quit = 1;
+                pthread_mutex_lock(&g_cs_tx);
                 pthread_mutex_lock(&g_cs_dev);
                 audio_stop();
                 if (g_dev)
@@ -927,8 +956,14 @@ static void *device_thread(void *unused)
                 exit(0);
             }
         }
+        // the TX lock only to close or open the device: a write waiting on a busy Virus does not hold up the rest
         pthread_mutex_lock(&g_cs_dev);
-        if (g_dev && vti_is_dead(g_dev)) {
+        const int swap = !g_dev || vti_is_dead(g_dev);
+        pthread_mutex_unlock(&g_cs_dev);
+        if (swap)
+            pthread_mutex_lock(&g_cs_tx);
+        pthread_mutex_lock(&g_cs_dev);
+        if (swap && g_dev && vti_is_dead(g_dev)) {
             blog("device failed: closing");
             audio_stop();
             vti_close(g_dev);
@@ -937,7 +972,7 @@ static void *device_thread(void *unused)
             send_states(0);
             pthread_mutex_unlock(&g_cs_clients);
         }
-        if (!g_dev && (g_dev = vti_open(on_rx, NULL))) {
+        if (swap && !g_dev && (g_dev = vti_open(on_rx, NULL))) {
             g_dev_gen++;
             blog("device open, handshake sent");
             // Virus 2+ (#45): its ports only when it exists - a second plug-in instance with one Virus starts broker 2
@@ -974,6 +1009,8 @@ static void *device_thread(void *unused)
             vti_relock_reset(&g_relock);
         int open = g_dev != NULL;
         pthread_mutex_unlock(&g_cs_dev);
+        if (swap)
+            pthread_mutex_unlock(&g_cs_tx);
         static uint32_t last_status;
         if (uptime_ms() - last_status >= 1000) {
             last_status = uptime_ms();
@@ -992,6 +1029,8 @@ static void *signal_thread(void *arg)
     int sig = 0;
     sigwait(set, &sig);
     blog("signal %d: exiting", sig);
+    g_quit = 1;
+    pthread_mutex_lock(&g_cs_tx);
     pthread_mutex_lock(&g_cs_dev);
     audio_stop();
     if (g_dev)
@@ -1162,11 +1201,11 @@ static void *client_thread(void *arg)
             if (h.len >= 1 && may_use(c)) {
                 if (buf[0] == VTI_EP_MI04_OUT && !c->notes && vti_has_note_on(buf + 1, h.len - 1))
                     c->notes = 1;
-                pthread_mutex_lock(&g_cs_dev);
+                pthread_mutex_lock(&g_cs_tx); // the whole message, without g_cs_dev (above)
                 if (g_dev && vti_link_on_now(vti_linked(g_dev))) // the last user had unlinked it (E524)
                     vti_link(g_dev, 1);
-                int r = g_dev ? vti_write(g_dev, buf[0], buf + 1, h.len - 1) : -1;
-                pthread_mutex_unlock(&g_cs_dev);
+                int r = g_dev ? vti_write_keep(g_dev, buf[0], buf + 1, h.len - 1, keep_tx, &c->fd) : -1;
+                pthread_mutex_unlock(&g_cs_tx);
                 if (g_verbose && buf[0] == VTI_EP_MI04_OUT)
                     f5_note(buf + 1, h.len - 1);
                 if (g_verbose && g_shm) // note-ons (cable 2) with the device frame they were sent at
@@ -1185,9 +1224,11 @@ static void *client_thread(void *arg)
                               // come back and sends STATE 0 / 1 as on a replug
             if (c->observer || !may_use(c))
                 break;
+            pthread_mutex_lock(&g_cs_tx); // a software replug: not under a write in flight
             pthread_mutex_lock(&g_cs_dev);
             int r = g_dev ? vti_reenumerate(g_dev) : -1;
             pthread_mutex_unlock(&g_cs_dev);
+            pthread_mutex_unlock(&g_cs_tx);
             vti_log("re-enumerate after a sleep (E472): %d%s\n", r, r == -2 ? " (skipped, the last one was less than 60 s ago)" : "");
             break;
         }
@@ -1265,12 +1306,13 @@ static void *client_thread(void *arg)
     if (c->observer)
         obs_detach(c);
     blog("client disconnected%s", c->observer ? " (observer)" : "");
-    pthread_mutex_lock(&g_cs_dev);
+    pthread_mutex_lock(&g_cs_tx); // the writes below, and g_dev stays open until the end
     if (c->notes && g_dev) { // a DAW that crashed or was killed cannot send its note-offs any more
         uint8_t off[256];
         int n = vti_pack_notes_off(off, sizeof off);
-        blog("all notes off (the client had played notes) -> %d", n > 0 ? vti_write(g_dev, VTI_EP_MI04_OUT, off, n) : -1);
+        blog("all notes off (the client had played notes) -> %d", n > 0 ? vti_write_keep(g_dev, VTI_EP_MI04_OUT, off, n, keep_tx, NULL) : -1);
     }
+    pthread_mutex_lock(&g_cs_dev);
     pthread_mutex_lock(&g_cs_clients);
     for (int i = 0; i < MAX_CLIENTS; i++)
         if (g_clients[i] == c)
@@ -1278,8 +1320,7 @@ static void *client_thread(void *arg)
     int users = 0; // plug-ins and the Control Center: when the last one is gone, unlink like the original (E524)
     for (int i = 0; i < MAX_CLIENTS; i++)
         users += g_clients[i] && !g_clients[i]->observer;
-    if (!c->observer && g_dev && vti_link_off_now(vti_linked(g_dev), users))
-        vti_link(g_dev, 0);
+    const int unlink = !c->observer && g_dev && vti_link_off_now(vti_linked(g_dev), users);
     if (g_owner == c) { // hand the Virus to the next waiting program's plug-in
         g_owner = NULL;
         audio_stop();
@@ -1293,6 +1334,9 @@ static void *client_thread(void *arg)
     }
     pthread_mutex_unlock(&g_cs_clients);
     pthread_mutex_unlock(&g_cs_dev);
+    if (unlink) // a write: under g_cs_tx only; the next owner's first write waits for it and links again (E524)
+        vti_link(g_dev, 0);
+    pthread_mutex_unlock(&g_cs_tx);
     close(c->fd);
     pthread_mutex_destroy(&c->wr);
     free(c);

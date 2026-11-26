@@ -18,6 +18,9 @@ void bh_serve(int fd);
 int bh_clients(void);
 int bh_observers(void);
 int bh_writes(uint8_t *last, int *len);
+void bh_busy(int on);
+int bh_inside(void);
+int bh_stopped(void);
 }
 
 namespace {
@@ -159,6 +162,70 @@ TEST(broker_second_hello_changes_nothing)
     CHECK_EQ(next_state(p), 1); // the owner, not waiting
     close(cc);
     close(p);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+namespace {
+// the reply to one control request (seq), -2 when none comes within `ms`
+int control_reply(int fd, uint32_t seq, int ms)
+{
+    for (;;) {
+        pollfd p{fd, POLLIN, 0};
+        vtimsg h;
+        uint8_t b[VTIMSG_MAX];
+        if (poll(&p, 1, ms) != 1 || ::read(fd, &h, sizeof h) != (ssize_t)sizeof h)
+            return -2;
+        for (size_t got = 0; got < h.len;) {
+            const ssize_t r = ::read(fd, b + got, h.len - got);
+            if (r <= 0)
+                return -2;
+            got += (size_t)r;
+        }
+        uint32_t s;
+        memcpy(&s, b, 4);
+        if (h.type == VTIMSG_CONTROL_REPLY && h.len >= 8 && s == seq)
+            return 0;
+    }
+}
+} // namespace
+
+TEST(broker_busy_write_does_not_hold_control_requests)
+{
+    // T5 (R12-5): a write waiting on a busy Virus held the global device lock, so another client's control request
+    // (and audio, close, the dead-device check) waited for it. Now only the TX path waits; one message stays whole
+    // on the wire, so a second client's write waits for the first message to end.
+    bh_device(1);
+    bh_busy(1);
+    int a = client(), b = client();
+    msg(a, VTIMSG_WRITE, {0x06, 0x29, 0x90, 0x3C, 0x64});
+    CHECK(until([] { return bh_inside() == 1; }));
+    // GET_DESCRIPTOR (device), a standard read
+    msg(b, VTIMSG_CONTROL, {7, 0, 0, 0, 0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00});
+    CHECK_EQ(control_reply(b, 7, 1000), 0);
+    msg(b, VTIMSG_WRITE, {0x06, 0x29, 0x80, 0x3C, 0x00});
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK_EQ(writes(), 1); // b's message waits: never inside a's
+    bh_busy(0);
+    CHECK(until([] { return writes() == 2 && bh_inside() == 0; }));
+    close(a);
+    close(b);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_busy_write_stops_when_its_client_goes)
+{
+    // T5: the retry loop keeps a message whole while the client is there; a client that left does not hold the TX
+    // path for the whole bound
+    bh_device(1);
+    bh_busy(1);
+    int a = client();
+    msg(a, VTIMSG_WRITE, {0x06, 0x29, 0x90, 0x3C, 0x64});
+    CHECK(until([] { return bh_inside() == 1; }));
+    close(a);
+    CHECK(until([] { return bh_stopped() == 1; }));
+    bh_busy(0);
     CHECK(until([] { return bh_clients() == 0; }));
     bh_device(0);
 }
