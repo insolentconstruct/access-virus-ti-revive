@@ -5,6 +5,7 @@
 // warns; an answer takes the warning back. Lock-free: the probe runs on the sync or the reconnect thread. Header only:
 // the plug-in and the tests use it.
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -31,14 +32,19 @@ public:
     bool warned() const { return warned_; }
 
     // the start-up messages (GlobalInit from the user's Access files) that set the cables the Virus answers on:
-    // Output Sounddump, MIDI Data and Panel Data Cable Number (73 00 3A/3B/3C, E039), unchanged, in their order.
-    // Only known traffic goes out again (rule 2); nothing is built here.
+    // Output Sounddump, MIDI Data and Panel Data Cable Number (73 00 3A/3B/3C, E039), and USB MidiPort active = 1
+    // (73 00 52 01): with 0x52 = 0 the firmware sends every answer to the 5-pin MIDI OUT and forces the cables back to
+    // 1 (R9-1, E601). Unchanged; the link first, as a re-send after 0x52 was lost must not have its cables forced
+    // back to 1 before the link is on again, then the cables in their start-up order. Only known traffic goes out
+    // again (rule 2), nothing is built here, and never a link off.
     static std::vector<std::vector<uint8_t>> routing_messages(const std::vector<std::vector<uint8_t>> &startup)
     {
         std::vector<std::vector<uint8_t>> out;
         for (const auto &m : startup)
-            if (m.size() == 11 && m[6] == 0x73 && m[7] == 0x00 && m[8] >= 0x3A && m[8] <= 0x3C)
+            if (m.size() == 11 && m[6] == 0x73 && m[7] == 0x00 &&
+                ((m[8] >= 0x3A && m[8] <= 0x3C) || (m[8] == 0x52 && m[9] == 0x01)))
                 out.push_back(m);
+        std::stable_partition(out.begin(), out.end(), [](const std::vector<uint8_t> &m) { return m[8] == 0x52; });
         return out;
     }
 

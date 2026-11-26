@@ -112,8 +112,8 @@ public:
     // counted as a stop like cancel() (no "no reply" line, no given-up slot, sync_bank returns -2) but not for good
     // (E591 (2)); the plug-in checks the banks again when the Virus is back
     std::function<bool()> present;
-    // optional (the plug-in): sends the reply-cable start-up messages again (AnswerWatch::routing_messages). bank_info
-    // calls it before its 5th and 6th ask, like the original's event 0x22 (0x18008e220, E591, E594)
+    // optional (the plug-in): sends the reply-cable and link start-up messages again (AnswerWatch::routing_messages).
+    // bank_info calls it before its 5th and 6th ask, like the original's event 0x22 (0x18008e220, E591, E594)
     std::function<void()> resend_routing;
     // the waits per ask (the original's 5 s and 10 s, E591) and the pause after each before the next (E145); tests
     // shorten them

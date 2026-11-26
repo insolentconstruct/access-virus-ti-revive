@@ -1597,7 +1597,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     // the check runs again when it is back (every return comes with on_device(true), also a bounce)
     sync_->present = [this] { return out_->connected() && out_->has_virus(); };
     // a bank info without an answer: the cable messages again before its last asks, like the original (E594). Only
-    // the user's own known start-up messages, 3 per ask, at most twice per bank info (rule 2)
+    // the user's own known start-up messages, 4 per ask (cables and link, E601), at most twice per bank info (rule 2)
     sync_->resend_routing = [this] {
         out_->log("Virus TI native: bank info not answered - routing settings sent again (E594)\n");
         for (auto &m : AnswerWatch::routing_messages(startup_messages()))

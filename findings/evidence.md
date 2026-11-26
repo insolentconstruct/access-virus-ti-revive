@@ -6288,3 +6288,29 @@ host's setState (inferred from the code order, not traced on the wire).
 - **Method:** static analysis (REA/Ghidra 12.1.4 on the user's own file: 0x180060080 and 0x180079b50 re-read for this entry); unit tests (vtitests, Linux)
 - **Confidence:** HIGH (the parse, eLIB and 6F/7E rules: decompiled code) / MED (the Snow's 4 parts and the connect-time multi patch: research R8, not re-read) / open (the effect on a Virus: no routed original project and no Snow tested)
 - **Hardware:** no
+
+### E601
+
+The link global 0x52 in the re-send after missed answers (fix item T16, research R9-1 of 2026-11-26). (1) The
+user's GlobalInit (remotedevice.xml of their Access files, read by the unit test with VTITESTS_VERBOSE) holds
+USB MidiPort active = 1 (global idx 82 = 0x52, E014's list) after the three cable globals: 7A 03, 78, 60, 3B 01,
+3C 02, 3A 03, ... 5E, 5F, 52 01, 41, ... So TI Revive's start-up list (RemoteDevice::init_messages) already sends
+the SysEx `F0 00 20 33 01 10 73 00 52 01 F7` at every start, after the cables, the same message and the same place as
+the original's start-up (E039 capture; E524 (2), whose "from GlobalInit" inference this confirms for the list, not on
+the wire). (2) The firmware reason to send it again: with 0x52 = 0 the host CPU drops the link bit on every main-loop
+pass and forces 3A/3B/3C back to 1, so answers go to the 5-pin MIDI OUT (R9-1, static, HIGH; who would clear 0x52 in a
+session: not found). (3) The original's own miss handler (listener 0x180086bf0, event 0x22, E591, E594) re-sets only
+the three cable globals (research R1, R2, R10); sending 0x52 there too is ours, beyond the original. TI Revive now
+(round 0.8.44): AnswerWatch::routing_messages also takes the start-up's `73 00 52 01`, only that exact message from
+the user's list (never a link off, never built), the link first and then the cables in start-up order, so both re-sends (the first missed probe of a
+connection, E591; before the 5th and 6th bank-info ask, E594) send 4 messages instead of 3. Rule 2: the same known
+write the start-up already makes with the same value, bounded like before; whether 0x52 survives a power cycle was not
+read (store handler not read, R9), but no value goes out that the start-up does not send. Order: the start-up puts
+the cables before 0x52; the re-send puts 0x52 first, because with 0x52 = 0 the firmware forces the cables back to 1 on
+every pass, so cables sent before the link could be undone before it is on again (inferred from (2), not run). The raw handshake form `4E 73 52 01` of the broker (E524 (1)) is a different message and is not touched.
+
+- **Date:** 2026-11-26
+- **Pointer:** native/src/device/answerwatch.h (routing_messages); native/plugin/source/virusplugin.cpp (resend_routing, the probe miss); native/tests/test_answerwatch.cpp, native/tests/test_access.cpp; work/research-2026-11-26 R9 (R9-1), R1, R2, R10; E014, E039, E524, E591, E594
+- **Method:** the user's own GlobalInit read through the unit test (vtitests, Linux); research R9 (static, firmware listings); code
+- **Confidence:** HIGH (1) the start-up list / HIGH (2) firmware, static (research R9) / open: what clears 0x52 in a session, whether 0x52 is persistent, the order effect of (2) on a real Virus
+- **Hardware:** no
