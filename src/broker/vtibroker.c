@@ -80,6 +80,7 @@ typedef struct {
     uint32_t written;        // T7: data bytes of all its WRITE messages handled (VTIMSG_WRITTEN)
     uint32_t unsent;         // R11-7: its WRITE messages not sent (refused by rule 2, not the owner, failed)
     int sent;                // the WRITE message being handled went to the Virus
+    uint64_t since;          // T23: when it said HELLO as the plug-in (g_cs_clients); the longest waiting owns it next
 } client;
 static client *g_clients[MAX_CLIENTS];
 
@@ -91,10 +92,12 @@ static client *g_clients[MAX_CLIENTS];
 static client *g_plugin_owner; // g_cs_clients
 static int is_plugin(const client *c) { return vti_is_plugin(c->name); }
 static int plugin_waits(const client *c) { return vti_client_waits(is_plugin(c), c == g_plugin_owner); } // g_cs_clients held
-static client *next_plugin_owner(void) // g_cs_clients held, no owner: the next waiting plug-in (another program) takes over
+static uint64_t g_hellos; // g_cs_clients: counts plug-in HELLOs, gives each its `since`
+static client *next_plugin_owner(void) // g_cs_clients held, no owner: the longest waiting plug-in (another program) takes over
 {
-    for (int i = 0; i < MAX_CLIENTS && !g_plugin_owner; i++)
-        if (g_clients[i] && !g_clients[i]->observer && is_plugin(g_clients[i]))
+    for (int i = 0; i < MAX_CLIENTS; i++) // T23: by HELLO order, not slot: slots are reused
+        if (g_clients[i] && !g_clients[i]->observer && is_plugin(g_clients[i]) &&
+            (!g_plugin_owner || g_clients[i]->since < g_plugin_owner->since))
             g_plugin_owner = g_clients[i];
     return g_plugin_owner;
 }
@@ -792,6 +795,8 @@ static DWORD WINAPI client_thread(LPVOID arg)
                 for (char *p = c->name; *p; p++)
                     if ((unsigned char)*p < 32)
                         *p = ' ';
+                if (is_plugin(c))
+                    c->since = ++g_hellos;
                 if (is_plugin(c) && !g_plugin_owner)
                     g_plugin_owner = c;
                 LeaveCriticalSection(&g_cs_clients);

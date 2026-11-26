@@ -148,6 +148,30 @@ TEST(broker_owner_hands_over_on_observe_and_close)
     bh_device(0);
 }
 
+TEST(broker_next_owner_is_the_longest_waiting)
+{
+    // T23: the next owner was the waiting plug-in in the lowest slot; slots are reused, so a plug-in that came later
+    // into a freed lower slot jumped ahead of one that had waited longer
+    bh_device(1);
+    int a = client(), gap = client(), b = client();
+    hello(a, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(a), 1);
+    hello(b, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(b), 2);
+    close(gap); // frees the slot between a and b
+    CHECK(until([] { return bh_clients() == 2; }));
+    int c = client(); // takes the freed lower slot
+    hello(c, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(c), 2);
+    close(a);
+    CHECK_EQ(next_state(b), 1); // b has waited longest
+    close(b);
+    CHECK_EQ(next_state(c), 1);
+    close(c);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
 TEST(broker_second_hello_changes_nothing)
 {
     // B11 (the POSIX side of B6): the name and the owner are decided with the first HELLO; a client that says it is

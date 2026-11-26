@@ -97,12 +97,14 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    owner = user/SYSTEM/Administrators) -> win11 VM, normal + elevated DAW, before the release; ASIO stop-from-callback (D3); macOS broker/keyport (B8). Left:
    directmon.h `which` param (needs plug-in caller), plug-in still waits 3 s on Broker::audio (late replies now dropped),
    store_patch refusing an unsynced RAM bank ("Not saved") is kept, decided by the user 2026-11-26.
-0c. **Research original vs ours (2026-11-26) done, nothing fixed yet:** 12 static agents (REA, no hardware), merged
-   findings F1-F14 + ranking in work/research-2026-11-26/SUMMARY.md (reports R1-R12.md there). Top: F1 one dead slot
-   ends the whole RAM sync (original: placeholder, goes on), F2 sync never re-run after a reconnect, F3 broker drops
-   the rest of a message after 5 x 1 s NAK, F4 stale cache used as good, F5 setState without note hold. Evidence
-   entries not written yet (add with the fixes). User 2026-11-26: fix ALL, one worker at a time, todo
-   work/fix-todo-2026-11-26.md (T1-T23, tick + summary each; done only when all resolved). T1 (E594), T2, T3 (E595), T4, T5, T6 (E596), T7 (E597, protocol 6), T8-T14 done (T14 audio NP 4 = top hardware risk, hil.sh owed), T15 (E600), T16 (E601), T17-T22 done, T23 (broker hand-over order, found by T22) next (T22 added: flaky brokertests).
+0c. **Research original vs ours (2026-11-26): ALL FIXED, nothing run on hardware.** 12 static agents
+   (work/research-2026-11-26/SUMMARY.md, R1-R12.md), then T1-T23 one worker at a time (work/fix-todo-2026-11-26.md:
+   23 resolved with summary, 9 kept with reason), commits 01aceeb..HEAD, E594-E602, broker protocol 6 (WRITTEN +
+   OWNER). vtitests 1081, brokertests 13, ctest 8/8 (serial + -j4), Linux broker + mingw exes clean; macOS not built.
+   OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
+   (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
+   own TI2: a request that never answers (T1), reconnect + late Virus (T3/T4), state upload with notes (T7/T8/T9),
+   SAVE/sort/close (T2/T11), CC backup + restore into a user-named RAM bank (T19), original routed project (T15).
 1. **Quiet issues:** #47 + #45 reach 7 days on 2026-11-26 (close message, with the user), #53 on 2026-11-30, #42 asked
    nothing since 11-20 (reporter promised a weekend test). #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log.
 2. **#37 after A+B (code in since rc8, E589):** still open: a burst without a Play window (setActive alone, Play again

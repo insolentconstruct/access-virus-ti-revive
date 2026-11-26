@@ -80,6 +80,7 @@ typedef struct {
     uint32_t written;   // T7: data bytes of all its WRITE messages handled (VTIMSG_WRITTEN)
     uint32_t unsent;    // R11-7: its WRITE messages not sent (refused by rule 2, not the owner, failed)
     int sent;           // the WRITE message being handled went to the Virus
+    uint64_t since;     // T23: when it said HELLO as the plug-in (g_cs_clients); the longest waiting owns it next
 } client;
 
 static client *g_clients[MAX_CLIENTS];
@@ -245,10 +246,12 @@ static void send_states(int dev_open) // g_cs_clients held
         }
 }
 
-static void next_owner(void) // g_cs_dev and g_cs_clients held: the next waiting plug-in takes over
+static uint64_t g_hellos; // g_cs_clients: counts plug-in HELLOs, gives each its `since`
+static void next_owner(void) // g_cs_dev and g_cs_clients held: the longest waiting plug-in takes over
 {
-    for (int i = 0; i < MAX_CLIENTS && !g_owner; i++)
-        if (g_clients[i] && !g_clients[i]->observer && vti_is_plugin(g_clients[i]->name))
+    for (int i = 0; i < MAX_CLIENTS; i++) // T23: by HELLO order, not slot: slots are reused
+        if (g_clients[i] && !g_clients[i]->observer && vti_is_plugin(g_clients[i]->name) &&
+            (!g_owner || g_clients[i]->since < g_owner->since))
             g_owner = g_clients[i];
     if (g_owner) {
         uint32_t st = g_dev != NULL;
@@ -1175,6 +1178,8 @@ static void *client_thread(void *arg)
                 for (char *p = c->name; *p; p++)
                     if ((unsigned char)*p < 32 || *p == '\t')
                         *p = ' ';
+                if (vti_is_plugin(c->name))
+                    c->since = ++g_hellos;
                 if (vti_is_plugin(c->name) && !g_owner)
                     g_owner = c;
             }
