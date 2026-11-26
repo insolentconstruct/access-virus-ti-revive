@@ -349,7 +349,7 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E592](evidence.md#e592) The fixes for E591's lost SysEx answers (round 0.8.44, after rc8), done by three agents and reviewed by the ... (MED)
 - [E596](evidence.md#e596) One program at a time on the Virus, and one SysEx at a time on the wire; TI Revive's port (fix item T6, ... (open; not on hardware)
 - [E599](evidence.md#e599) USB audio in 4 ms pieces, a gentler fallback read and the ASIO input latency; TI Revive's port (fix item T14, ... (MED; open; not on hardware)
-- [E603](evidence.md#e603) The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with ... (open)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
 ## SysEx and parameter protocol (139)
 
@@ -670,9 +670,9 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E598](evidence.md#e598) The original's stamp clock is host-driven, not the driver's real-time position; this corrects E364 in part ... (MED)
 - [E600](evidence.md#e600) How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 ... (MED; open; not on hardware)
 - [E601](evidence.md#e601) The link global 0x52 in the re-send after missed answers (fix item T16, research R9-1 of 2026-11-26) (open; not on hardware)
-- [E603](evidence.md#e603) The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with ... (open)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
-## Timing, stamps, latency, host blocks (251)
+## Timing, stamps, latency, host blocks (252)
 
 - [E025](evidence.md#e025) Host periodic traffic on EP 0x06 while plugin open: c2 Active Sensing FE (`2F FE 00 00`, median 0.31 s, ... (MED)
 - [E067](evidence.md#e067) Real Win11 PC (user): v0.2.0 loads and is audible, but tempo-synced sound and audio timing drift ("slowdowns ...
@@ -925,6 +925,7 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E598](evidence.md#e598) The original's stamp clock is host-driven, not the driver's real-time position; this corrects E364 in part ... (MED)
 - [E599](evidence.md#e599) USB audio in 4 ms pieces, a gentler fallback read and the ASIO input latency; TI Revive's port (fix item T14, ... (MED; open; not on hardware)
 - [E602](evidence.md#e602) When the original sends Active Sensing (FE), and why TI Revive keeps sending it always (fix item T20, ... (LOW; open; not on hardware)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
 ## Sound problems: crackle, silence, dropouts (200)
 
@@ -1127,7 +1128,7 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E599](evidence.md#e599) USB audio in 4 ms pieces, a gentler fallback read and the ASIO input latency; TI Revive's port (fix item T14, ... (MED; open; not on hardware)
 - [E600](evidence.md#e600) How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 ... (MED; open; not on hardware)
 - [E601](evidence.md#e601) The link global 0x52 in the re-send after missed answers (fix item T16, research R9-1 of 2026-11-26) (open; not on hardware)
-- [E603](evidence.md#e603) The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with ... (open)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
 ## Access software (Virus Control, Control Center, installer) (241)
 
@@ -2055,7 +2056,7 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E599](evidence.md#e599) USB audio in 4 ms pieces, a gentler fallback read and the ASIO input latency; TI Revive's port (fix item T14, ... (MED; open; not on hardware)
 - [E600](evidence.md#e600) How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 ... (MED; open; not on hardware)
 - [E601](evidence.md#e601) The link global 0x52 in the re-send after missed answers (fix item T16, research R9-1 of 2026-11-26) (open; not on hardware)
-- [E603](evidence.md#e603) The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with ... (open)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
 ## Models: Snow, Polar, Keyboard, TI2 (283)
 
@@ -2341,7 +2342,7 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E591](evidence.md#e591) Lost SysEx answers ("Virus ready after 11.5 s (no reply to the probe)", "bank info RAM A: no reply", "single ... (LOW)
 - [E592](evidence.md#e592) The fixes for E591's lost SysEx answers (round 0.8.44, after rc8), done by three agents and reviewed by the ... (MED)
 - [E600](evidence.md#e600) How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 ... (MED; open; not on hardware)
-- [E603](evidence.md#e603) The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with ... (open)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
 ## DAWs (260)
 
@@ -2604,9 +2605,9 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E581](evidence.md#e581) rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 ... (open)
 - [E582](evidence.md#e582) #37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 ... (MED; open)
 - [E583](evidence.md#e583) #54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block ... (not on hardware)
-- [E603](evidence.md#e603) The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with ... (open)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
-## User reports (GitHub issues, forums) (159)
+## User reports (GitHub issues, forums) (160)
 
 - [E115](evidence.md#e115) Report from a user (Reddit): with TI Revive a Virus TI **Snow** is not found by the Snow plug-in; the regular ... (open)
 - [E120](evidence.md#e120) Linux L4 (user, REAPER 7.82 portable, GNOME Wayland, lab Wine 10.0): plug-in loads through yabridge and ...
@@ -2767,6 +2768,7 @@ Entries: 600. Marks after an entry: its lowest confidence level when below HIGH,
 - [E590](evidence.md#e590) #51 (rc7 c7e07331, Windows 11, Studio Pro 8, Apollo Twin, 48 kHz / 256; reporter's description 2026-11-24, ... (MED; open; not on hardware)
 - [E591](evidence.md#e591) Lost SysEx answers ("Virus ready after 11.5 s (no reply to the probe)", "bank info RAM A: no reply", "single ... (LOW)
 - [E592](evidence.md#e592) The fixes for E591's lost SysEx answers (round 0.8.44, after rc8), done by three agents and reviewed by the ... (MED)
+- [E603](evidence.md#e603) Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local ...
 
 ## Safety (rule 2): sends that can hurt the Virus (68)
 
