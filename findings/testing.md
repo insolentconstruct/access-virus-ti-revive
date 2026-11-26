@@ -50,7 +50,7 @@ The installed plug-in in `nativehost` (no DAW), C4 at the start of every second 
 
 - log: "Virus ready after", "sync marker at frame", no "no sync marker", no "audio stood still" (except after
   a sleep);
-- notes: first note within 12 s, none lost, no sounds off the grid, notes until the end;
+- notes: first note within 15 s, none lost, no sounds off the grid, notes until the end;
 - timing: every note within 5 ms of a fitted grid, jitter below 1 ms, drift below 100 ppm;
 - export: the offline part runs at 0.8-1.25x real time (paced to the Virus, E204); after a 4 s stop (real-time
   blocks without notes, like a DAW after a render) playback is on the grid again (the E243 kind of fault: the

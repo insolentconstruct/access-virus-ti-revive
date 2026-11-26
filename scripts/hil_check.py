@@ -17,7 +17,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import timing_analysis  # noqa: E402
 
 ON_GRID_S = 0.020  # an onset this close to the grid is a note; farther = an extra sound
-FIRST_NOTE_S = 12.0  # start-up (connect, state upload, readiness probe) plus the bank cache check
+FIRST_NOTE_S = 15.0  # start-up (connect, state upload, readiness probe) plus the bank cache check, silent since
+# 0.8.44 like the original's (E161): ~11 s with a full cache (2026-11-26), then the next note of the 1 s grid
 MAX_DEV_MS = 5.0
 MAX_JITTER_MS = 1.0
 MAX_DRIFT_PPM = 100.0
