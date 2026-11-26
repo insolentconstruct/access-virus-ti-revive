@@ -102,3 +102,121 @@ TEST(rambackup_plan_fills_the_day_library_then_the_next)
     CHECK(plan.size() == 1 && plan[0].name == "RAM Backup 2026-10-31 2" && plan[0].count == 1);
     CHECK(RamBackup::plan("2026-10-31", count, 0).empty());
 }
+
+// T2 (research R2-1, R7-5): the backup of a slot about to be overwritten comes from the Virus when the cache may be
+// older than the slot. refresh() reads those slots with `read` (the plug-in: MemorySync::single) into `before`.
+struct Reads {
+    std::map<std::pair<int, int>, Patch> virus; // what the Virus holds
+    std::vector<std::pair<int, int>> asked;
+    std::function<Patch(int, int)> fn()
+    {
+        return [this](int bank, int slot) {
+            asked.push_back({bank, slot});
+            auto it = virus.find({bank, slot});
+            return it == virus.end() ? Patch() : it->second;
+        };
+    }
+};
+
+TEST(rambackup_unconfirmed_bank_backs_up_what_the_virus_has)
+{
+    // RAM C was not reached by a failed sync: its cache is from an earlier session, slot 5 changed since
+    std::map<int, std::vector<Patch>> before;
+    before[2].resize(128);
+    for (int p = 0; p < 128; p++)
+        before[2][p] = single(3, p, (uint8_t)p);
+    Reads r;
+    r.virus[{2, 5}] = single(3, 5, 77); // stored on the panel / by another computer
+    std::vector<BankDrop::Write> w = {{2, 5, single(3, 5, 100)}, {2, 6, single(3, 6, 101)}};
+    r.virus[{2, 6}] = single(3, 6, 6);
+    CHECK(RamBackup::refresh(w, before, [](int) { return false; }, r.fn()));
+    CHECK(r.asked.size() == 2); // every written slot of an unconfirmed bank
+    auto lost = RamBackup::lost(w, before);
+    CHECK(lost.size() == 2);
+    CHECK(RamBackup::same_sound(lost[0], single(3, 5, 77))); // the real patch, not the stale cached one
+    CHECK(RamBackup::same_sound(lost[1], single(3, 6, 6)));
+}
+
+TEST(rambackup_unconfirmed_bank_does_not_trust_its_other_slots)
+{
+    // the stale cache says slot 9 holds the patch slot 5 really has: lost() must not count it as kept
+    std::map<int, std::vector<Patch>> before;
+    before[1].resize(128);
+    before[1][9] = single(2, 9, 77);
+    Reads r;
+    r.virus[{1, 5}] = single(2, 5, 77);
+    std::vector<BankDrop::Write> w = {{1, 5, single(2, 5, 1)}};
+    CHECK(RamBackup::refresh(w, before, [](int) { return false; }, r.fn()));
+    auto lost = RamBackup::lost(w, before);
+    CHECK(lost.size() == 1 && RamBackup::same_sound(lost[0], single(2, 5, 77)));
+}
+
+TEST(rambackup_slot_that_cannot_be_read_refuses_the_write)
+{
+    auto before = bank_a(4);
+    Reads r; // the Virus answers nothing
+    BankDrop::Write failed{-1, -1, {}};
+    std::vector<BankDrop::Write> w = {{0, 1, single(1, 1, 50)}};
+    CHECK(!RamBackup::refresh(w, before, [](int) { return true; }, r.fn(), &failed));
+    CHECK(failed.bank == 0 && failed.slot == 1);
+    failed = {-1, -1, {}};
+    CHECK(!RamBackup::refresh(w, before, [](int) { return false; }, r.fn(), &failed));
+    CHECK(failed.bank == 0 && failed.slot == 1);
+}
+
+TEST(rambackup_single_save_reads_the_slot_even_in_a_confirmed_bank)
+{
+    // R7-5: a patch stored on the Virus' panel after the sync is not in the cache
+    auto before = bank_a(4);
+    Reads r;
+    r.virus[{0, 2}] = single(1, 2, 66);
+    std::vector<BankDrop::Write> w = {{0, 2, single(1, 2, 100)}};
+    CHECK(RamBackup::refresh(w, before, [](int) { return true; }, r.fn()));
+    CHECK(r.asked.size() == 1);
+    auto lost = RamBackup::lost(w, before);
+    CHECK(lost.size() == 1 && RamBackup::same_sound(lost[0], single(1, 2, 66)));
+}
+
+TEST(rambackup_confirmed_multi_write_reads_only_what_is_lost)
+{
+    auto before = bank_a(4);
+    Reads r;
+    for (int p = 0; p < 128; p++)
+        r.virus[{0, p}] = single(1, p, (uint8_t)p);
+    // a swap keeps both patches in the bank: nothing to back up, nothing read
+    std::vector<BankDrop::Write> swap = {{0, 0, single(1, 0, 1)}, {0, 1, single(1, 1, 0)}};
+    CHECK(RamBackup::refresh(swap, before, [](int) { return true; }, r.fn()));
+    CHECK(r.asked.empty());
+    // slot 3's patch moves to slot 2 (still in the bank), slot 2's is lost: only slot 2 is read; the empty (given-up,
+    // unknown) slot 60 is read too
+    std::vector<BankDrop::Write> drop = {{0, 2, single(1, 2, 3)}, {0, 3, single(1, 3, 90)}, {0, 60, single(1, 60, 91)}};
+    CHECK(RamBackup::refresh(drop, before, [](int) { return true; }, r.fn()));
+    CHECK(r.asked.size() == 2 && r.asked[0] == std::make_pair(0, 2) && r.asked[1] == std::make_pair(0, 60));
+}
+
+// T2: a rename made from the cached patch renames what the Virus holds when the fresh read differs, so only the name
+// changes on the Virus
+static std::string name_of(const Patch &d)
+{
+    return std::string(d.begin() + 249, d.begin() + 259);
+}
+
+TEST(rambackup_rename_uses_the_fresh_patch)
+{
+    const Patch cached = single(1, 4, 10), fresh = single(1, 4, 55);
+    BankDrop::Write w{0, 4, BankDrop::renamed(cached, "NewName")};
+    BankDrop::address(w.dump, 0, 4);
+    RamBackup::rename_fresh(w, cached, fresh, "NewName");
+    CHECK(RamBackup::same_sound(w.dump, BankDrop::renamed(fresh, "NewName")));
+    CHECK(name_of(w.dump) == "NewName   ");
+    CHECK(w.dump[7] == 1 && w.dump[8] == 4); // RAM A 5
+    // the Virus holds what the cache has: the rename stays as it was
+    const Patch was = w.dump;
+    BankDrop::Write same{0, 4, BankDrop::renamed(cached, "Other")};
+    BankDrop::address(same.dump, 0, 4);
+    const Patch before_same = same.dump;
+    RamBackup::rename_fresh(same, cached, cached, "Other");
+    CHECK(same.dump == before_same);
+    RamBackup::rename_fresh(w, cached, Patch(), "NewName"); // nothing read: unchanged
+    CHECK(w.dump == was);
+}

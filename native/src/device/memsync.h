@@ -11,6 +11,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <map>
@@ -31,6 +32,17 @@ std::string ram_cache_dir(const std::string &base, int slot);
 std::map<int, std::vector<Dump>> load_ram_cache(const std::string &dir);
 // for the log: whose RAM cache folder an instance loaded and how many of its 4 banks (no path, rule 5)
 std::string ram_cache_note(int slot, int banks);
+
+// A bank cache file another program wrote (the Control Center's restore or backup, research R11-2): changed() is true
+// when the file's modification time differs from the one seen last for that path, also the first time; false while
+// the file is missing. The caller compares the content with its own copy, so its own saves cost one load, no reload.
+class FileWatch {
+public:
+    bool changed(const std::string &path);
+
+private:
+    std::map<std::string, std::filesystem::file_time_type> seen_;
+};
 
 class MemorySync {
 public:
@@ -56,7 +68,9 @@ public:
 
     // Bank info of RAM bank 1..4: 128 fingerprints, or empty.
     std::vector<int> bank_info(int bank);
-    Dump single(int bank, int program);
+    // `asks` without an answer before it gives up (3 like the original's sync; the plug-in's read before a RAM write
+    // asks once, research T2)
+    Dump single(int bank, int program, int asks = 3);
 
     // Brings `cache` up to date for RAM bank 1..4; progress(program, fetched) is called per fetched program.
     // Returns the number of fetched programs, -1 when the bank info gets no answer or at the 3rd given-up slot.

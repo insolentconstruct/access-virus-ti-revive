@@ -1080,6 +1080,7 @@ public:
             keep_runloop(); // a new instance's setHostContext may have replaced it (E183)
 #endif
             plugin_->diag_report();
+            plugin_->check_ram_files(); // a Control Center restore wrote a RAM bank's cache file (R11-2)
             tick_info();
             tick_tips();
             tick_alert();

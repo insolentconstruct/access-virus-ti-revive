@@ -593,7 +593,8 @@ public:
         if (bank == SEARCH_BANK)
             return results_title();
         return bank >= LIB_BASE ? library_root(bank - LIB_BASE) + "/" + library_name(bank - LIB_BASE)
-                                : device_name() + "/" + bank_name(bank);
+                                : device_name() + "/" + bank_name(bank) +
+                                      (bank < 4 && !ram_confirmed_[bank].load() ? " (not checked)" : "");
     }
     static std::string bank_name(int bank) // 0..3 = RAM A..D, 4.. = ROM A..
     {
@@ -619,6 +620,9 @@ public:
     std::atomic<int64_t> diag_next_ms_{0}; // diag_report: when the next line is due
     bool diag_enabled();
     void diag_report(); // editor timer and device worker
+    // editor timer (UI thread, at most every 2 s, not while syncing): a RAM bank whose cache file another program
+    // wrote (the Control Center's restore or backup, research R11-2) is reloaded and stays unconfirmed
+    void check_ram_files();
     // what the host really sends for a note (noteprobe.on in the plug-in folder, with the log on, off by default, #30)
     NoteProbe note_probe_;
     bool note_probe_on_ = false;
@@ -804,9 +808,15 @@ private:
     int load_rom_banks();
     std::atomic<uint32_t> user_rom_{0}; // bit i = ROM bank A+i is a user bank (set by the sync thread, read by others)
     std::string ram_cache_from_; // the folder banks_ RAM A..D came from (load_banks, sync_banks)
+    // RAM A..D compared with the Virus by this session's sync (or a full download). The cache of a bank not confirmed
+    // may be from an earlier session (a failed or stopped sync, a Control Center restore): the browser marks it and a
+    // write reads its slots from the Virus for the backup first (research T2, RamBackup::refresh)
+    std::array<std::atomic<bool>, 4> ram_confirmed_{};
+    FileWatch ram_files_;            // check_ram_files (UI thread)
+    int64_t ram_files_checked_ms_ = 0;
     std::string user_rom_dir_; // their cache folder <cache>/rom-<key> (userrom.h); only the sync thread uses it
     std::atomic<bool> syncing_{false};
-    std::atomic<bool> downloading_{false}; // download_bank's thread is reading a bank
+    std::atomic<bool> downloading_{false}; // download_bank's or send_ram_writes' thread runs (one RAM job at a time)
     std::thread download_thread_;
     std::mutex download_mu_; // starting / joining download_thread_
     std::atomic<bool> starting_{false}; // start-up messages + state on their way: note-ons are held back
@@ -917,10 +927,17 @@ private:
 #endif
     std::atomic<bool> gesture_timer_ran_{false};
     std::atomic<int> editors_open_{0};
-    bool send_ram_writes(const std::vector<BankDrop::Write> &w); // dumps into RAM slots + cache + cache files
+    // starts write_ram on the background RAM thread (download_thread_); false: refused, a RAM operation runs. `rename`:
+    // the new name of a one-slot rename (applied to the patch read from the Virus); `on_fail` when nothing is written
+    bool send_ram_writes(std::vector<BankDrop::Write> w, const std::string &rename = std::string(),
+                         std::function<void()> on_fail = nullptr);
+    bool write_ram(std::vector<BankDrop::Write> &w, const std::string &rename); // backup, dumps, cache + cache files
     // the patches `w` would overwrite into the day's "RAM Backup" library (rambackup.h); false = not backed up, the
-    // caller writes nothing (write policy 2026-10-31)
-    bool backup_ram(const std::vector<BankDrop::Write> &w);
+    // caller writes nothing (write policy 2026-10-31). Reads slots from the Virus first where needed (blocks)
+    bool backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename);
+    // true (log + LCD `lcd` "bank sync running" / "the last RAM operation still runs") while a sync or a RAM
+    // operation runs
+    bool ram_busy(const char *what, int bank, const char *lcd = "RAM not written:");
     std::mutex undo_mu_;
     UndoHistory undo_; // editor edits (undo_mu_); ui_set and load_dump record, setState clears
     bool apply_undo(bool redo);

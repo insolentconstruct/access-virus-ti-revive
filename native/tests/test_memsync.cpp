@@ -621,6 +621,21 @@ TEST(memsync_single_asks_three_times_without_an_answer)
     CHECK(sync.missed());
 }
 
+// T2: the read for a RAM backup asks once (the original's 10 s single wait), so a Virus without an answer ends it
+// after one wait, not three
+TEST(memsync_single_can_ask_once)
+{
+    int asked = 0;
+    MemorySync sync([&](const Bytes &) {
+        asked++;
+        return true;
+    });
+    sync.single_ms = 1, sync.pause_ms = 5;
+    CHECK(sync.single(1, 7, 1).empty());
+    CHECK_EQ(asked, 1);
+    CHECK(sync.missed());
+}
+
 // a bank info is asked 6 times; before the 5th and the 6th ask the reply cables are set again (event 0x22, E591)
 TEST(memsync_bank_info_asks_six_times_and_resends_the_cables_before_the_last_two)
 {
@@ -1211,4 +1226,29 @@ TEST(memsync_ram_cache_note_names_the_folder)
     CHECK(ram_cache_note(0, 4) == "RAM cache: Virus 1's folder, 4 of 4 banks");
     CHECK(ram_cache_note(1, 0) == "RAM cache: Virus 1's folder, 0 of 4 banks");
     CHECK(ram_cache_note(2, 3) == "RAM cache: Virus 2's own folder, 3 of 4 banks");
+}
+
+// T2 (research R11-2): the plug-in notices a bank cache file the Control Center wrote (restore, backup) by its
+// modification time and reloads that bank
+TEST(memsync_file_watch_sees_a_rewritten_cache_file)
+{
+    TempDir t("vtitests-filewatch");
+    const std::string path = (t.dir / "RAM A").string();
+    FileWatch w;
+    CHECK(!w.changed(path)); // no file: nothing to reload
+    Bank b;
+    b[0] = Dump(524, 1);
+    CHECK(save_bank_file(path, b));
+    CHECK(w.changed(path));  // seen the first time: the caller compares it with what it has
+    CHECK(!w.changed(path)); // unchanged
+    b[0] = Dump(524, 2);
+    CHECK(save_bank_file(path, b));
+    // a coarse file system clock could give the rewrite the same time: move it on explicitly
+    std::filesystem::last_write_time(path, std::filesystem::last_write_time(path) + std::chrono::seconds(2));
+    CHECK(w.changed(path));
+    CHECK(!w.changed(path));
+    std::filesystem::remove(path);
+    CHECK(!w.changed(path)); // gone: nothing to reload
+    CHECK(save_bank_file(path, b));
+    CHECK(w.changed(path)); // there again
 }

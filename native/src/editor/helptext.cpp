@@ -51,7 +51,9 @@ const Entry ENTRIES[] = {
      "the whole patch there."},
     {"Browser/Selected Bank", "Patch browser",
      "The banks of the Virus (RAM and ROM) and your patch libraries. Click a patch to select it, double-click to "
-     "load it into the current part, or drag it onto a part strip."},
+     "load it into the current part, or drag it onto a part strip. A RAM bank marked \"(not checked)\" could not be "
+     "compared with the Virus at the start, or the Control Center changed it since: before a patch there is "
+     "overwritten, it is read from the Virus for the RAM backup."},
     {"Repository Actions/Search", "Search",
      "Type to filter the browser by patch name; only matching patches stay bright."},
     {"Repository Actions/Category Filter", "Category filter",

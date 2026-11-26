@@ -64,6 +64,21 @@ std::map<int, std::vector<Dump>> load_ram_cache(const std::string &dir)
     return out;
 }
 
+bool FileWatch::changed(const std::string &path)
+{
+    std::error_code ec;
+    const auto t = std::filesystem::last_write_time(u8path(path), ec);
+    if (ec) {
+        seen_.erase(path);
+        return false;
+    }
+    auto it = seen_.find(path);
+    if (it != seen_.end() && it->second == t)
+        return false;
+    seen_[path] = t;
+    return true;
+}
+
 std::string ram_cache_note(int slot, int banks)
 {
     const std::string whose = slot > 1 ? "Virus " + std::to_string(slot) + "'s own" : "Virus 1's";
@@ -267,7 +282,7 @@ std::vector<int> MemorySync::bank_info(int bank)
     return {};
 }
 
-Dump MemorySync::single(int bank, int program)
+Dump MemorySync::single(int bank, int program, int asks)
 {
     Dump bad; // the last reply with checksums other than ours
     for (int t = 0; t < 3; t++) {
@@ -275,7 +290,7 @@ Dump MemorySync::single(int bank, int program)
         // slot without an answer is given up instead of ending the sync, the third ask is worth its 11.5 s. The
         // original's 4th request goes out with the give-up, unwaited: not sent here (E145)
         Dump r = transact({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x30, (uint8_t)bank, (uint8_t)program, 0xF7},
-                          {0x10, (uint8_t)bank, (uint8_t)program}, single_ms, 3);
+                          {0x10, (uint8_t)bank, (uint8_t)program}, single_ms, asks);
         note_reply("single", bank, program, r.size(), SINGLE_SIZE, t);
         if (r.size() == SINGLE_SIZE) {
             // the Virus sends both checksums as BankDrop computes them (E552): a mismatch is a reply damaged on the
