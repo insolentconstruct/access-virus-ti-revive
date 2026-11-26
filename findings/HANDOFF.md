@@ -114,11 +114,8 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    User Linux: LC4 L2-L6 pass (L5/L6 into RAM D), L7 skipped (no original project), logs clean. LC5 sleep pass
    (work/hil/20261126-204122, slept 46 s). User Windows (VM, Live): WC4 W2
    (buffer 256 only) W3 W4 pass; user's hil-win rerun ALL PASS (results-20261126-205652). Mac: MC4 MC5 M2 pass (user), M1 hil-mac
-   FAIL (Claude): H1-H3 silent, the start-up check re-read RAM D (4 slots changed in L5/L6) and STALLED 11-49 s with
-   no reply/timeout line, the clean sync dropped all notes; H6's 2nd sync read the 4 in 7.8 s. OPEN, top: reproduce on
-   Linux with the pre-L5 RAM D cache (work/cache-backup-2026-11-26/RAM D; current one saved as RAM D.after-L5);
-   out queue was 0 during the stall (not the transact queue wait); suspect wait_until_quiet()'s uncapped dumping()
-   loop or an unlogged reply wait. hil-mac rerun ALL PASS (results-20261126-211945, cache current). Virus on the Mac; checklist scripts/checklists/round-0.8.44.json published as
+   FAIL first, then rerun ALL PASS: NOT a stall (E604) - the clean sync re-read 80 RAM D slots changed in L5 (~1 s each),
+   reproduced on Linux, cache identical after; the stopped-sync log line now gives the count. Virus on Linux; checklist scripts/checklists/round-0.8.44.json published as
    https://claude.ai/artifact/FhiP1yThnqamYEPb36HBig (marks in rounds/0.8.44/marks).
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);

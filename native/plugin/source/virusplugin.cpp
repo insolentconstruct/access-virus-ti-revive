@@ -4197,6 +4197,7 @@ void VirusPlugin::sync_banks(bool at_start)
                 for (size_t p = 0; p < 128 && p < it->second.size(); p++)
                     bank[p] = it->second[p];
         }
+        const int fetched_before = fetched_total; // this bank's count for a stopped sync's log line
         int n = sync_->sync_bank(b + 1, bank, [this, b, &bank, sync_t0, &page, rom_missing, &empty, &fetched_total](
                                                   int p, bool fetched) {
             set_sync_progress(page.progress(b * 128 + p + 1, fetched));
@@ -4226,7 +4227,11 @@ void VirusPlugin::sync_banks(bool at_start)
             } else
                 lcd_dirty_ = true; // only the progress on the LCD (a full repaint costs ~77 ms in REAPER)
         }, &stop_warm_);
-        out_->log("Virus TI native: RAM %c sync: %d fetched\n", 'A' + b, n); // also diag.log: the sync's duration
+        if (n == -2) // "-2 fetched" hid that a stopped sync had read 46 of 82 changed slots (hil-mac 2026-11-26)
+            out_->log("Virus TI native: RAM %c sync: stopped after %d fetched (kept, the next start goes on)\n", 'A' + b,
+                      fetched_total - fetched_before);
+        else
+            out_->log("Virus TI native: RAM %c sync: %d fetched\n", 'A' + b, n); // also diag.log: the sync's duration
         result = n;
         if (n == -2) { // closed while syncing: keep what was fetched, the next start continues
             save_ram(b, bank);

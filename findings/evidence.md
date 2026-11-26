@@ -6352,3 +6352,13 @@ Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2
 - **Method:** log reading (plug-in diag log, broker journal, kernel log)
 - **Confidence:** HIGH (sequence, times; cause told by the user)
 - **Hardware:** yes (TI2 Desktop, Linux)
+
+### E604
+
+No stall: the silent hil-mac items of round 0.8.44 were the clean sync (E161 update) re-reading a bank that had changed elsewhere. In checklist item L5 (Linux) a sort of RAM D changed 80 of its slots (46-127 differ in the cache before and after); the Mac's cache still had the old RAM D. Every hil-mac item (20-60 s) started with that re-read, so the plug-in dropped all notes (H1, H2-1, H2-2, H3 silent) and was closed mid-read; it keeps what was read and the next start goes on (sync_banks, n == -2), so H6's second start read the last 4 slots in 7.8 s and the user's rerun passed (check 3.6 s, nothing to read). Reproduced on Linux (TI2 Desktop) with the pre-L5 RAM D put back in the cache: 46 slots in a 52 s run (about 1 s per slot, the normal pace), the rest in the next run, and the cache then byte-identical to the post-L5 copy; again with a local build: 12 in a 25 s run, 68 in the next (74.8 s), identical. The out queue was empty throughout (stats 'queued 0'). The log line said 'RAM D sync: -2 fetched' for a stopped read, which hid the count and looked like a stall; it now says 'stopped after N fetched (kept, the next start goes on)'. Consequence of the clean sync (maintainer decision): after banks changed on another computer or the front panel, the start can be silent for about 1 s per changed slot (up to ~2 min for a bank).
+
+- **Date:** 2026-11-26
+- **Pointer:** Mac ~/Downloads/TI-Revive-0.8.44-test-c561c9b/hil-mac/hil/results-20261126-210839 and -211945; work/hil/2026-11-26-ramd-repro (git-ignored); native/plugin/source/virusplugin.cpp sync_banks
+- **Method:** hardware runs (nativehost, C4 every second) and comparison of the cache files
+- **Confidence:** HIGH
+- **Hardware:** yes (TI2 Desktop, macOS 27.2.1 and Linux)
