@@ -2,7 +2,7 @@
   "round": "0.8.44",
   "core": "core.json",
   "core_items": ["LC4", "WC4", "MC4", "MC5"],
-  "lead": "Test of 0.8.44 with the CI test build 45879876669 of the round head (7747749): the fixes from the research run (original vs ours, T1-T23: bank sync that goes on past a dead slot, bank check at every connect, broker writes and Windows reads, Control Center refused while a plug-in plays, backups read fresh, 4 ms audio pieces, original projects with routing) and the clean bank sync (no notes and no clock while it runs, like the original). Already done on the local build: hil.sh H1-H6, a block sweep 32-512 at 44.1/48 kHz, a full 512-patch sync with notes (silent, cache identical), your REAPER smoke test and Virus off/on (E603). risk.py: class C on all three systems; by hand: Virus off/on everywhere, sleep on the Mac. Mark each item and add a note where something looks different; Claude reads the marks from this page.",
+  "lead": "Test of 0.8.44 with the CI test build 45880538174 of the round head (c561c9b): the fixes from the research run (original vs ours, T1-T23: bank sync that goes on past a dead slot, bank check at every connect, broker writes and Windows reads, Control Center refused while a plug-in plays, backups read fresh, 4 ms audio pieces, original projects with routing) and the clean bank sync (no notes and no clock while it runs, like the original). Already done on the local build: hil.sh H1-H6, a block sweep 32-512 at 44.1/48 kHz, a full 512-patch sync with notes (silent, cache identical), your REAPER smoke test and Virus off/on (E603). risk.py: class C on all three systems; by hand: Virus off/on everywhere, sleep on the Mac. Mark each item and add a note where something looks different; Claude reads the marks from this page.",
   "rules": [
     "Order: Linux first (the Virus is there), then the Windows VM, later the Mac. Close the DAW before the Virus moves.",
     "Never power-cycle the Virus while it is attached to the VM without telling Claude first (Claude re-attaches it afterwards).",
@@ -109,7 +109,7 @@
     {
       "id": "mac",
       "title": "macOS",
-      "where": "MacBook Air M3, Ableton Live 12 and Logic, the 0.8.44 CI build 45879876669",
+      "where": "MacBook Air M3, Ableton Live 12 and Logic, the 0.8.44 CI build 45880538174",
       "prep": [
         "Plug the Mac into power. Move the Virus' USB cable to the Mac.",
         "Quit every DAW, then double-click <b>Install test build.command</b> in the folder Claude names in the chat (asks for your password). Claude checks the installed files afterwards."
