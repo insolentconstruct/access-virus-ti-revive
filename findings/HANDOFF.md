@@ -93,10 +93,10 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    reset (D) on macOS/Windows, rc9 loaded in a DAW.
 0b. **Code review fixes (2026-11-25) done:** 69 review items, 62 fixed, 7 skipped with reason (work/review-todo-
    2026-11-25.md); commits f609a75, beb1df0 (E593), 92af40a, debc889, 0654c5e; vtitests 963 + brokertests 4 + vlatests 3
-   pass on Linux. Not run anywhere: Windows broker pipe DACL + first-instance (B4-B6) and the client server check (D17) ->
-   win11 VM, normal + elevated DAW, before the release; ASIO stop-from-callback (D3); macOS broker/keyport (B8). Left:
+   pass on Linux. Not run anywhere: Windows broker pipe DACL + first-instance (B4-B6) and the client pipe owner check (D17,
+   owner = user/SYSTEM/Administrators) -> win11 VM, normal + elevated DAW, before the release; ASIO stop-from-callback (D3); macOS broker/keyport (B8). Left:
    directmon.h `which` param (needs plug-in caller), plug-in still waits 3 s on Broker::audio (late replies now dropped),
-   store_patch refuses an unsynced RAM bank ("Not saved" on the LCD; ask instead? user decides), D17 gap (owner SID check).
+   store_patch refusing an unsynced RAM bank ("Not saved") is kept, decided by the user 2026-11-26.
 1. **Quiet issues:** #47 + #45 reach 7 days on 2026-11-26 (close message, with the user), #53 on 2026-11-30, #42 asked
    nothing since 11-20 (reporter promised a weekend test). #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log.
 2. **#37 after A+B (code in since rc8, E589):** still open: a burst without a Play window (setActive alone, Play again

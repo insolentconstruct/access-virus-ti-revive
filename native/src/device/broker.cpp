@@ -12,6 +12,7 @@ extern "C" {
 #include <cstring>
 #ifdef _WIN32
 #include <windows.h>
+#include <aclapi.h>
 #else
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -102,27 +103,31 @@ static bool start_broker(int slot)
     return true;
 }
 
-// the pipe's server runs as this user or as SYSTEM, like the POSIX check (vti_peer_trusted): another user's program
-// could have made the pipe name first. A check that cannot run (no server process id, process or token not readable)
-// lets the connection through: it must never lock the user out of their Virus.
+// the pipe's owner is this user, SYSTEM or the Administrators group (a broker started from an elevated DAW), like
+// the POSIX check (vti_peer_trusted): another user's program could have made the pipe name first. The owner is read
+// through our own handle, so it works even when the server process cannot be opened. A check that cannot run lets
+// the connection through: it must never lock the user out of their Virus.
 static bool server_trusted(HANDLE pipe)
 {
-    ULONG pid = 0;
-    HANDLE proc = GetNamedPipeServerProcessId(pipe, &pid) ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)
-                                                         : nullptr;
-    HANDLE tok = nullptr, me = nullptr;
+    PSID owner = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    HANDLE me = nullptr;
     struct {
         TOKEN_USER u;
         BYTE sid[SECURITY_MAX_SID_SIZE];
-    } peer, mine;
+    } mine;
     DWORD n;
     bool trusted = true;
-    if (proc && OpenProcessToken(proc, TOKEN_QUERY, &tok) && GetTokenInformation(tok, TokenUser, &peer, sizeof peer, &n) &&
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &me) && GetTokenInformation(me, TokenUser, &mine, sizeof mine, &n))
-        trusted = EqualSid(peer.u.User.Sid, mine.u.User.Sid) || IsWellKnownSid(peer.u.User.Sid, WinLocalSystemSid);
-    for (HANDLE x : {me, tok, proc})
-        if (x)
-            CloseHandle(x);
+    if (GetSecurityInfo(pipe, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &sd) ==
+            ERROR_SUCCESS &&
+        owner && OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &me) &&
+        GetTokenInformation(me, TokenUser, &mine, sizeof mine, &n))
+        trusted = EqualSid(owner, mine.u.User.Sid) || IsWellKnownSid(owner, WinLocalSystemSid) ||
+                  IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
+    if (me)
+        CloseHandle(me);
+    if (sd)
+        LocalFree(sd);
     return trusted;
 }
 
