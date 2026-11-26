@@ -113,7 +113,8 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    needs the user's sudo). W1 hil-win: H1/H2-2/H3/H6 pass, H2-1 drift +173 ppm only (8-note fit, VM clock, as 0.8.42).
    User Linux: LC4 L2-L6 pass (L5/L6 into RAM D), L7 skipped (no original project), logs clean. LC5 sleep pass
    (work/hil/20261126-204122, slept 46 s). User Windows (VM, Live): WC4 W2
-   (buffer 256 only) W3 W4 pass; user's hil-win rerun ALL PASS (results-20261126-205652). NEXT: the Mac; checklist scripts/checklists/round-0.8.44.json published as
+   (buffer 256 only) W3 W4 pass; user's hil-win rerun ALL PASS (results-20261126-205652). NEXT: the Mac (was offline;
+   folder ready: work/ci/45880538174/mac-push/TI-Revive-0.8.44-test-c561c9b -> ~/Downloads with mac.sh push); checklist scripts/checklists/round-0.8.44.json published as
    https://claude.ai/artifact/FhiP1yThnqamYEPb36HBig (marks in rounds/0.8.44/marks).
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
