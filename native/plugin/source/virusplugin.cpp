@@ -1426,6 +1426,13 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     // its timeout starts once it is written; an instance without a Virus (handed over, waiting) asks nothing
     sync_->sending = [this] { return out_->busy(); };
     sync_->present = [this] { return out_->has_virus(); };
+    // a bank info without an answer: the cable messages again before its last asks, like the original (E594). Only
+    // the user's own known start-up messages, 3 per ask, at most twice per bank info (rule 2)
+    sync_->resend_routing = [this] {
+        out_->log("Virus TI native: bank info not answered - routing settings sent again (E594)\n");
+        for (auto &m : AnswerWatch::routing_messages(startup_messages()))
+            out_->send(m);
+    };
     out_->on_reply([this](const std::vector<uint8_t> &m) { sync_->feed(m); });
     out_->on_waiting([this](bool waiting) { // worker thread
         // the original's page for a Virus that another program holds (SystemStatus/Error 2 = "VDM not Master":
@@ -3849,6 +3856,7 @@ void VirusPlugin::sync_banks()
     // "Starting up" ends here: straight to "Syncing memory" when a read is certain (as the original), else the editor
     set_start_pages(127, sync_page_at_start(sync_expected, rom_missing) ? 0 : 127);
     sync_->before_request = [this] { return wait_until_quiet(); };
+    sync_->given_up = 0; // the original stops at the 3rd given-up slot of a sync (E594)
     const int64_t sync_t0 = now_ms();
     // like the original: its page "Syncing memory with Virus" (VirusControl/InitialSyncProgress 0..126) covers the
     // editor while banks are fetched; notes still play. Only when a patch is really fetched (startprogress.h): the
@@ -3911,19 +3919,24 @@ void VirusPlugin::sync_banks()
                 lcd_dirty_ = true; // only the progress on the LCD (a full repaint costs ~77 ms in REAPER)
         }, &stop_warm_);
         out_->log("Virus TI native: RAM %c sync: %d fetched\n", 'A' + b, n); // also diag.log: the sync's duration
-        if (n == -2) // closed while syncing: keep what was fetched, the next start continues
-            save_ram(b, bank);
         result = n;
-        if (n < 0)
+        if (n == -2) { // closed while syncing: keep what was fetched, the next start continues
+            save_ram(b, bank);
+            break;
+        }
+        if (n == -1 && sync_->unconfirmed[b + 1].empty()) // no bank info: nothing read, the bank stays as loaded
             break;
         {
+            // also at -1: what was fetched, and given-up slots emptied (E594), so the next start asks for them again
             std::lock_guard<std::mutex> lk(banks_mu_);
             banks_[b].assign(bank.begin(), bank.end());
-            if (n > 0)
+            if (n != 0)
                 drop_.forget(); // the Virus' RAM changed elsewhere: an undo could write over it
         }
         save_ram(b, bank);
         ui_dirty_ = true;
+        if (n < 0) // no bank info, or the 3rd given-up slot: the original stops there too (0x18008e0d0)
+            break;
     }
     // user ROM banks (E381/E382): their programs not cached yet, read like the original - no bank info, each request
     // after its own display message 74 01 7E 04 (read_missing; the capture has only 7E 04 while ROM A is read)
@@ -3982,6 +3995,14 @@ void VirusPlugin::sync_banks()
         lcd_param_ = result < 0 ? "" : "Synchronization done";
         lcd_value_.clear();
         lcd_orig_.clear();
+    }
+    // the original's one message at a given-up slot ("the RAM banks ... will not correspond", 0x180080ba0, E594);
+    // before note_answer, so "The Virus does not answer" wins when both apply
+    if (sync_->given_up > 0) {
+        size_t n = 0; // with the stale slots a stop at the 3rd left unread
+        for (auto &[b, s] : sync_->unconfirmed)
+            n += s.size();
+        lcd_message("RAM banks may be out of date", std::to_string(n) + (n == 1 ? " patch" : " patches") + " not read");
     }
     // after the display above: a sync that ended because the Virus did not answer (not a stop or a wrong size, E591)
     if (result >= 0 || sync_->missed())

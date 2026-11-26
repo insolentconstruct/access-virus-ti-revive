@@ -213,7 +213,7 @@ bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
         error = "cancelled";
         return false;
     }
-    if (n < 0) {
+    if (n < 0 || !sync.unconfirmed[bank].empty()) { // a slot given up (E594): what the Virus has there is unknown
         error = name + ": the Virus did not answer";
         return false;
     }

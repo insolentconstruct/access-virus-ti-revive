@@ -4,10 +4,12 @@
 #include "device/memsync.h"
 #include "model/bankdrop.h"
 #include "model/remotedevice.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <thread>
 #ifndef _WIN32
 #include <csignal>
@@ -38,6 +40,7 @@ struct FakeVirus {
     int corrupt = -1; // this program's dump comes back with a different fingerprint than bank info says
     int corrupt_times = -1; // how many times it does; -1: always
     int short_info = 0;     // this many bank info replies come back cut short (a packet lost on the way); -1: always
+    std::set<int> silent;   // programs whose single dump request gets no reply
     std::function<bool(const Bytes &)> send()
     {
         return [this](const Bytes &m) {
@@ -63,6 +66,8 @@ struct FakeVirus {
                 sync->feed(r);
             } else if (m[6] == 0x30) {
                 int p = m[8];
+                if (silent.count(p))
+                    return true;
                 const bool bad = p == corrupt && corrupt_times != 0;
                 if (bad && corrupt_times > 0)
                     corrupt_times--;
@@ -485,9 +490,9 @@ TEST(memsync_sync_bank_cancel_and_errors)
     CHECK_EQ(sync.sync_bank(1, cache), -2);
     CHECK(cache[0] == v.ram[1][0] && cache[1].empty());
     sync.before_request = nullptr;
-    v.corrupt = 2; // a reply that does not match the bank info: the sync stops instead of caching it
-    CHECK_EQ(sync.sync_bank(1, cache), -1);
-    CHECK(cache[2].empty());
+    v.corrupt = 2; // a reply that does not match the bank info: never cached, the slot is given up, the sync goes on
+    CHECK_EQ(sync.sync_bank(1, cache), 126); // 0 was current, 2 given up
+    CHECK(cache[2].empty() && cache[3] == v.ram[1][3]);
 }
 
 // One lost packet must not end a sync: seen on the simulator's bridge (S048), not reported on a real unit. single()
@@ -590,9 +595,164 @@ TEST(memsync_sync_bank_gives_up_on_a_wrong_fingerprint)
     const Dump old = fake_single(1, 2, 500);
     cache[2] = old;
     v.corrupt = 2; // always: never cached
-    CHECK_EQ(sync.sync_bank(1, cache), -1);
-    CHECK(cache[2] == old);
+    std::vector<std::string> lines;
+    sync.log = [&](const std::string &l) { lines.push_back(l); };
+    // like the original (0x18008e220): the slot is given up, not the sync. The stale dump goes too: it is known wrong
+    CHECK_EQ(sync.sync_bank(1, cache), 0);
+    CHECK(cache[2].empty());
+    CHECK(sync.unconfirmed[1] == std::set<int>{2});
+    CHECK_EQ(sync.given_up, 1);
     CHECK_EQ(v.requests.size(), 8u); // display message + bank info + 3 tries (each with its syncing message), bounded
+    CHECK(!lines.empty() && lines.back() == std::string("single RAM A 2: given up, not cached (1 of 3)"));
+}
+
+// T1, like the original (Virus Control 5.1.7 x64 0x18008e220, E594): a single dump request is asked 3 times, each
+// waiting its whole time, before the slot is given up
+TEST(memsync_single_asks_three_times_without_an_answer)
+{
+    int asked = 0;
+    MemorySync sync([&](const Bytes &) {
+        asked++;
+        return true;
+    });
+    sync.single_ms = 1, sync.pause_ms = 5;
+    CHECK(sync.single(1, 7).empty());
+    CHECK_EQ(asked, 3);
+    CHECK(sync.missed());
+}
+
+// a bank info is asked 6 times; before the 5th and the 6th ask the reply cables are set again (event 0x22, E591)
+TEST(memsync_bank_info_asks_six_times_and_resends_the_cables_before_the_last_two)
+{
+    std::vector<size_t> resent_at; // how many requests had gone out at each re-send
+    int asked = 0;
+    MemorySync sync([&](const Bytes &) {
+        asked++;
+        return true;
+    });
+    sync.bank_info_ms = 1, sync.pause_ms = 5;
+    sync.resend_routing = [&] { resent_at.push_back((size_t)asked); };
+    CHECK(sync.bank_info(2).empty());
+    CHECK_EQ(asked, 6);
+    CHECK((resent_at == std::vector<size_t>{4, 5}));
+    CHECK(sync.missed());
+
+    // an answer, or a reply of the wrong size (the Virus answers), re-sends nothing
+    FakeVirus v;
+    MemorySync answers(v.send());
+    v.sync = &answers;
+    int resends = 0;
+    answers.resend_routing = [&] { resends++; };
+    CHECK_EQ(answers.bank_info(1).size(), 128u);
+    v.short_info = -1;
+    CHECK(answers.bank_info(1).empty());
+    CHECK_EQ(resends, 0);
+
+    // the cables helped: the 5th ask is answered
+    int n = 0;
+    MemorySync *ps = nullptr;
+    bool cables = false;
+    MemorySync late([&](const Bytes &m) {
+        n++;
+        if (cables) {
+            Bytes r(267, 0); // 14 bank 00, 128 fingerprints, checksum, F7
+            const uint8_t head[8] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x14, m[7]};
+            std::copy(head, head + 8, r.begin());
+            r[266] = 0xF7;
+            ps->feed(r);
+        }
+        return true;
+    });
+    ps = &late;
+    late.bank_info_ms = 1, late.pause_ms = 5;
+    late.resend_routing = [&] { cables = true; };
+    CHECK_EQ(late.bank_info(3).size(), 128u);
+    CHECK_EQ(n, 5);
+}
+
+// one slot without an answer no longer ends the whole sync (#51): it is given up (empty, so the next start asks again)
+// and the sync goes on with the next slot
+TEST(memsync_sync_bank_gives_up_a_silent_slot_and_goes_on)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank cache;
+    for (int p = 0; p < 128; p++)
+        cache[p] = v.ram[1][p] = fake_single(1, p, p);
+    cache[5] = fake_single(1, 5, 500); // stale, and the Virus does not answer for it
+    cache[9] = fake_single(1, 9, 500); // stale, answered
+    v.silent = {5};
+    std::vector<std::string> lines;
+    sync.log = [&](const std::string &l) { lines.push_back(l); };
+    std::vector<int> fetched;
+    CHECK_EQ(sync.sync_bank(1, cache, [&](int p, bool f) {
+        if (f)
+            fetched.push_back(p);
+    }),
+             1);
+    CHECK(cache[5].empty());
+    CHECK(cache[9] == v.ram[1][9]);
+    CHECK((fetched == std::vector<int>{9}));
+    CHECK(sync.unconfirmed[1] == std::set<int>{5});
+    CHECK_EQ(sync.given_up, 1);
+    CHECK(std::count(lines.begin(), lines.end(), std::string("single RAM A 5: given up, not cached (1 of 3)")) == 1);
+    // a later sync of the bank that gets the slot confirms it
+    v.silent.clear();
+    CHECK_EQ(sync.sync_bank(1, cache), 1);
+    CHECK(sync.unconfirmed[1].empty());
+}
+
+// the 3rd given-up slot of a sync (across banks) ends it, like the original's abort 0x18008e0d0; the stale slots it
+// did not reach in that bank are known wrong: they are emptied and unconfirmed too, never asked
+TEST(memsync_sync_stops_at_the_third_given_up_slot)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank a, b;
+    for (int p = 0; p < 128; p++) {
+        v.ram[1][p] = fake_single(1, p, p);
+        v.ram[2][p] = fake_single(2, p, p);
+    }
+    v.silent = {3, 7};
+    CHECK_EQ(sync.sync_bank(1, a), 126); // RAM A: 3 and 7 given up
+    CHECK_EQ(sync.given_up, 2);
+    for (int p = 0; p < 128; p++)
+        b[p] = v.ram[2][p];
+    b[3] = fake_single(2, 3, 500);
+    b[50] = fake_single(2, 50, 500);
+    v.requests.clear();
+    CHECK_EQ(sync.sync_bank(2, b), -1); // RAM B: 3 is the 3rd
+    CHECK_EQ(sync.given_up, 3);
+    CHECK(b[3].empty() && b[50].empty());
+    CHECK((sync.unconfirmed[2] == std::set<int>{3, 50}));
+    for (auto &r : v.requests)
+        CHECK(!(r[6] == 0x30 && r[8] == 50)); // stopped: slot 50 was never asked
+}
+
+// user ROM programs are part of the same sync (the original's scheduler reads them after the RAM banks)
+TEST(memsync_read_missing_gives_up_a_silent_slot_and_goes_on)
+{
+    FakeVirus v;
+    v.ram.resize(31);
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank cache;
+    for (int p = 0; p < 128; p++)
+        v.ram[30][p] = fake_single(30, p, p);
+    v.silent = {4};
+    CHECK_EQ(sync.read_missing(30, cache), 127);
+    CHECK(cache[4].empty() && cache[5] == v.ram[30][5]);
+    CHECK(sync.unconfirmed[30] == std::set<int>{4});
+    v.silent = {10, 11};
+    Bank other;
+    CHECK_EQ(sync.read_missing(30, other), -1); // 10 and 11: the 2nd and the 3rd of this sync
+    CHECK_EQ(sync.given_up, 3);
+    CHECK(other[4] == v.ram[30][4] && other[11].empty() && other[12].empty());
 }
 
 TEST(memsync_bank_file_round_trip)

@@ -14,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -58,7 +59,7 @@ public:
     Dump single(int bank, int program);
 
     // Brings `cache` up to date for RAM bank 1..4; progress(program, fetched) is called per fetched program.
-    // Returns the number of fetched programs, -1 on failure.
+    // Returns the number of fetched programs, -1 when the bank info gets no answer or at the 3rd given-up slot.
     // `stop` (optional) cancels between two requests, cancel() also during one: returns -2, `cache` keeps what was
     // fetched so far.
     int sync_bank(int bank, Bank &cache, const std::function<void(int, bool)> &progress = nullptr,
@@ -71,8 +72,8 @@ public:
                   const std::atomic<bool> *stop = nullptr);
     // A user ROM bank (bank 5..30, E381/E382): the original has no bank info for ROM banks, it reads the programs it
     // has no data for, each after 74 01 7E 04, with 30 <bank> <program> (captured: 128 requests ~1 s apart). Reads
-    // only the empty slots of `cache`; progress(program) per program read. Returns the number read, -1 / -2 as
-    // read_bank; `cache` keeps what was read.
+    // only the empty slots of `cache`; progress(program) per program read. Returns the number read, -1 at the 3rd
+    // given-up slot (see given_up), -2 as read_bank; `cache` keeps what was read.
     int read_missing(int bank, Bank &cache, const std::function<void(int)> &progress = nullptr,
                      const std::atomic<bool> *stop = nullptr);
     // called before every request: may block (e.g. while the host plays - the Virus delays notes while it answers
@@ -91,8 +92,24 @@ public:
     // waiting for another one): a request does not start and one waiting ends at once, counted as a stop like
     // cancel() (no "no reply" line, sync_bank returns -2) but not for good (E591 (2))
     std::function<bool()> present;
+    // optional (the plug-in): sends the reply-cable start-up messages again (AnswerWatch::routing_messages). bank_info
+    // calls it before its 5th and 6th ask, like the original's event 0x22 (0x18008e220, E591, E594)
+    std::function<void()> resend_routing;
+    // the waits per ask (the original's 5 s and 10 s, E591) and the pause after each before the next (E145); tests
+    // shorten them
+    int bank_info_ms = 5000, single_ms = 10000, pause_ms = 1500;
+
+    // Like the original (0x18008e220, E594): a slot that cannot be read (no reply to 3 asks, or only replies of the
+    // wrong size, checksum or fingerprint) is given up: its cache entry is emptied (a wrong or stale dump is never
+    // kept), it goes into `unconfirmed`, and sync_bank / read_missing go on with the next one. The 3rd given-up slot
+    // since `given_up` was set to 0 (the plug-in does at the start of its sync) ends them with -1.
+    int given_up = 0;
+    // per bank (1-based, as sync_bank's `bank`): the programs given up in its last sync_bank / read_missing, plus the
+    // stale ones a stop at the 3rd left unread. Written on the caller's thread; read it there after the call.
+    std::map<int, std::set<int>> unconfirmed;
 
 private:
+    bool give_up(int bank, int program); // true at the 3rd: stop
     void note_reply(const char *what, int bank, int program, size_t got, size_t want, int t);
     bool was_cancelled(); // cancel(), or no Virus for this instance (present)
     bool wait_slice(const std::vector<uint8_t> &match, Dump &reply, std::chrono::steady_clock::time_point until);

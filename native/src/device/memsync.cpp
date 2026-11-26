@@ -188,7 +188,7 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
                 return reply;
         // the timeout, then 1.5 s more before the next try (overlapping requests confuse the Virus, E145): a reply
         // in that pause counts too, it used to be dropped (E591 (1))
-        const auto until = clock::now() + std::chrono::milliseconds(timeout_ms + 1500);
+        const auto until = clock::now() + std::chrono::milliseconds(timeout_ms + pause_ms);
         while (clock::now() < until)
             if (!wait_slice(match, reply, until))
                 return reply;
@@ -214,14 +214,26 @@ bool MemorySync::was_cancelled()
     return cancelled_;
 }
 
+// the slot's name in the log, as the Virus shows it
+static std::string slot_name(int bank, int program)
+{
+    std::string where = bank >= 1 && bank <= 4 ? std::string("RAM ") + (char)('A' + bank - 1) : "bank " + std::to_string(bank);
+    return program >= 0 ? where + " " + std::to_string(program) : where;
+}
+
+bool MemorySync::give_up(int bank, int program)
+{
+    unconfirmed[bank].insert(program);
+    if (log)
+        log("single " + slot_name(bank, program) + ": given up, not cached (" + std::to_string(given_up + 1) + " of 3)");
+    return ++given_up >= 3; // the original's abort 0x18008e0d0 at its 3rd given-up slot
+}
+
 void MemorySync::note_reply(const char *what, int bank, int program, size_t got, size_t want, int t)
 {
     if (!log || got == want || (got == 0 && was_cancelled()))
         return;
-    std::string where = bank >= 1 && bank <= 4 ? std::string("RAM ") + (char)('A' + bank - 1) : "bank " + std::to_string(bank);
-    if (program >= 0)
-        where += " " + std::to_string(program);
-    log(std::string(what) + " " + where + ": " +
+    log(std::string(what) + " " + slot_name(bank, program) + ": " +
         (got == 0 ? std::string("no reply")
                   : "reply " + std::to_string(got) + " bytes, expected " + std::to_string(want) + " (try " +
                         std::to_string(t + 1) + " of 3)"));
@@ -231,10 +243,17 @@ std::vector<int> MemorySync::bank_info(int bank)
 {
     // a reply of the wrong size is a packet lost on the way: ask again as single() does, one lost packet must not end
     // the whole sync
+    const Dump req = {0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x39, (uint8_t)bank, 0xF7};
+    const std::vector<uint8_t> match = {0x14, (uint8_t)bank};
     for (int t = 0; t < 3; t++) {
-        // 5 s like the original's bank info wait (E591; it was 3 s): 3 tries, at most 19.5 s without a reply
-        Dump r = transact({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x39, (uint8_t)bank, 0xF7}, {0x14, (uint8_t)bank},
-                          5000, 3);
+        // 6 asks 5 s apart like the original (0x18008e220, E594): before the 5th and the 6th it sets the reply cables
+        // again (event 0x22, E591). Its 7th request goes out with the abort, unwaited: not sent here (E145)
+        Dump r = transact(req, match, bank_info_ms, 4);
+        for (int k = 0; k < 2 && r.empty() && missed_; k++) {
+            if (resend_routing)
+                resend_routing();
+            r = transact(req, match, bank_info_ms, 1);
+        }
         note_reply("bank info", bank, -1, r.size(), BANKINFO_SIZE, t);
         if (r.size() == BANKINFO_SIZE) {
             std::vector<int> v(128);
@@ -252,10 +271,11 @@ Dump MemorySync::single(int bank, int program)
 {
     Dump bad; // the last reply with checksums other than ours
     for (int t = 0; t < 3; t++) {
-        // up to 10 s like the original's single dump wait (E591; it was 3 s). 2 tries (were 3): a late reply to the
-        // first still counts after the second went out, so at most 23 s without a reply instead of 34.5 s
+        // 3 asks 10 s apart like the original (0x18008e220, E594; a late reply to an earlier ask counts, E591): since a
+        // slot without an answer is given up instead of ending the sync, the third ask is worth its 11.5 s. The
+        // original's 4th request goes out with the give-up, unwaited: not sent here (E145)
         Dump r = transact({0xF0, 0x00, 0x20, 0x33, 0x01, (uint8_t)dev_, 0x30, (uint8_t)bank, (uint8_t)program, 0xF7},
-                          {0x10, (uint8_t)bank, (uint8_t)program}, 10000, 2);
+                          {0x10, (uint8_t)bank, (uint8_t)program}, single_ms, 3);
         note_reply("single", bank, program, r.size(), SINGLE_SIZE, t);
         if (r.size() == SINGLE_SIZE) {
             // the Virus sends both checksums as BankDrop computes them (E552): a mismatch is a reply damaged on the
@@ -289,6 +309,7 @@ int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, b
     // the original keeps "Configuring Virus TI" (Rise Message 7) up while it checks the banks: before every bank info
     // request, fetched or not (E321)
     send_(rise_message(dev_, 7));
+    unconfirmed[bank].clear();
     auto info = bank_info(bank);
     if (info.empty())
         return was_cancelled() ? -2 : -1;
@@ -313,10 +334,23 @@ int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, b
                     break;
                 d.clear();
             }
-            if (d.empty())
-                return was_cancelled() ? -2 : -1;
-            cache[p] = std::move(d);
-            fetched++;
+            if (d.empty()) {
+                if (was_cancelled())
+                    return -2;
+                cache[p].clear(); // its fingerprint differs from the Virus' one: known wrong
+                if (give_up(bank, p)) {
+                    for (int q = p + 1; q < 128; q++) // the original marks every slot left unread (0x18008e0d0)
+                        if (RemoteDevice::single_fingerprint(cache[q]) != info[q]) {
+                            cache[q].clear();
+                            unconfirmed[bank].insert(q);
+                        }
+                    return -1;
+                }
+                stale = false; // not fetched
+            } else {
+                cache[p] = std::move(d);
+                fetched++;
+            }
         }
         if (progress)
             progress(p, stale);
@@ -346,6 +380,7 @@ int MemorySync::read_missing(int bank, Bank &cache, const std::function<void(int
 {
     const std::vector<uint8_t> rise = rise_message(dev_, 4);
     int read = 0;
+    unconfirmed[bank].clear();
     for (int p = 0; p < 128; p++) {
         if (!cache[p].empty())
             continue;
@@ -353,8 +388,13 @@ int MemorySync::read_missing(int bank, Bank &cache, const std::function<void(int
             return -2;
         send_(rise);
         Dump d = single(bank, p);
-        if (d.empty())
-            return was_cancelled() ? -2 : -1;
+        if (d.empty()) {
+            if (was_cancelled())
+                return -2;
+            if (give_up(bank, p)) // stays empty: the next start reads it again
+                return -1;
+            continue;
+        }
         cache[p] = std::move(d);
         read++;
         if (progress)

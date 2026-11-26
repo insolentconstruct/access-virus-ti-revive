@@ -6068,3 +6068,38 @@ replaced the library with an empty file); the .tmp is removed on every failure.
 - **Method:** code review + unit tests (vtitests, Linux); scan of the user's library files (local, read-only)
 - **Confidence:** HIGH (code behaviour, tests) / open (what the original does with a version-13+ or 267-byte v8+ dump on the device)
 - **Hardware:** no
+
+### E594
+
+How the original Virus Control gives up during its start-up bank sync, with the exact counts, and TI Revive's port
+of it (fix item T1, research R1-1, R1-2, R2-2, R10-1, R10-3, R10-5 of 2026-11-26). Original, scheduler 0x18008e220
+(one step per scheduler visit, waits in whole `_time64` seconds): (1) **Bank info**: a visit that asks the same bank
+again counts repo+0x5e8 up (a different bank resets it to 0, 0x18008e466). Above 3 (the 5th, 6th and 7th request)
+it first fires listener event 0x22 (0x18008e40f-0x18008e42b), which re-sets the three reply-cable globals (E591);
+above 5 (the 7th visit) it aborts (0x18008e0d0) and fires event 0x21, and the 7th request still goes out
+(0x18008e464 -> 0x18008e46d -> 0x18008ea30). So: 6 requests with a 5 s wait each, cables re-sent before the 5th and
+6th, a 7th request at the abort without a wait. R1/R2 (6 asks) and R10 (7) count the same code differently. (2)
+**Single dump**: the same slot asked again counts repo+0x5e4 (0x18008e629); at 3 (the 4th visit, 0x18008e635) it
+fires event 0x21 (the communication-error message, E591), counts repo+0x5e8 up and, below 3, stores the
+"!NOTSYNCED" placeholder in the slot (0x18008daa0 + 0x1800a1730) and resets +0x5e4; at 3 it aborts (0x18008e66e ->
+0x18008e0d0, which fills every remaining invalid slot of every bank with the placeholder and switches the bank-info
+phase off). Both branches still send the slot's request once more (0x18008e6a0 -> 0x18008e980), so: 3 requests with a
+10 s wait each, then the slot is given up and a 4th request goes out unwaited (a late reply replaces the placeholder).
+(3) repo+0x5e8 is shared: it is not reset between the bank-info phase and the single phase (0x18008ded0 and
+0x18008e0d0 do not touch it), so repeats left over from the last bank info count toward the 3 given-up slots. TI
+Revive (round 0.8.44): bank info asks 6 times (5 s + 1.5 s each), the plug-in re-sends the user's own 73 00 3A/3B/3C
+start-up messages (AnswerWatch::routing_messages, E039) before the 5th and 6th ask; a single dump is asked 3 times (10 s
++ 1.5 s each). The unwaited 7th / 4th request is not sent (overlapping requests, E145). A slot without an answer, or
+with only replies of the wrong size, a bad checksum or a fingerprint other than the bank info's (3 tries each, the
+E552 "same reply twice" rule kept) is given up: its cache entry is emptied (never a wrong or stale dump), it is listed
+in MemorySync::unconfirmed, one log line "single RAM X n: given up, not cached (k of 3)", and the sync goes on. The 3rd
+given-up slot of a sync (RAM banks and user ROM reads together, the leftover bank-info repeats of (3) not counted) ends
+it with -1; the stale slots of that bank it did not reach are emptied and listed too. The plug-in saves such a bank, so
+the next start asks for those slots again, and shows "RAM banks may be out of date / n patches not read" once per sync;
+a Control Center restore refuses a bank with a given-up slot. No placeholder is written into the cache.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 (sha256 a622f9a2...) 0x18008e220 (0x18008e3f1-0x18008e4a5 bank info, 0x18008e603-0x18008e6d5 single), 0x18008e0d0, 0x18008ded0, 0x1800a1730, 0x180086bf0 (events 0x21/0x22, E591); native/src/device/memsync.{h,cpp} (bank_info, single, sync_bank, read_missing, give_up, unconfirmed, given_up, resend_routing); native/plugin/source/virusplugin.cpp (sync_banks, resend_routing hook); native/src/cc/controlcenter.cpp (restore); native/tests/test_memsync.cpp; work/research-2026-11-26 R1, R2, R10; E591, E592, E552, E145
+- **Method:** static analysis (REA, Ghidra 12.1.4, procedure_assembly of 0x18008e220, 0x18008e0d0, 0x18008ded0); unit tests against a fake Virus (vtitests, Linux)
+- **Confidence:** HIGH (the original's counts: read from the instructions; our code: unit tests) / open (behaviour on a Virus that really stops answering: not run on hardware)
+- **Hardware:** no
