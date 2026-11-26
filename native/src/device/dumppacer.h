@@ -5,7 +5,8 @@
 // while another part plays, E270). Cable 3 reaches only the Virus' host CPU, which parses the dump byte by byte;
 // cable 2 would put a note's bytes into that parse (one parser for all cables but 5, E252), cable 5 goes to the DSPs
 // only. Written in one piece, the dump held the notes until the Virus had taken all of it, and the other parts
-// stopped for a moment (E269). Queued messages wait until the dump is out (they go on cable 2).
+// stopped for a moment (E269). Queued messages wait until the dump is out (they go on cable 2), queued notes excepted
+// (between_pieces).
 #pragma once
 #include <algorithm>
 #include <cstddef>
@@ -74,6 +75,13 @@ inline bool queue_ready(const DumpPacer &dump, int64_t now_ns, bool queue_empty,
 {
     return dump.active() ? dump.wait_ns(now_ns) == 0 : !queue_empty && !held;
 }
+
+// R12-8: the one kind of queued message that goes between a dump's pieces (on cable 5, before the next piece), like
+// the original's short messages before its dump: a note on or off, as the DAW's own notes do (E270). The rest waits for
+// the dump's end: on cable 2 or 3 a controller, program change or SysEx would land in the host CPU's parse of the dump
+// (one parser for all cables but 5, E252, R9-5), and on cable 5 a controller or program change would reach the DSPs
+// only, not the host CPU that must see it (E274).
+inline bool between_pieces(const uint8_t *m, size_t n) { return n == 3 && m[0] >= 0x80 && m[0] < 0xA0; }
 
 // Parameter SysEx that falls into a dump waits for its end (at most ~140 ms): on cable 5 with the notes it would
 // reach only the DSPs, and the host CPU would keep the old value in its edit buffer (E274). Notes and other

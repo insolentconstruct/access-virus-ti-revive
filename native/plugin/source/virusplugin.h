@@ -121,7 +121,8 @@ public:
     // after a block's send_rt calls: wakes the worker (no lock; one notify per block instead of a 1 ms poll)
     void wake_rt() { cv_.notify_one(); }
     std::atomic<int64_t> timeline{-1};
-    bool busy() const { return queued_.load() > 0; } // non-realtime messages (state upload) still waiting
+    // non-realtime messages (state upload) still waiting, or written and not yet reported done by the broker (T7)
+    bool busy() const { return queued_.load() > 0; }
     int queued() const { return queued_.load(); } // start-up messages and state still to go (the start page's ring)
     bool dumping() const { return dump_pending_.load(); } // a dump in pieces: nothing else may go between them
     // USB control request through the broker (device descriptor / strings)
@@ -323,6 +324,21 @@ private:
     };
     std::deque<Queued> queue_;
     std::atomic<int> queued_{0};
+    // T7 (R3-3, R12-2): at most this many bytes we wrote wait below us (socket/pipe, broker, USB) before the broker
+    // reports them done; the rest waits in our own queues, where events go first. The original keeps ~64 bytes
+    // (2 x wMaxPacketSize) in its driver's ring, up to 512 with large audio buffers (E597). 256 = 4 dump pieces or 32
+    // stamped notes, so the paced dump and a block's events do not wait on it while the Virus keeps up; a note behind
+    // a full window waits ~8-15 ms (E231's link rate) instead of behind a whole backlog.
+    static constexpr size_t TX_WINDOW = 256;
+    int ack_n_ = 0;        // worker: queued messages written whose report is still due; they stay in queued_
+    uint32_t ack_end_ = 0; // worker: Broker::write's end of the newest of them
+    void count_written()   // worker: reported ones leave queued_, so busy() and a request's timeout follow the wire
+    {
+        if (ack_n_ && broker_.written(ack_end_)) {
+            queued_ -= ack_n_;
+            ack_n_ = 0;
+        }
+    }
     struct Slot {
         uint8_t len, data[16];
         int64_t stamp;
@@ -334,7 +350,7 @@ private:
     EventRun rt_run_; // real-time messages sent in a row, the queue's turn after 8 (worker thread, dumppacer.h)
     DumpPacer dump_;            // a single dump on cable 3 in pieces, events between them on cable 5 (E270)
     HeldParams held_;           // automation that fell into a dump, sent when it is out (E274)
-    std::atomic<bool> dump_pending_{false}; // the dump counts as queued (busy()) until its last piece is out
+    std::atomic<bool> dump_pending_{false}; // the dump counts as queued (busy()) until its last piece is written
     SendBudget budget_; // bytes per second towards the DSP's 2046-byte stamp queue (E261)
     std::atomic<int> blocked_{0}; // messages rule 2 forbids, dropped (sendguard.h); logged by the worker
     std::atomic<int> rt_lost_{0};        // events process() could not queue (ring full); logged by the worker

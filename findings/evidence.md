@@ -6162,3 +6162,35 @@ Virus could tell). The broker's existing note-offs for a client that played note
 - **Method:** static analysis by the research round (REA); code review; unit tests (brokertests with the POSIX broker and a stub device, vtitests against a fake broker; Linux)
 - **Confidence:** HIGH (the original's exclusivity: research) / HIGH (our code: unit tests; the Windows broker built with mingw, not run) / open (whether an F0 restarts the parser after a cut SysEx; two clients on a real Virus: not run on hardware)
 - **Hardware:** no
+
+### E597
+
+Closed-loop sending, as the original's TX pump; TI Revive's port (fix item T7, research R3-3, R12-2, R12-8 of
+2026-11-26). Original (from the research's static analysis, not re-read for this entry): Virus Control's TX pump
+(0x1800a8ba0, a tick about every 5 ms) reads the raw pipe's TX ring fill (IOCTL 0x2200A8, E035; 3855 polls in the
+E036 trace) and hands the driver only as much as keeps about 64 bytes (2 x wMaxPacketSize) outstanding, up to a
+quarter of the buffer or 512 bytes with large audio buffers; everything else waits in the plug-in's own 128 KB queue,
+short messages (queue A) before long SysEx (queue B) at every tick, so a new event overtakes queued SysEx and a
+request's wait starts when it is nearly on the wire. E270's dump pieces of 64/56/44 bytes fit "window minus fill".
+TI Revive before: open loop. Stamped traffic was paced by bytes per second (sendbudget.h), dumps by DumpPacer, other
+queued SysEx not at all, and all of it went into the broker socket/pipe (Unix socket buffer, Windows pipe 64 KB), which
+the broker drains one blocking write at a time; while the Virus was slow a backlog built there that the plug-in's
+events-first rules could not reorder, and MemorySync's request timeout (E592 (A)) started when the request entered the
+socket. TI Revive now (round 0.8.44): (1) protocol 6 (vtiproto.h): to a client whose HELLO says 6 or newer the broker
+sends `VTIMSG_WRITTEN` after each of its WRITE messages once it is handled (on the wire, refused or dropped), with the
+running count of its data bytes; observers and older clients get none. (2) `Broker` counts what it wrote and what was
+reported (`room`, `written`); the plug-in's worker hands the broker a new write only while fewer than 256 bytes are
+unreported (4 dump pieces, 32 stamped notes; at E231's link rate about 8-15 ms of wire time) and caps a block's events
+at the room left, so the rest stays in its own queues where events go first; the report wakes it. (3) A queued message
+counts in `busy()` until the broker reported its write, so a request goes out when nothing is below it and its timeout
+starts when the broker wrote it. (4) R12-8: during a dump in pieces, a queued note on or off goes between the pieces on
+cable 5 (as the DAW's notes do, E270), before the next piece; every other queued message still waits for the dump's
+end: on cable 2 or 3 it would land in the host CPU's parse of the dump (E252, R9-5), on cable 5 a controller or program
+change would reach the DSPs only (E274), so requests, parameters and state still wait. A broker older than protocol 6
+never reports: the plug-in writes as before. Nothing new on the audio thread.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control 0x1800a8ba0, 0x1800fe600, 0x18007a690; VirusUSB.sys 0x2200A8 handler (as read in work/research-2026-11-26 R3, R12); src/broker/vtiproto.h, vtibroker_posix.c, vtibroker.c (VTIMSG_WRITTEN); native/src/device/broker.{h,cpp} (write end, room, written, on_written); native/plugin/source/virusplugin.{h,cpp} (DeviceOut TX_WINDOW, count_written, the worker's wait and selection); native/src/device/dumppacer.h (between_pieces); native/tests/test_brokermsg.cpp, test_broker.cpp, test_dumppacer.cpp; E035, E036, E231, E252, E270, E274, E592
+- **Method:** static analysis by the research round (REA); code review; unit tests (brokertests with the POSIX broker and a stub device, vtitests against a fake broker, Linux; the timeout test fails with the reports ignored)
+- **Confidence:** MED (the original's window and queue order: research, static plus capture fit) / HIGH (our code: unit tests; the Windows broker built with mingw, not run) / open (note delay and dump timing on a real Virus)
+- **Hardware:** no

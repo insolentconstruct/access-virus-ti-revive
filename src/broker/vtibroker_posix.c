@@ -76,6 +76,8 @@ typedef struct {
     char name[48];      // from HELLO (protocol 4), for the status and the owner rule (owner.h)
     int ready;          // has been told its state (after HELLO: a waiting plug-in never sees the Virus briefly)
     vti_sxwatch sx;     // its SysEx going on, for the rule 2 write filter (ctrlguard.h)
+    uint32_t proto;     // the protocol of its HELLO (0 = none)
+    uint32_t written;   // T7: data bytes of all its WRITE messages handled (VTIMSG_WRITTEN)
 } client;
 
 static client *g_clients[MAX_CLIENTS];
@@ -1162,6 +1164,8 @@ static void *client_thread(void *arg)
         if (!c->ready) { // the state goes out after HELLO (the name decides), or before an older client's first message
             pthread_mutex_lock(&g_cs_dev);
             pthread_mutex_lock(&g_cs_clients);
+            if (h.type == VTIMSG_HELLO && h.len >= 4)
+                memcpy(&c->proto, buf, 4);
             if (h.type == VTIMSG_HELLO && h.len > 4) {
                 size_t n = h.len - 4u < sizeof c->name - 1 ? h.len - 4u : sizeof c->name - 1;
                 memcpy(c->name, buf + 4, n);
@@ -1334,6 +1338,10 @@ static void *client_thread(void *arg)
         }
         default:
             blog("client: unknown message %u", h.type);
+        }
+        if (h.type == VTIMSG_WRITE && c->proto >= VTI_PROTO_WRITTEN && !c->observer) { // T7: every one, refused too
+            c->written += h.len ? h.len - 1u : 0;
+            send_msg(c, VTIMSG_WRITTEN, &c->written, 4, NULL, 0);
         }
     }
     if (c->observer)

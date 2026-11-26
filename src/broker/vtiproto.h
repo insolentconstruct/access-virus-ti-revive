@@ -3,6 +3,7 @@
 //
 // client -> broker                          broker -> client
 //   WRITE    {ep, data}                       RX       {ep, data}          (unsolicited, every IN transfer)
+//                                             WRITTEN  {bytes}             (protocol 6: after every WRITE, see below)
 //   CONTROL  {seq, setup[8], data(OUT)}       CONTROL_REPLY {seq, result, data(IN)}
 //                                             STATE    {connected}         (on connect and on change)
 //   AUDIO    {on, event name, rate}           AUDIO_REPLY {result}         (protocol 2, vtiaudioshm.h; rate: 5)
@@ -21,11 +22,18 @@
 // One SysEx at a time on the wire (T6, R12-3): while one client's SysEx is open (F0 sent, F7 not yet, any cable; the
 // Virus parses all cables but 5 with one parser, E252), the other clients' writes wait until it ends, its client goes,
 // it has been quiet for 2 s, or they waited 2 s (sxhold.h). The client's own writes are not held.
+//
+// Writes reported done (T7, research R3-3, R12-2): to a client whose HELLO says protocol 6 or newer the broker sends
+// WRITTEN after each of its WRITE messages, once it is handled (on the wire, or refused / dropped): the running count
+// of data bytes (ep not counted) of all its WRITE messages on this connection, mod 2^32. The plug-in keeps only a small
+// window of bytes not yet reported below it, like the original's TX pump on the driver's ring fill (E597); a broker
+// older than protocol 6 sends none, and the client writes as before.
 #pragma once
 #include <stdint.h>
 
 #define VTI_PIPE_NAME "\\\\.\\pipe\\vtibroker"
-#define VTI_PROTO_VERSION 5
+#define VTI_PROTO_VERSION 6
+#define VTI_PROTO_WRITTEN 6 // the first protocol whose clients get VTIMSG_WRITTEN
 #define VTI_TCP_PORT 47615 // Linux broker, 127.0.0.1 (Wine clients); actual port in ~/.config/tirevive/broker.token
 
 enum {
@@ -57,6 +65,8 @@ enum {
     VTIMSG_OBS_STATUS = 0x8A,  // broker -> observer, once a second: "key=value" fields separated by tabs
     VTIMSG_FLASHINFO_REPLY = 0x8C, // broker -> client: i32 result (bytes or -1), the blocks (flashinfo.h)
     VTIMSG_OWNER_REPLY = 0x8D, // broker -> client: u32 1 = a plug-in other than the asker owns the Virus, 0 = none
+    VTIMSG_WRITTEN = 0x8E,     // broker -> client (protocol 6+, never an observer): u32 data bytes of all its WRITE
+                               // messages handled so far, after each one (T7, above)
     VTIMSG_INFO = 0x8B,        // broker -> client after its HELLO: "key=value" fields separated by tabs ("version=0.8.21",
                                // brokerinfo.h); older clients ignore it
 };

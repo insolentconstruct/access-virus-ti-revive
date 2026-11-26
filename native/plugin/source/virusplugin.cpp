@@ -272,6 +272,8 @@ int DeviceOut::send_state(std::vector<std::vector<uint8_t>> records)
 void DeviceOut::lose_broker()
 {
     drop_dump();
+    queued_ -= ack_n_; // their reports never come (T7)
+    ack_n_ = 0;
     close_audio();
     broker_.close();
     open_ = false;
@@ -667,6 +669,10 @@ void DeviceOut::run()
                         reply_(m);
                 });
                 broker_.on_rx([parser](uint8_t ep, const uint8_t *d, size_t len) { parser->feed(ep, d, len); });
+                broker_.on_written([this] { // room below us again (T7): wake the worker, never between its check and wait
+                    { std::lock_guard<std::mutex> lk(mu_); }
+                    cv_.notify_one();
+                });
                 rx_set_ = true;
             }
             // #51: not played while another instance of this process is: no claim, that one gets the Virus
@@ -819,11 +825,16 @@ void DeviceOut::run()
             std::unique_lock<std::mutex> lk(mu_);
             // process() wakes it once per block with events (wake_rt); the timeout is only a backstop and runs the idle
             // work (parameter drain) - before: a 1 ms poll, 1000 wake-ups/s even without anything to send
+            // T7: with the window below us full nothing can go; the broker's report wakes it (on_written)
             cv_.wait_for(lk, std::chrono::milliseconds(5), [this] {
-                return stop_ || !queue_.empty() || rt_r_.load() != rt_w_.load(std::memory_order_acquire);
+                return stop_ || (broker_.room(TX_WINDOW) &&
+                                 (!queue_.empty() || rt_r_.load() != rt_w_.load(std::memory_order_acquire)));
             });
             if (stop_)
                 break;
+            count_written();
+            // the window below us (T7): while it is full everything stays in its own queue, where events go first
+            const bool room = broker_.room(TX_WINDOW) > 0;
             size_t r = rt_r_.load(std::memory_order_relaxed);
             // events from process() first, but after 8 in a row one queued message (state, dumps, sync requests),
             // else dense MIDI starves the queue (stress test: queue stuck, bank sync timed out)
@@ -836,11 +847,23 @@ void DeviceOut::run()
             const bool budget_ok = budget_.available(now_ns) >= 8;
             // after 8 events the queue side's turn, only when it can go now (a due piece, a queued message not held)
             const bool q_ready = queue_ready(dump_, now_ns, queue_.empty(), held);
-            const bool rt = r != rt_w_.load(std::memory_order_acquire) && rt_run_.events_first(q_ready) && budget_ok;
+            const bool rt =
+                room && r != rt_w_.load(std::memory_order_acquire) && rt_run_.events_first(q_ready) && budget_ok;
             // a dump in pieces (dumppacer.h): the DAW's events go between the pieces, queued messages wait for its end
-            // the piece is written below, after the regular work of each round (idle work, audio scan, stall watch,
-            // presence): skipping that for a whole state's dumps (~2 s) made the stall watch see a sleep (E272)
-            if (dump_.active() && !rt) {
+            // (queued notes excepted, R12-8); the piece is written below, after the regular work of each round (idle
+            // work, audio scan, stall watch, presence): skipping that for a whole state's dumps (~2 s) made the stall
+            // watch see a sleep (E272)
+            const auto note = !room || !dump_.active() || rt ? queue_.end() : std::find_if(queue_.begin(), queue_.end(),
+                [](const Queued &q) { return between_pieces(q.msg.data(), q.msg.size()); });
+            if (!room) {
+                // nothing this round; the broker's report (or the 5 ms) brings the next one
+            } else if (note != queue_.end()) { // before the next piece, like the original's short messages (R12-8)
+                rt_run_.turn();
+                msg = std::move(note->msg);
+                cable = dump_.event_cable(CABLE_PLUGIN); // cable 5, as the DAW's notes
+                queue_.erase(note);
+                pending_send_ = true;
+            } else if (dump_.active() && !rt) {
                 if (dump_.next(now_ns, piece)) {
                     piece_last = !dump_.active();
                     rt_run_.turn(); // the queue's turn while it waits for the dump (EventRun, dumppacer.h)
@@ -1092,10 +1115,13 @@ void DeviceOut::run()
             pedals_up.store(true, std::memory_order_relaxed);
         }
         if (!piece.empty()) { // a piece of a dump (dumppacer.h)
-            bool wok = broker_.write(EP_PLUGIN_OUT, piece.data(), piece.size());
-            if (piece_last && dump_pending_) {
+            uint32_t end = 0;
+            bool wok = broker_.write(EP_PLUGIN_OUT, piece.data(), piece.size(), &end);
+            if (piece_last && dump_pending_) { // queued until the broker reports it written (T7)
                 dump_pending_ = false;
-                queued_--;
+                ack_n_++;
+                ack_end_ = end;
+                count_written();
             }
             if (piece_last && !held_.empty()) { // automation held during the dump goes first now (cable 2)
                 auto held = held_.take();
@@ -1175,7 +1201,9 @@ void DeviceOut::run()
             // one write holds at most the budget's balance (sendbudget.h): the rest of a flood goes in later rounds
             const auto now = std::chrono::steady_clock::now();
             const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-            const size_t cap = std::min<size_t>(3072, (size_t)std::max(0, budget_.available(now_ns)));
+            // and at most the window's room below us (T7): the rest waits in the ring, where it is still first
+            const size_t cap = std::min<size_t>(std::min<size_t>(3072, (size_t)std::max(0, budget_.available(now_ns))),
+                                                broker_.room(TX_WINDOW));
             const bool q_ready = queue_ready(dump_, now_ns, queue_.empty(), now < queue_hold_until_);
             for (size_t r = rt_r_.load(std::memory_order_relaxed);
                  r != rt_w_.load(std::memory_order_acquire) && pk_.size() < cap && rt_run_.events_first(q_ready);
@@ -1193,7 +1221,8 @@ void DeviceOut::run()
                 pack(msg, st, sl_live);
             }
         }
-        bool ok = broker_.write(EP_PLUGIN_OUT, pk_.data(), pk_.size());
+        uint32_t end = 0;
+        bool ok = broker_.write(EP_PLUGIN_OUT, pk_.data(), pk_.size(), &end);
         if (stamp >= 0) // stamped traffic counts against the budget; queued SysEx does not (sendbudget.h, E266)
             budget_.take((int)pk_.size());
         if (msg.size() > 7 && msg[0] == 0xF0 && msg[6] == 0x11) { // a multi dump (11 00 00 ...)
@@ -1208,9 +1237,11 @@ void DeviceOut::run()
             floor_logged_ = floor_.moved;
             floor_log_at_ = std::chrono::steady_clock::now();
         }
-        if (pending_send_) {
+        if (pending_send_) { // queued until the broker reports it written (T7; at once from an older broker)
             pending_send_ = false;
-            queued_--;
+            ack_n_++;
+            ack_end_ = end;
+            count_written();
         }
         if (!ok)
             lose_broker();

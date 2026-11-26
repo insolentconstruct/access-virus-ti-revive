@@ -309,6 +309,8 @@ bool Broker::open(std::string &error)
     {
         std::lock_guard<std::mutex> g(wr_); // senders on other threads see the handle whole (review 2026-10-19 M7)
         fd_ = os_connect(endpoint_, slot_, error);
+        sent_ = acked_ = 0; // a new connection: the broker counts from 0, and may be an older one (T7)
+        acks_ = false;
     }
     if (fd_ < 0)
         return false;
@@ -364,15 +366,19 @@ bool Broker::send_locked(uint16_t type, const void *a, size_t alen, const void *
            (!blen || io_all(fd_, (void *)b, blen, true));
 }
 
-bool Broker::write(uint8_t ep, const uint8_t *data, size_t len)
+bool Broker::write(uint8_t ep, const uint8_t *data, size_t len, uint32_t *end)
 {
     std::lock_guard<std::mutex> g(wr_); // all pieces in a row (R12-6)
     for (size_t off = 0; off < len;) { // keep messages below VTIMSG_MAX
         size_t n = std::min<size_t>(len - off, 1024);
+        sent_ += (uint32_t)n; // before the send: the broker's report may come before it returns (a failed send ends
+                              // the connection, open() counts from 0 again)
         if (!send_locked(VTIMSG_WRITE, &ep, 1, data + off, n))
             return false;
         off += n;
     }
+    if (end)
+        *end = sent_;
     return true;
 }
 
@@ -586,6 +592,17 @@ void Broker::read_loop()
                 std::lock_guard<std::mutex> g(ctl_);
                 owner_reply_ = buf[0] ? 1 : 0;
                 ctl_cv_.notify_all();
+            }
+            break;
+        case VTIMSG_WRITTEN: // T7: our WRITE messages are handled up to this byte count
+            if (h.len >= 4) {
+                uint32_t n;
+                memcpy(&n, buf.data(), 4);
+                acked_ = n;
+                acks_ = true; // after acked_: room() never sees reports on with a stale count
+                std::lock_guard<std::mutex> g(cb_mu_);
+                if (written_)
+                    written_();
             }
             break;
         case VTIMSG_AUDIO_REPLY:

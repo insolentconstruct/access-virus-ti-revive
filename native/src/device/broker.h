@@ -69,8 +69,26 @@ public:
     }
 
     // One call is one run of WRITE messages (pieces of 1024 bytes): another thread's write never falls between them
-    // (T6, R12-6: an F5 stamp and its event, a SysEx across a piece).
-    bool write(uint8_t ep, const uint8_t *data, size_t len);
+    // (T6, R12-6: an F5 stamp and its event, a SysEx across a piece). `end`: the count of data bytes written on this
+    // connection after this call, for written().
+    bool write(uint8_t ep, const uint8_t *data, size_t len, uint32_t *end = nullptr);
+    // T7 (protocol 6, vtiproto.h): the broker reports each WRITE message done (VTIMSG_WRITTEN). From its first report
+    // on, room() and written() follow the reports; before it, and with a broker that never sends one (older than
+    // 0.8.44), everything counts as written at once, as before.
+    // the bytes the next write may carry while at most `window` bytes wait below us (0: wait for a report)
+    size_t room(size_t window) const
+    {
+        const uint32_t below = sent_ - acked_;
+        return !acks_ ? SIZE_MAX : below < window ? window - below : 0;
+    }
+    // the broker has handled every byte up to `end` (a write's *end)
+    bool written(uint32_t end) const { return !acks_ || (int32_t)(acked_ - end) >= 0; }
+    // called by the reader after each report (under cb_mu_, as on_rx)
+    void on_written(std::function<void()> h)
+    {
+        std::lock_guard<std::mutex> g(cb_mu_);
+        written_ = std::move(h);
+    }
     // USB control request through the broker; returns bytes transferred or -1. `data` in/out; a reply never writes
     // more than len bytes into it.
     int control(uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, uint8_t *data, uint16_t len,
@@ -129,10 +147,13 @@ private:
     uint32_t seq_ = 0;
     std::atomic<bool> present_{false}, elsewhere_{false}, stop_{false}, reader_done_{true};
     std::atomic<uint32_t> arrivals_{0};
-    std::mutex cb_mu_; // rx_, state_ and observe_: set by any thread, called by the reader
+    std::atomic<uint32_t> sent_{0}, acked_{0}; // T7: data bytes written on this connection / reported done
+    std::atomic<bool> acks_{false};            // the broker has reported (protocol 6)
+    std::mutex cb_mu_; // rx_, state_, observe_ and written_: set by any thread, called by the reader
     RxHandler rx_;
     StateHandler state_;
     ObserveHandler observe_;
+    std::function<void()> written_;
     bool send(uint16_t type, const void *a, size_t alen, const void *b = nullptr, size_t blen = 0);
     bool send_locked(uint16_t type, const void *a, size_t alen, const void *b, size_t blen); // wr_ held
     void read_loop();

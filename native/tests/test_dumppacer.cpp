@@ -130,3 +130,16 @@ TEST(dumppacer_holds_only_access_parameters)
     const uint8_t foreign[] = {0xF0, 0x00, 0x20, 0x29, 0x01, 0x10, 0x70, 0x00, 0x28, 0x10, 0xF7}; // not 00 20 33
     CHECK(!HeldParams::held(foreign, sizeof foreign));
 }
+
+TEST(dumppacer_only_queued_notes_go_between_pieces)
+{
+    // R12-8: like the original's short messages before its dump, a queued note on or off goes between the pieces (on
+    // cable 5, the DAW's notes do, E270); a controller or program change on cable 5 would reach the DSPs only (E274),
+    // on cable 2 it and any SysEx would land in the host CPU's parse of the dump (E252, R9-5): they wait
+    const uint8_t on[] = {0x91, 0x3C, 0x64}, off[] = {0x8F, 0x3C, 0x00}, cc[] = {0xB0, 0x7B, 0x00},
+                  pc[] = {0xC0, 0x05}, bend[] = {0xE0, 0x00, 0x40}, at[] = {0xA0, 0x3C, 0x10},
+                  sx[] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7};
+    CHECK(between_pieces(on, sizeof on) && between_pieces(off, sizeof off));
+    CHECK(!between_pieces(cc, sizeof cc) && !between_pieces(pc, sizeof pc) && !between_pieces(bend, sizeof bend));
+    CHECK(!between_pieces(at, sizeof at) && !between_pieces(sx, sizeof sx) && !between_pieces(on, 2));
+}

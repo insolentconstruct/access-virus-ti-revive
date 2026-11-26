@@ -64,6 +64,10 @@ struct FakeBroker {
     std::atomic<int32_t> audio_result{1};
     std::atomic<bool> answer_owner{true};
     std::atomic<uint32_t> plugin_owns{0}; // VTIMSG_OWNER_REPLY: 1 = a plug-in owns the Virus (T6)
+    // T7: VTIMSG_WRITTEN after every WRITE (a protocol-6 broker), or only when the test calls report()
+    std::atomic<bool> report_writes{false};
+    std::atomic<uint32_t> wrote{0}; // data bytes of all WRITE messages so far
+    void report() { reply(VTIMSG_WRITTEN, u32(wrote)); }
     // optional: own answers to control requests (setup = the 8 setup bytes; empty reply = -1), and SysEx the client
     // writes (USB-MIDI put back together), e.g. a fake Virus answering dump requests with reply_sysex()
     std::function<Bytes(const Bytes &setup)> on_control;
@@ -132,6 +136,11 @@ struct FakeBroker {
             {
                 std::lock_guard<std::mutex> g(mu);
                 got.push_back({h.type, d});
+            }
+            if (h.type == VTIMSG_WRITE && !d.empty()) {
+                wrote += (uint32_t)d.size() - 1;
+                if (report_writes)
+                    report();
             }
             if (h.type == VTIMSG_HELLO)
                 reply(VTIMSG_STATE, u32(present ? 1 : 0));
@@ -884,6 +893,82 @@ TEST(cc_bulk_refused_while_a_plugin_owns)
     err.clear();
     CHECK(cc::virus_free(b, err) && err.empty());
     CHECK(cc::backup_ram(b, "1", (home.dir / "backup").string(), nullptr, err));
+    b.close();
+}
+
+// T7 (R3-3, R12-2): a broker that reports its writes done (protocol 6) lets the plug-in see what is still below it;
+// room() says how much the next write may carry within a window, written() whether a write is out
+TEST(broker_write_reports_keep_a_window)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::atomic<int> woken{0};
+    b.on_written([&] { woken++; });
+    std::string err;
+    CHECK(b.open(err));
+    const Bytes m(300, 0x11), s(100, 0x22);
+    uint32_t end = 0;
+    CHECK(b.write(0x06, s.data(), s.size(), &end) && end == 100);
+    CHECK_EQ(b.room(256), SIZE_MAX); // no report yet: as before
+    CHECK(eventually([&] { return fb.wrote.load() == 100; }));
+    fb.report();
+    CHECK(eventually([&] { return b.room(256) == 256; }));
+    CHECK(b.written(end) && woken.load() == 1);
+    CHECK(b.write(0x06, m.data(), m.size(), &end) && end == 400);
+    CHECK_EQ(b.room(256), 0u); // 300 bytes below us
+    CHECK(!b.written(end));
+    CHECK(eventually([&] { return fb.wrote.load() == 400; }));
+    fb.report();
+    CHECK(eventually([&] { return b.written(end); }));
+    CHECK_EQ(b.room(256), 256u);
+    CHECK(b.write(0x06, s.data(), s.size(), &end) && b.room(256) == 156);
+    CHECK(b.write(0x06, s.data(), s.size(), &end) && b.room(256) == 56);
+    b.close();
+    // a new connection counts from 0; a broker without reports: no window
+    FakeBroker old;
+    b.set_endpoint(old.path);
+    CHECK(b.open(err));
+    CHECK(b.write(0x06, m.data(), m.size(), &end) && end == 300);
+    CHECK_EQ(b.room(256), SIZE_MAX);
+    CHECK(b.written(end));
+    b.close();
+}
+
+// T7 (E592 (A)): a request's timeout starts when the broker reports it written, not when it entered the socket - a
+// Virus slow to take it no longer eats the wait for its answer
+TEST(memsync_timeout_starts_when_the_broker_wrote_the_request)
+{
+    FakeBroker fb;
+    fb.report_writes = true;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    uint32_t end = 0;
+    const Bytes x = {0x29, 0xF8, 0, 0};
+    CHECK(b.write(0x06, x.data(), x.size(), &end));
+    CHECK(eventually([&] { return b.room(256) == 256; })); // the broker reports
+    fb.report_writes = false;
+    MemorySync *self = nullptr;
+    std::thread virus;
+    MemorySync sync([&](const Bytes &req) {
+        const auto pk = usbmidi_pack(req, 2);
+        const bool ok = b.write(0x06, pk.data(), pk.size(), &end);
+        virus = std::thread([&] { // the Virus takes the request after 400 ms and answers 100 ms later
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            fb.report();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            self->feed(fake_single(0, 0, 1));
+        });
+        return ok;
+    });
+    self = &sync;
+    sync.pause_ms = 0;
+    sync.sending = [&] { return !b.written(end); }; // DeviceOut::busy() counts a queued message until this
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 200, 1);
+    virus.join();
+    CHECK_EQ(r.size(), 524u); // 200 ms from the socket write would have ended before the answer
     b.close();
 }
 

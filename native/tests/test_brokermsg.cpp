@@ -352,3 +352,71 @@ TEST(broker_open_sysex_hold_is_bounded)
     CHECK(until([] { return bh_clients() == 0; }));
     bh_device(0);
 }
+
+namespace {
+// the u32 of the next VTIMSG_WRITTEN (others skipped), -1 when none comes within `ms`
+int64_t next_written(int fd, int ms = 1000)
+{
+    for (;;) {
+        pollfd p{fd, POLLIN, 0};
+        vtimsg h;
+        uint8_t b[VTIMSG_MAX];
+        if (poll(&p, 1, ms) != 1 || ::read(fd, &h, sizeof h) != (ssize_t)sizeof h)
+            return -1;
+        for (size_t got = 0; got < h.len;) {
+            const ssize_t r = ::read(fd, b + got, h.len - got);
+            if (r <= 0)
+                return -1;
+            got += (size_t)r;
+        }
+        uint32_t v;
+        memcpy(&v, b, 4);
+        if (h.type == VTIMSG_WRITTEN && h.len >= 4)
+            return v;
+    }
+}
+} // namespace
+
+TEST(broker_reports_each_write_done)
+{
+    // T7 (R3-3, R12-2): a protocol-6 client hears when each WRITE is handled - the running count of its data bytes -,
+    // a refused one too, and a write the Virus still refuses only once it took it
+    bh_device(1);
+    int a = client();
+    hello(a, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(a), 1);
+    msg(a, VTIMSG_WRITE, note(0x3C));
+    CHECK_EQ(next_written(a), 4);
+    msg(a, VTIMSG_WRITE, {0x06, 0x2F, 0xF4, 0x00, 0x00}); // rule 2: refused, still reported
+    CHECK_EQ(next_written(a), 8);
+    bh_busy(1);
+    msg(a, VTIMSG_WRITE, note(0x3E));
+    CHECK(until([] { return bh_inside() == 1; }));
+    CHECK_EQ(next_written(a, 100), -1); // still below us
+    bh_busy(0);
+    CHECK_EQ(next_written(a), 12);
+    close(a);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_old_client_gets_no_write_reports)
+{
+    // T7: a client of protocol 5 or older (and one without HELLO) gets no VTIMSG_WRITTEN: nothing it does not know
+    bh_device(1);
+    int a = client(), b = client();
+    std::vector<uint8_t> p = {5, 0, 0, 0};
+    const std::string name = "old client";
+    p.insert(p.end(), name.begin(), name.end());
+    msg(a, VTIMSG_HELLO, p);
+    CHECK_EQ(next_state(a), 1);
+    msg(a, VTIMSG_WRITE, note(0x3C));
+    msg(b, VTIMSG_WRITE, note(0x3E));
+    CHECK(until([] { return writes() == 2; }));
+    CHECK_EQ(next_written(a, 200), -1);
+    CHECK_EQ(next_written(b, 200), -1);
+    close(a);
+    close(b);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
