@@ -109,7 +109,9 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    below; asked 2026-11-26), then CI build + hil-win in the win11 VM. REAPER smoke: ok, incl. the user's Virus
    off/on while playing (E603: back in ~20 s, no drops after it).
    CI 45879876669 failed (test_broker -O3 fortify truncation, fixed in the test); running: CI 45880538174 (c561c9b),
-   NEXT: install it, L1 (hil.sh --sleep + sweep), then the VM (W1 hil-win); user does L2-L7; checklist scripts/checklists/round-0.8.44.json published as
+   CI green; installed on Linux (install.sh) + win11 (setup.exe /quiet). L1: hil.sh H1-H6 pass, sweep 10/10 (no sleep:
+   needs the user's sudo). W1 hil-win: H1/H2-2/H3/H6 pass, H2-1 drift +173 ppm only (8-note fit, VM clock, as 0.8.42).
+   Virus back on Linux, VM running. NEXT: user L2-L7 (+LC5 sleep), then W2-W4 in the VM, then the Mac; checklist scripts/checklists/round-0.8.44.json published as
    https://claude.ai/artifact/FhiP1yThnqamYEPb36HBig (marks in rounds/0.8.44/marks).
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
