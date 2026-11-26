@@ -102,7 +102,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    ends the whole RAM sync (original: placeholder, goes on), F2 sync never re-run after a reconnect, F3 broker drops
    the rest of a message after 5 x 1 s NAK, F4 stale cache used as good, F5 setState without note hold. Evidence
    entries not written yet (add with the fixes). User 2026-11-26: fix ALL, one worker at a time, todo
-   work/fix-todo-2026-11-26.md (T1-T21, tick + summary each; done only when all resolved). T1 (E594), T2, T3 (E595), T4, T5 done, T6 next.
+   work/fix-todo-2026-11-26.md (T1-T21, tick + summary each; done only when all resolved). T1 (E594), T2, T3 (E595), T4, T5, T6 (E596) done, T7 next.
 1. **Quiet issues:** #47 + #45 reach 7 days on 2026-11-26 (close message, with the user), #53 on 2026-11-30, #42 asked
    nothing since 11-20 (reporter promised a weekend test). #51: remove VTI_NATIVE_MARGIN, 15-20 min, diag.log.
 2. **#37 after A+B (code in since rc8, E589):** still open: a burst without a Play window (setActive alone, Play again

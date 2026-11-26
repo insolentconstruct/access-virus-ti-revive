@@ -68,6 +68,8 @@ public:
         state_ = std::move(h);
     }
 
+    // One call is one run of WRITE messages (pieces of 1024 bytes): another thread's write never falls between them
+    // (T6, R12-6: an F5 stamp and its event, a SysEx across a piece).
     bool write(uint8_t ep, const uint8_t *data, size_t len);
     // USB control request through the broker; returns bytes transferred or -1. `data` in/out; a reply never writes
     // more than len bytes into it.
@@ -92,6 +94,8 @@ public:
     // (blocks in `out`) or -1 (also at once from a broker without the INFO message: older than 0.8.21). Takes about
     // 2 s the first time.
     int flash_info(std::vector<uint8_t> &out, int timeout_ms = 8000);
+    // Does a plug-in own the Virus (VTIMSG_OWNER, T6)? 1 = yes, 0 = no, -1 = no answer (a broker older than 0.8.44).
+    int plugin_owner(int timeout_ms = 1500);
     // macOS: ask the broker to let the system re-enumerate the Virus (software replug after a sleep, E472); no reply,
     // an older broker ignores it
     bool reenumerate();
@@ -110,6 +114,7 @@ private:
     std::map<uint32_t, int> audio_replies_;   // request number -> result
     int flash_reply_ = 0;
     bool flash_replied_ = false;
+    int owner_reply_ = -1; // ctl_: the last VTIMSG_OWNER_REPLY, -1 = none since the request
     std::vector<uint8_t> flash_;
     uint32_t observe_reply_ = 0;
     std::string name_, endpoint_, broker_version_;
@@ -129,6 +134,7 @@ private:
     StateHandler state_;
     ObserveHandler observe_;
     bool send(uint16_t type, const void *a, size_t alen, const void *b = nullptr, size_t blen = 0);
+    bool send_locked(uint16_t type, const void *a, size_t alen, const void *b, size_t blen); // wr_ held
     void read_loop();
 };
 

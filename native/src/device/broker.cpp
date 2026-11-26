@@ -349,10 +349,15 @@ void Broker::close()
 
 bool Broker::send(uint16_t type, const void *a, size_t alen, const void *b, size_t blen)
 {
+    std::lock_guard<std::mutex> g(wr_);
+    return send_locked(type, a, alen, b, blen);
+}
+
+bool Broker::send_locked(uint16_t type, const void *a, size_t alen, const void *b, size_t blen)
+{
     if (alen + blen > VTIMSG_MAX)
         return false;
     vtimsg h{type, (uint16_t)(alen + blen)};
-    std::lock_guard<std::mutex> g(wr_);
     if (fd_ < 0) // checked under the lock that close() takes
         return false;
     return io_all(fd_, &h, sizeof h, true) && (!alen || io_all(fd_, (void *)a, alen, true)) &&
@@ -361,9 +366,10 @@ bool Broker::send(uint16_t type, const void *a, size_t alen, const void *b, size
 
 bool Broker::write(uint8_t ep, const uint8_t *data, size_t len)
 {
+    std::lock_guard<std::mutex> g(wr_); // all pieces in a row (R12-6)
     for (size_t off = 0; off < len;) { // keep messages below VTIMSG_MAX
         size_t n = std::min<size_t>(len - off, 1024);
-        if (!send(VTIMSG_WRITE, &ep, 1, data + off, n))
+        if (!send_locked(VTIMSG_WRITE, &ep, 1, data + off, n))
             return false;
         off += n;
     }
@@ -406,6 +412,19 @@ int Broker::control(uint8_t rt, uint8_t req, uint16_t value, uint16_t index, uin
 }
 
 bool Broker::reenumerate() { return send(VTIMSG_REENUM, nullptr, 0); }
+
+int Broker::plugin_owner(int timeout_ms)
+{
+    {
+        std::lock_guard<std::mutex> g(ctl_);
+        owner_reply_ = -1;
+    }
+    if (!send(VTIMSG_OWNER, nullptr, 0))
+        return -1;
+    std::unique_lock<std::mutex> l(ctl_);
+    ctl_cv_.wait_for(l, std::chrono::milliseconds(timeout_ms), [&] { return owner_reply_ >= 0; });
+    return owner_reply_;
+}
 
 int Broker::flash_info(std::vector<uint8_t> &out, int timeout_ms)
 {
@@ -559,6 +578,13 @@ void Broker::read_loop()
                 if (flash_reply_ > 0 && (size_t)flash_reply_ != flash_.size())
                     flash_reply_ = -1; // incomplete
                 flash_replied_ = true;
+                ctl_cv_.notify_all();
+            }
+            break;
+        case VTIMSG_OWNER_REPLY:
+            if (h.len >= 4) {
+                std::lock_guard<std::mutex> g(ctl_);
+                owner_reply_ = buf[0] ? 1 : 0;
                 ctl_cv_.notify_all();
             }
             break;

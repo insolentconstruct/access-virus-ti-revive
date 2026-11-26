@@ -132,6 +132,10 @@ static int info(bool raw)
             putchar(fl[i + k] >= 32 && fl[i + k] < 127 ? fl[i + k] : '.');
         printf("|\n");
     }
+    if (!vti::cc::virus_free(broker, err)) { // the bank list is 4 requests: not next to a playing plug-in
+        printf("RAM banks    %s\n", err.c_str());
+        return 0;
+    }
     vti::MemorySync sync(broker);
     std::string cache = vti::cc::cache_dir();
     for (int bank = 1; bank <= 4; bank++) {

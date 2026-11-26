@@ -6130,3 +6130,35 @@ the same way every time, they cannot be told apart).
 - **Method:** static analysis by the research round (REA); code review; unit tests (vtitests, Linux)
 - **Confidence:** HIGH (the original re-checks at every connection: research, code) / HIGH (our code: unit tests of BankCheck and MemorySync; the plug-in's threads not unit tested) / open (on hardware: not run)
 - **Hardware:** no
+
+### E596
+
+One program at a time on the Virus, and one SysEx at a time on the wire; TI Revive's port (fix item T6, research R3-2,
+R11-1, R12-3, R12-6, R12-9, R9-2 of 2026-11-26). Original (from the research's static analysis, not re-read for this
+entry): Access' Control Center refuses to start while the Virus Control plug-in is master and shows a dialog that the
+Virus is in use by the plug-in (Virus Control Center 0x14006f6a0, FUN_140029130, FUN_140005d40, FUN_140027360); the
+driver's raw pipe has one opener, a second open fails with 0xC0000038 (VirusUSB.sys 0xf1009090), so one program writes
+EP 0x06 and asks for dumps; at every (re)open the driver flushes its own RX/TX rings (IOCTLs 0x22008C / 0x2200AC, E036
+log), it sends nothing to the Virus for a half-sent message. The Virus has one request slot and a 256-event send FIFO
+without a room check (R9, E515, E145), and the host CPU parses every cable but 5 with one byte parser (E252), so a note
+inside a running dump would end it (E270). TI Revive before: the Control Center (backup, restore, the RAM bank list)
+shared EP 0x06 with a playing plug-in; the broker passed every client's WRITE message as it came, so a cable-2 byte of
+one client could land inside another client's dump in pieces; `Broker::write` cut writes above 1024 bytes into WRITE
+messages and released its lock between them, so a second thread of the same process (MemorySync next to the plug-in's
+worker) could fall between two pieces. TI Revive now (round 0.8.44): (1) new broker message `VTIMSG_OWNER` /
+`VTIMSG_OWNER_REPLY` (vtiproto.h): the Control Center, `tirevive-cc` and the app ask before each bank of a backup or
+the bank list and before each program of a restore, and refuse with "The Virus is in use by the TI Revive plug-in.
+Close the plug-in (or the DAW) and try again." (also when the broker does not answer: older than 0.8.44); device info
+and Nerd mode still run next to the plug-in. (2) Both brokers (sxhold.h): while one client's SysEx is open on the wire
+(F0 sent, F7 not yet, any cable), other clients' writes wait until it ends, its client goes, it has been quiet for 2 s
+or they waited 2 s; the client's own writes are not held. (3) `Broker::write` holds its lock across all pieces of one
+call. Open (R12-9): a client that dies inside its SysEx leaves the Virus' parser mid-message; no lone F7 or other reset
+is known to be harmless, so the broker sends nothing to close it (it logs "the client left inside a SysEx") and only
+stops holding the others; whether the next F0 restarts the host parser is not known (a known-write test on our own
+Virus could tell). The broker's existing note-offs for a client that played notes still go out at its exit.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control Center 0x14006f6a0, FUN_140029130, FUN_140005d40, FUN_140027360; VirusUSB.sys 0xf1009090 (as read in work/research-2026-11-26 R3, R11, R12); src/broker/vtiproto.h, sxhold.h, vtibroker_posix.c, vtibroker.c (tx_lock, VTIMSG_OWNER, client exit); native/src/device/broker.cpp (write, plugin_owner); native/src/cc/controlcenter.cpp (virus_free, backup_ram, restore_ram); native/tests/test_brokermsg.cpp, test_broker.cpp; E036, E145, E252, E270, E515
+- **Method:** static analysis by the research round (REA); code review; unit tests (brokertests with the POSIX broker and a stub device, vtitests against a fake broker; Linux)
+- **Confidence:** HIGH (the original's exclusivity: research) / HIGH (our code: unit tests; the Windows broker built with mingw, not run) / open (whether an F0 restarts the parser after a cut SysEx; two clients on a real Virus: not run on hardware)
+- **Hardware:** no

@@ -16,6 +16,7 @@
 #include "brokerinfo.h"
 #include "flashinfo.h"
 #include "ctrlguard.h"
+#include "sxhold.h"
 #include "owner.h"
 #include "trafficring.h"
 #include "ratelever.h"
@@ -705,6 +706,26 @@ static DWORD WINAPI device_thread(LPVOID unused)
     return 0;
 }
 
+static vti_sxhold g_sxhold; // g_cs_tx: whose SysEx is open on the wire (sxhold.h)
+
+static uint32_t tx_ms(void) { return (uint32_t)(GetTickCount64() - g_t0); }
+
+// g_cs_tx for client c's write, once no other client's SysEx is open on the wire (bounded, sxhold.h)
+static void tx_lock(const client *c)
+{
+    const uint32_t start = tx_ms();
+    EnterCriticalSection(&g_cs_tx);
+    if (!vti_sx_waits(&g_sxhold, c, tx_ms(), start))
+        return;
+    while (vti_sx_waits(&g_sxhold, c, tx_ms(), start)) {
+        LeaveCriticalSection(&g_cs_tx);
+        Sleep(1);
+        EnterCriticalSection(&g_cs_tx);
+    }
+    if (g_sxhold.who && g_sxhold.who != c && tx_ms() - g_sxhold.last < VTI_SX_HOLD_MS)
+        blog("a write waited %d s for another client's SysEx to end: sent anyway", VTI_SX_HOLD_MS / 1000);
+}
+
 // the device state for one client (2 for a waiting plug-in while the Virus is open)
 static void send_state(client *c)
 {
@@ -824,13 +845,25 @@ static DWORD WINAPI client_thread(LPVOID arg)
             if (h.len >= 1 && !c->observer && !waits) {
                 if (buf[0] == VTI_EP_MI04_OUT && !c->notes && vti_has_note_on(buf + 1, h.len - 1))
                     c->notes = 1;
-                EnterCriticalSection(&g_cs_tx); // the whole message, without g_cs_dev (above)
+                tx_lock(c); // the whole message, without g_cs_dev (above), never inside another client's SysEx
                 if (g_dev && vti_link_on_now(vti_linked(g_dev))) // the last user had unlinked it (E524)
                     vti_link(g_dev, 1);
                 int r = g_dev ? vti_write_keep(g_dev, buf[0], buf + 1, h.len - 1, keep_tx, &c->pipe) : -1;
+                if (!r)
+                    vti_sx_wrote(&g_sxhold, c, &c->sx, tx_ms());
+                else // what reached the Virus is unknown: hold nobody for it
+                    vti_sx_gone(&g_sxhold, c);
                 LeaveCriticalSection(&g_cs_tx);
                 if (g_verbose || r)
                     blog("write ep%02x %d bytes -> %d", buf[0], h.len - 1, r);
+            }
+            break;
+        case VTIMSG_OWNER: // T6: the Control Center asks before a backup or restore (vtiproto.h)
+            if (!c->observer) {
+                EnterCriticalSection(&g_cs_clients);
+                uint32_t o = g_plugin_owner && g_plugin_owner != c;
+                LeaveCriticalSection(&g_cs_clients);
+                send_msg(c, VTIMSG_OWNER_REPLY, &o, 4, NULL, 0);
             }
             break;
         case VTIMSG_FLASHINFO: // the owner only (never an observer or a waiting plug-in)
@@ -886,14 +919,19 @@ static DWORD WINAPI client_thread(LPVOID arg)
     blog("client disconnected%s", c->observer ? " (observer)" : "");
     if (c->observer)
         InterlockedDecrement(&g_obs_count);
+    tx_lock(c); // the note-offs below, not inside another client's SysEx
+    // R12-9 (open, E596): its SysEx stays unfinished in the Virus' parser. No lone F7 or other reset is known to be
+    // harmless (rule 2), so nothing is sent to close it; whether the next F0 restarts the parser is not known. Its
+    // note-offs below would end it as any note does (E270, a reading).
+    if (vti_sx_gone(&g_sxhold, c))
+        blog("the client left inside a SysEx: nothing sent to close it (R12-9, open)");
     if (c->notes) { // a DAW that crashed or was killed cannot send its note-offs any more
         uint8_t off[256];
         int n = vti_pack_notes_off(off, sizeof off);
-        EnterCriticalSection(&g_cs_tx);
         int r = g_dev && n > 0 ? vti_write_keep(g_dev, VTI_EP_MI04_OUT, off, n, keep_tx, NULL) : -1;
-        LeaveCriticalSection(&g_cs_tx);
         blog("all notes off (the client had played notes) -> %d", r);
     }
+    LeaveCriticalSection(&g_cs_tx);
     audio_request(c, 0, NULL, 0);
     client *next = NULL;
     EnterCriticalSection(&g_cs_clients);

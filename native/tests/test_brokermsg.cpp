@@ -229,3 +229,126 @@ TEST(broker_busy_write_stops_when_its_client_goes)
     CHECK(until([] { return bh_clients() == 0; }));
     bh_device(0);
 }
+
+namespace {
+// the u32 of the next message of `type` (others skipped), -1 when none comes within `ms`
+int reply_u32(int fd, uint16_t type, int ms = 1000)
+{
+    for (;;) {
+        pollfd p{fd, POLLIN, 0};
+        vtimsg h;
+        uint8_t b[VTIMSG_MAX];
+        if (poll(&p, 1, ms) != 1 || ::read(fd, &h, sizeof h) != (ssize_t)sizeof h)
+            return -1;
+        for (size_t got = 0; got < h.len;) {
+            const ssize_t r = ::read(fd, b + got, h.len - got);
+            if (r <= 0)
+                return -1;
+            got += (size_t)r;
+        }
+        if (h.type == type && h.len >= 4)
+            return b[0];
+    }
+}
+
+uint8_t last_byte() // the third byte of the last write that reached the Virus (the note number of a note-on)
+{
+    uint8_t b[VTIMSG_MAX];
+    int n;
+    bh_writes(b, &n);
+    return n >= 3 ? b[2] : 0;
+}
+
+const std::vector<uint8_t> kSxOpen = {0x06, 0x34, 0xF0, 0x00, 0x20}; // a dump starts on cable 3, no F7 yet
+const std::vector<uint8_t> kSxEnd = {0x06, 0x35, 0xF7, 0x00, 0x00};
+std::vector<uint8_t> note(uint8_t n) { return {0x06, 0x29, 0x90, n, 0x64}; }
+} // namespace
+
+TEST(broker_tells_whether_a_plugin_owns_the_virus)
+{
+    // T6 (R11-1): the Control Center asks before bulk work; only a plug-in other than the asker counts
+    bh_device(1);
+    int cc = client();
+    hello(cc, "TI Revive Control Center");
+    msg(cc, VTIMSG_OWNER, {});
+    CHECK_EQ(reply_u32(cc, VTIMSG_OWNER_REPLY), 0);
+    int p = client();
+    hello(p, VTI_PLUGIN_NAME);
+    CHECK_EQ(next_state(p), 1);
+    msg(cc, VTIMSG_OWNER, {});
+    CHECK_EQ(reply_u32(cc, VTIMSG_OWNER_REPLY), 1);
+    msg(p, VTIMSG_OWNER, {});
+    CHECK_EQ(reply_u32(p, VTIMSG_OWNER_REPLY), 0);
+    close(p);
+    CHECK(until([] { return bh_clients() == 1; }));
+    msg(cc, VTIMSG_OWNER, {});
+    CHECK_EQ(reply_u32(cc, VTIMSG_OWNER_REPLY), 0);
+    close(cc);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_open_sysex_holds_other_clients_until_f7)
+{
+    // T6 (R12-3): the Virus has one parser for all cables but 5 (E252); another client's message inside a dump in
+    // pieces would end or corrupt it. The holder's own events still go.
+    bh_device(1);
+    int a = client(), b = client();
+    msg(a, VTIMSG_WRITE, kSxOpen);
+    CHECK(until([] { return writes() == 1; }));
+    msg(b, VTIMSG_WRITE, note(0x3C));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    msg(a, VTIMSG_WRITE, note(0x40));
+    CHECK(until([] { return writes() == 2; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK_EQ(writes(), 2); // b still waits
+    CHECK_EQ(last_byte(), 0x40);
+    msg(a, VTIMSG_WRITE, kSxEnd);
+    CHECK(until([] { return writes() == 4; }));
+    CHECK_EQ(last_byte(), 0x3C); // b's, after the F7
+    close(a);
+    close(b);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_open_sysex_hold_ends_when_its_client_dies)
+{
+    // T6 (R12-9): a client that died inside its SysEx holds nobody; the broker sends nothing to close it (no F7 is
+    // known to be harmless, E596)
+    bh_device(1);
+    int a = client(), b = client();
+    msg(a, VTIMSG_WRITE, kSxOpen);
+    CHECK(until([] { return writes() == 1; }));
+    msg(b, VTIMSG_WRITE, note(0x3C));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK_EQ(writes(), 1);
+    const auto t0 = std::chrono::steady_clock::now();
+    close(a);
+    CHECK(until([] { return writes() == 2; }));
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1000));
+    CHECK_EQ(last_byte(), 0x3C); // b's note, nothing in between
+    close(b);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}
+
+TEST(broker_open_sysex_hold_is_bounded)
+{
+    // T6: a SysEx that stays open (a client stuck mid-dump) holds the others at most 2 s, and a stale one (nothing
+    // from its client for 2 s) holds nobody any more
+    bh_device(1);
+    int a = client(), b = client();
+    msg(a, VTIMSG_WRITE, kSxOpen);
+    CHECK(until([] { return writes() == 1; }));
+    msg(b, VTIMSG_WRITE, note(0x3C));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    CHECK_EQ(writes(), 1);
+    CHECK(until([] { return writes() == 2; }, 1500));
+    msg(b, VTIMSG_WRITE, note(0x3E));
+    CHECK(until([] { return writes() == 3; }, 200));
+    close(a);
+    close(b);
+    CHECK(until([] { return bh_clients() == 0; }));
+    bh_device(0);
+}

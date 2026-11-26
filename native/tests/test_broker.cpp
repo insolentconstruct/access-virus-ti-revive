@@ -17,6 +17,7 @@ extern "C" {
 #include "../../src/broker/vtiproto.h"
 #include "../../src/broker/brokerinfo.h"
 #include "../../src/broker/flashinfo.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -61,6 +62,8 @@ struct FakeBroker {
     bool present = true;
     std::atomic<bool> answer_control{true}, answer_audio{true}, answer_observe{true};
     std::atomic<int32_t> audio_result{1};
+    std::atomic<bool> answer_owner{true};
+    std::atomic<uint32_t> plugin_owns{0}; // VTIMSG_OWNER_REPLY: 1 = a plug-in owns the Virus (T6)
     // optional: own answers to control requests (setup = the 8 setup bytes; empty reply = -1), and SysEx the client
     // writes (USB-MIDI put back together), e.g. a fake Virus answering dump requests with reply_sysex()
     std::function<Bytes(const Bytes &setup)> on_control;
@@ -152,6 +155,8 @@ struct FakeBroker {
                 reply(VTIMSG_CONTROL_REPLY, r);
             } else if (h.type == VTIMSG_AUDIO && answer_audio)
                 reply(VTIMSG_AUDIO_REPLY, u32((uint32_t)audio_result.load()));
+            else if (h.type == VTIMSG_OWNER && answer_owner)
+                reply(VTIMSG_OWNER_REPLY, u32(plugin_owns));
             else if (h.type == VTIMSG_OBSERVE && answer_observe) {
                 reply(VTIMSG_OBSERVE_REPLY, u32(VTI_PROTO_VERSION));
                 reply(VTIMSG_OBS_LOG, Bytes{'h', 'i'});
@@ -796,6 +801,89 @@ TEST(broker_replacing_the_rx_handler_waits_for_a_running_call)
     CHECK(eventually([&] { return inside.load(); }));
     b.on_rx(nullptr);
     CHECK(done.load()); // the running call finished before on_rx returned
+    b.close();
+}
+
+
+// T6 (R12-6): one write() is one run of WRITE messages: another thread's write (MemorySync's send_ next to the
+// plug-in's worker) never falls between its pieces (an F5 stamp and its event, a SysEx across 1024 bytes)
+TEST(broker_write_is_atomic_across_its_pieces)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    const int kRounds = 50;
+    auto writer = [&](uint8_t v) {
+        Bytes m(3000, v);
+        for (int i = 0; i < kRounds; i++)
+            b.write(0x06, m.data(), m.size());
+    };
+    std::thread t1(writer, 0x11), t2(writer, 0x22);
+    t1.join();
+    t2.join();
+    CHECK(eventually([&] { return fb.messages(VTIMSG_WRITE).size() == 2u * kRounds * 3; }));
+    Bytes joined;
+    for (auto &m : fb.messages(VTIMSG_WRITE))
+        joined.insert(joined.end(), m.data.begin() + 1, m.data.end());
+    bool whole = joined.size() == 2u * kRounds * 3000;
+    for (size_t at = 0; whole && at < joined.size(); at += 3000)
+        whole = std::all_of(joined.begin() + (long)at, joined.begin() + (long)at + 3000,
+                            [&](uint8_t x) { return x == joined[at]; });
+    CHECK(whole);
+    b.close();
+}
+
+// T6 (R11-1): the broker says whether a plug-in owns the Virus; an older broker does not answer (-1)
+TEST(broker_plugin_owner_request)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    CHECK_EQ(b.plugin_owner(), 0);
+    fb.plugin_owns = 1;
+    CHECK_EQ(b.plugin_owner(), 1);
+    fb.answer_owner = false;
+    CHECK_EQ(b.plugin_owner(100), -1);
+    b.close();
+}
+
+// T6 (R11-1, R3-2): like the original, the Control Center's bulk work does not run while the plug-in has the Virus
+// (overlapping requests, a note inside a dump); nothing is sent then, and a broker that cannot tell counts as busy
+TEST(cc_bulk_refused_while_a_plugin_owns)
+{
+    TempHome home;
+    FakeBroker fb;
+    FakeRam ram;
+    fb.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    fb.plugin_owns = 1;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    CHECK(!cc::backup_ram(b, "1", (home.dir / "backup").string(), nullptr, err));
+    CHECK(err.find("in use by the TI Revive plug-in") != std::string::npos);
+    std::vector<Dump> backup(128);
+    for (int p = 0; p < 128; p++)
+        backup[p] = fake_single(1, p, p + 1000);
+    int written = -1;
+    err.clear();
+    CHECK(!cc::restore_ram(b, 2, backup, nullptr, written, err) && written == 0);
+    CHECK(err.find("in use by the TI Revive plug-in") != std::string::npos);
+    err.clear();
+    CHECK(!cc::virus_free(b, err) && !err.empty());
+    CHECK(fb.messages(VTIMSG_WRITE).empty());
+    fb.answer_owner = false; // an older broker
+    err.clear();
+    CHECK(!cc::virus_free(b, err) && !err.empty());
+    fb.answer_owner = true;
+    fb.plugin_owns = 0;
+    err.clear();
+    CHECK(cc::virus_free(b, err) && err.empty());
+    CHECK(cc::backup_ram(b, "1", (home.dir / "backup").string(), nullptr, err));
     b.close();
 }
 

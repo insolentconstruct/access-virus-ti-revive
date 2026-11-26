@@ -14,6 +14,7 @@
 #include "brokerinfo.h"
 #include "flashinfo.h"
 #include "ctrlguard.h"
+#include "sxhold.h"
 #include "owner.h"
 #include "trafficring.h"
 #include "keyport.h"
@@ -906,7 +907,26 @@ static int keep_tx(void *client_fd)
                                                  ));
 }
 
+static vti_sxhold g_sxhold; // g_cs_tx: whose SysEx is open on the wire (sxhold.h)
+
+// g_cs_tx for client c's write, once no other client's SysEx is open on the wire (bounded, sxhold.h)
+static void tx_lock(const client *c)
+{
+    const uint32_t start = uptime_ms();
+    pthread_mutex_lock(&g_cs_tx);
+    if (!vti_sx_waits(&g_sxhold, c, uptime_ms(), start))
+        return;
+    while (vti_sx_waits(&g_sxhold, c, uptime_ms(), start)) {
+        pthread_mutex_unlock(&g_cs_tx);
+        usleep(1000);
+        pthread_mutex_lock(&g_cs_tx);
+    }
+    if (g_sxhold.who && g_sxhold.who != c && uptime_ms() - g_sxhold.last < VTI_SX_HOLD_MS)
+        blog("a write waited %d s for another client's SysEx to end: sent anyway", VTI_SX_HOLD_MS / 1000);
+}
+
 #ifdef __APPLE__
+// shortcut: not held by an open SysEx (sxhold.h); the 0.7.x opt-in path only, no Control Center next to it
 static int midi_write(const uint8_t *data, int len) // pump thread: plug-in channel packets from the MDW ring
 {
     pthread_mutex_lock(&g_cs_tx);
@@ -1201,10 +1221,14 @@ static void *client_thread(void *arg)
             if (h.len >= 1 && may_use(c)) {
                 if (buf[0] == VTI_EP_MI04_OUT && !c->notes && vti_has_note_on(buf + 1, h.len - 1))
                     c->notes = 1;
-                pthread_mutex_lock(&g_cs_tx); // the whole message, without g_cs_dev (above)
+                tx_lock(c); // the whole message, without g_cs_dev (above), never inside another client's SysEx
                 if (g_dev && vti_link_on_now(vti_linked(g_dev))) // the last user had unlinked it (E524)
                     vti_link(g_dev, 1);
                 int r = g_dev ? vti_write_keep(g_dev, buf[0], buf + 1, h.len - 1, keep_tx, &c->fd) : -1;
+                if (!r)
+                    vti_sx_wrote(&g_sxhold, c, &c->sx, uptime_ms());
+                else // what reached the Virus is unknown: hold nobody for it
+                    vti_sx_gone(&g_sxhold, c);
                 pthread_mutex_unlock(&g_cs_tx);
                 if (g_verbose && buf[0] == VTI_EP_MI04_OUT)
                     f5_note(buf + 1, h.len - 1);
@@ -1230,6 +1254,15 @@ static void *client_thread(void *arg)
             pthread_mutex_unlock(&g_cs_dev);
             pthread_mutex_unlock(&g_cs_tx);
             vti_log("re-enumerate after a sleep (E472): %d%s\n", r, r == -2 ? " (skipped, the last one was less than 60 s ago)" : "");
+            break;
+        }
+        case VTIMSG_OWNER: { // T6: the Control Center asks before a backup or restore (vtiproto.h)
+            if (c->observer) // nothing may be written to an observer outside its queue
+                break;
+            pthread_mutex_lock(&g_cs_clients);
+            uint32_t o = g_owner && g_owner != c;
+            pthread_mutex_unlock(&g_cs_clients);
+            send_msg(c, VTIMSG_OWNER_REPLY, &o, 4, NULL, 0);
             break;
         }
         case VTIMSG_FLASHINFO: { // the owner only (never an observer or a waiting plug-in)
@@ -1306,7 +1339,12 @@ static void *client_thread(void *arg)
     if (c->observer)
         obs_detach(c);
     blog("client disconnected%s", c->observer ? " (observer)" : "");
-    pthread_mutex_lock(&g_cs_tx); // the writes below, and g_dev stays open until the end
+    tx_lock(c); // the writes below (not inside another client's SysEx), and g_dev stays open until the end
+    // R12-9 (open, E596): its SysEx stays unfinished in the Virus' parser. No lone F7 or other reset is known to be
+    // harmless (rule 2), so nothing is sent to close it; whether the next F0 restarts the parser is not known. Its
+    // note-offs below would end it as any note does (E270, a reading).
+    if (vti_sx_gone(&g_sxhold, c))
+        blog("the client left inside a SysEx: nothing sent to close it (R12-9, open)");
     if (c->notes && g_dev) { // a DAW that crashed or was killed cannot send its note-offs any more
         uint8_t off[256];
         int n = vti_pack_notes_off(off, sizeof off);

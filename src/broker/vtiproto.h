@@ -10,12 +10,17 @@
 //   OBSERVE  {[u8 flags]}                     OBSERVE_REPLY {version}      (protocol 4: read-only observer;
 //                                                                           flags bit 0: first the pre-roll, trafficring.h)
 //                                             INFO {"version=..."}         (after HELLO, brokerinfo.h)
+//   OWNER    {}                               OWNER_REPLY {plugin_owns}    (T6: does a plug-in own the Virus?)
 //                                             OBS_TRAFFIC / OBS_LOG / OBS_STATUS (to observers only)
 //
 // Observers (protocol 4, the Control Center's Nerd mode) never own the Virus: their WRITE, CONTROL and AUDIO are
 // refused. They get a copy of the traffic the broker passes on, its log lines and a status line once a second,
 // through a bounded queue per observer: when an observer falls behind, only its own copy is dropped (counted).
 // HELLO may carry the client's name after the version (shown in the status); older clients send only the version.
+//
+// One SysEx at a time on the wire (T6, R12-3): while one client's SysEx is open (F0 sent, F7 not yet, any cable; the
+// Virus parses all cables but 5 with one parser, E252), the other clients' writes wait until it ends, its client goes,
+// it has been quiet for 2 s, or they waited 2 s (sxhold.h). The client's own writes are not held.
 #pragma once
 #include <stdint.h>
 
@@ -35,6 +40,9 @@ enum {
                               // per device open, then cached)
     VTIMSG_REENUM = 8,        // client -> broker: macOS software replug after a sleep (E472); owner only, no reply (an
                               // older broker logs "unknown message" and ignores it)
+    VTIMSG_OWNER = 9,         // client -> broker: does a plug-in own the Virus? (T6: the Control Center asks before a
+                              // backup or restore, which the original refuses while its plug-in runs; an older broker
+                              // logs "unknown message" and does not answer)
     VTIMSG_RX = 0x81,         // broker -> client: u8 ep, data...
     VTIMSG_CONTROL_REPLY = 0x83, // broker -> client: u32 seq, i32 result (bytes or -1), IN data...
     VTIMSG_STATE = 0x84,      // broker -> client: u32 connected (1 = device open; 2 = open, but another program's
@@ -48,6 +56,7 @@ enum {
     VTIMSG_OBS_LOG = 0x89,     // broker -> observer: one log line (text, no newline)
     VTIMSG_OBS_STATUS = 0x8A,  // broker -> observer, once a second: "key=value" fields separated by tabs
     VTIMSG_FLASHINFO_REPLY = 0x8C, // broker -> client: i32 result (bytes or -1), the blocks (flashinfo.h)
+    VTIMSG_OWNER_REPLY = 0x8D, // broker -> client: u32 1 = a plug-in other than the asker owns the Virus, 0 = none
     VTIMSG_INFO = 0x8B,        // broker -> client after its HELLO: "key=value" fields separated by tabs ("version=0.8.21",
                                // brokerinfo.h); older clients ignore it
 };

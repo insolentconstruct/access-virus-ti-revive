@@ -24,6 +24,13 @@ struct DeviceInfo {
 // The USB identity of the connected Virus through the broker (no serial number: it would end up in bug reports).
 bool read_device_info(Broker &broker, DeviceInfo &info, std::string &error);
 
+// May bulk work (a backup, a restore, the bank list: loops of dump requests or dumps) start? The original Control
+// Center refuses to run while its plug-in has the Virus (R11-1, E596); ours shares the Virus with the plug-in, where
+// two requesters overlap and a plug-in note can end a dump in pieces. False with `error` (a message for the user)
+// while a plug-in owns the Virus, and when the broker does not say (older than this Control Center). Device info and
+// Nerd mode do not need it.
+bool virus_free(Broker &broker, std::string &error);
+
 // The patch name of a 524-byte single dump (10 characters, trailing blanks removed).
 std::string patch_name(const Dump &d);
 
@@ -36,8 +43,8 @@ std::string default_backup_dir();
 // Reads RAM banks 1..4 (`banks`, e.g. "1234") - cached programs whose fingerprint still matches are not requested
 // again - and writes "RAM A.mid".. to `out_dir` in the original's library format (readable by the TI Revive plug-in
 // and Access' Virus Control). progress(bank, program, fetched) per program. `stop` (optional) cancels between two
-// requests (what was fetched stays in the cache, no library is written for the bank). The broker serves one program
-// at a time: while the plug-in has the Virus, open() reports no device.
+// requests (what was fetched stays in the cache, no library is written for the bank). Refused while a plug-in owns
+// the Virus (virus_free), checked before each bank.
 bool backup_ram(Broker &broker, const std::string &banks, const std::string &out_dir,
                 const std::function<void(int, int, bool, const Dump &)> &progress, std::string &error,
                 const std::atomic<bool> *stop = nullptr);
@@ -59,7 +66,8 @@ std::vector<std::vector<uint8_t>> dump_pieces(const Dump &d);
 // Restores RAM bank 1..4 from `backup`: brings the bank cache up to date (bank info + changed programs), writes the
 // programs restore_plan names (each in pieces 10 ms apart, like the plug-in), reads each one back and compares, and
 // saves the cache. progress(done, total) per written program; `written` = programs written. False with `error` when
-// the Virus does not answer, a read-back differs, or `stop` cancels ("cancelled").
+// a plug-in owns the Virus (virus_free, checked before each program too), the Virus does not answer, a read-back
+// differs, or `stop` cancels ("cancelled").
 bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
                  const std::function<void(int, int)> &progress, int &written, std::string &error,
                  const std::atomic<bool> *stop = nullptr);

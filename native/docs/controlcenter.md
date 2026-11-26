@@ -87,12 +87,19 @@ installation in `/Applications` works too (checked on the M3: 106 files, layout 
   broker like the plug-in (`src/device/broker.*`), so the broker must be installed; it is started on demand.
 - Only requests documented in `findings/evidence.md` are sent: standard USB GET_DESCRIPTOR (device, manufacturer and
   product string; not the serial number, which would end up in bug reports) (E115), bank info `39` -> `14` and
-  single dump request `30` -> `10` (E027, E031, E037). Nothing is written to the Virus.
+  single dump request `30` -> `10` (E027, E031, E037). The one write is Restore: single dumps into a RAM bank, the
+  messages the plug-in's browser sends (E294-E303), never the Virus' flash.
 - Backups reuse the plug-in's bank cache (`MemorySync`): programs whose fingerprint still matches come from the cache,
   the others are read at the Virus' pace of about 1 s each (a full bank: about 2 minutes). The cache is updated on
   the way.
-- **Close the plug-in (or the DAW) first.** The broker serves one program at a time; while the plug-in has the
-  Virus, the tool reports "no Virus". The tool connects only while a command runs, so it never blocks the plug-in.
+- **Close the plug-in (or the DAW) first** for the RAM bank list, a backup and a restore. Like the original, which
+  refuses to start while its plug-in has the Virus (E596), they do not run next to a plug-in that owns the Virus:
+  two programs asking for dumps at once overlap (the Virus answers one request at a time), and a plug-in note inside
+  a dump ends it. The tool asks the broker (`VTIMSG_OWNER`) before each bank and each restored program and says "The
+  Virus is in use by the TI Revive plug-in. Close the plug-in (or the DAW) and try again." Device info and Nerd mode
+  work next to the plug-in. The broker also keeps one client's SysEx whole on the wire: while it is open, the other
+  clients' writes wait (up to 2 s, `src/broker/sxhold.h`). The tool connects only while a command runs, so it never
+  blocks the plug-in.
 - Backups go to `<Documents>/Access Music/Virus TI/Backups/<date time>/` (next to `Patches`, so the plug-in's
   browser does not list every backup). The files are in the original's library format: copy one into `Patches` to
   open it in the plug-in's browser; Access' Virus Control reads them too.

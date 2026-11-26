@@ -291,8 +291,8 @@ private:
         buttons_[6] = button(W - M - 230, 14, 110, kSkin, "Access look");
         button(W - M - 320, 14, 80, kOptionsBtn, "Options");
         auto *note = new CMultiLineTextLabel(CRect(M, 372, W - M, H - 10));
-        note->setText("Only Restore writes to the Virus: programs into a RAM bank, never its flash. It works next to "
-                      "your DAW (the plug-in and the Control Center share the Virus). Firmware/OS updates, Burn To "
+        note->setText("Only Restore writes to the Virus: programs into a RAM bank, never its flash. Close the plug-in "
+                      "(or the DAW) before a backup or restore. Firmware/OS updates, Burn To "
                       "Flash and factory reset are not supported, on purpose (they write the Virus' flash). Backups "
                       "open in the plug-in once their .mid files are copied into the Patches folder.");
         note->setFontColor(kDim);
@@ -418,6 +418,8 @@ private:
             snprintf(line, sizeof line, "%s %s  (USB %04x:%04x, bcdDevice %x.%02x)", di.manufacturer.c_str(),
                      di.product_name.c_str(), di.vendor, di.product, di.bcd >> 8, di.bcd & 0xFF);
             set(&Shared::device, line);
+            if (!vti::cc::virus_free(broker, err)) // the bank list is 4 requests: not next to a playing plug-in
+                return set(&Shared::status, err);
             vti::MemorySync sync(broker);
             std::string cache = vti::cc::cache_dir();
             for (int bank = 1; bank <= 4 && !stop_; bank++) {

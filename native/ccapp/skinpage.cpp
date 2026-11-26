@@ -198,9 +198,9 @@ public:
             if (p == "TIRevive/BankTitle")
                 return "RAM BANKS";
             if (p == "TIRevive/BankNote")
-                return "Only Restore writes to the Virus: programs into a RAM bank, never its flash. It works next to\n"
-                       "your DAW. Burn Flash, OS updates and factory reset are not offered, on purpose (they write the\n"
-                       "flash). Backups open in the plug-in once their .mid files are in the Patches folder.";
+                return "Only Restore writes to the Virus: programs into a RAM bank, never its flash. Close the plug-in\n"
+                       "(or the DAW) first. Burn Flash, OS updates and factory reset are not offered, on purpose (they\n"
+                       "write the flash). Backups open in the plug-in once their .mid files are in the Patches folder.";
             const int b = p.back() - '0';
             return b >= 0 && b < 4 ? banks_[b] : "";
         }
@@ -963,6 +963,13 @@ private:
                 for (auto &b : banks_)
                     b.clear();
                 banks_[0] = "No Virus found";
+                return;
+            }
+            if (!vti::cc::virus_free(broker, err)) { // the bank list is 4 requests: not next to a playing plug-in
+                std::lock_guard<std::mutex> l(mu_);
+                for (auto &b : banks_)
+                    b.clear();
+                banks_[0] = vti::cc::fit_text(err, 105);
                 return;
             }
             vti::MemorySync sync(broker);

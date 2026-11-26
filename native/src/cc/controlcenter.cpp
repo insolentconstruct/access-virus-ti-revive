@@ -41,6 +41,17 @@ bool read_device_info(Broker &broker, DeviceInfo &info, std::string &error)
     return true;
 }
 
+bool virus_free(Broker &broker, std::string &error)
+{
+    const int o = broker.plugin_owner();
+    if (o == 0)
+        return true;
+    error = o > 0 ? "The Virus is in use by the TI Revive plug-in. Close the plug-in (or the DAW) and try again."
+                  : "The TI Revive service did not say whether the plug-in uses the Virus (it is older than this "
+                    "Control Center). Install TI Revive again, then try again.";
+    return false;
+}
+
 std::string patch_name(const Dump &d)
 {
     if (d.size() < 259)
@@ -99,6 +110,8 @@ bool backup_ram(Broker &broker, const std::string &banks, const std::string &out
         if (bank < 1 || bank > 4)
             continue;
         std::string name = std::string("RAM ") + (char)('A' + bank - 1);
+        if (!virus_free(broker, error)) // also a plug-in that started during the backup
+            return false;
         Bank b;
         if (!cache.empty())
             load_bank_file(cache + "/" + name, b);
@@ -197,6 +210,8 @@ bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
         return false;
     }
     const std::string name = std::string("RAM ") + (char)('A' + bank - 1);
+    if (!virus_free(broker, error))
+        return false;
     std::string cache = cache_dir();
     std::error_code ec;
     if (!cache.empty())
@@ -223,6 +238,8 @@ bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
             error = "cancelled";
             break;
         }
+        if (!virus_free(broker, error)) // a plug-in that started during the restore: its notes would end a dump
+            break;
         bool ok = true;
         for (auto &piece : dump_pieces(plan[i].dump)) {
             ok = ok && broker.write(0x06, piece.data(), piece.size());
