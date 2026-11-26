@@ -896,6 +896,103 @@ TEST(memsync_read_missing_gives_up_a_silent_slot_and_goes_on)
     CHECK(other[4] == v.ram[30][4] && other[11].empty() && other[12].empty());
 }
 
+// T18 (research R1-5, R10-6): like the original, a RAM single dump no transact waits for is filed under its own bank
+// and program - here the late answer to a slot the sync gave up
+TEST(memsync_late_answer_fills_a_given_up_slot)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank bank;
+    for (int p = 0; p < 128; p++)
+        v.ram[1][p] = fake_single(1, p, p);
+    v.silent = {5};
+    CHECK_EQ(sync.sync_bank(1, bank), 127);
+    CHECK(sync.unconfirmed[1] == std::set<int>{5});
+    CHECK(!sync.has_late(1));
+    sync.feed(v.ram[1][5]); // the answer comes after the last ask gave up
+    CHECK(sync.has_late(1));
+    std::vector<Dump> cache(bank.begin(), bank.end());
+    CHECK_EQ(sync.file_late(1, cache), 1);
+    CHECK(cache[5] == v.ram[1][5]);
+    CHECK(sync.unconfirmed[1].empty());
+    CHECK(!sync.has_late(1)); // filed once
+    CHECK_EQ(sync.file_late(1, cache), 0);
+}
+
+TEST(memsync_unasked_single_is_filed_by_its_own_bytes)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    const Dump d = fake_single(2, 9, 77), newer = fake_single(2, 9, 78);
+    sync.feed(d);
+    sync.feed(newer); // the newest per slot
+    CHECK(sync.has_late(2) && !sync.has_late(1));
+    std::vector<Dump> cache; // a bank without a cache yet
+    CHECK_EQ(sync.file_late(2, cache), 1);
+    CHECK(cache.size() == 128 && cache[9] == newer && cache[8].empty());
+    sync.feed(newer); // a duplicate of what the cache holds: filed, nothing changed
+    CHECK_EQ(sync.file_late(2, cache), 0);
+    CHECK(cache[9] == newer);
+}
+
+TEST(memsync_late_filing_ignores_edit_buffers_rom_banks_and_damage)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.feed(fake_single(0, 3, 1));  // bank 0: an edit buffer (and the readiness probe's 10 00 00)
+    sync.feed(fake_single(5, 3, 1));  // a user ROM bank: its cache is read_missing's
+    Dump bad = fake_single(1, 3, 1);
+    bad[100] ^= 1;                    // damaged on the way: the checksum is not ours (E552)
+    sync.feed(bad);
+    Dump cut = fake_single(1, 4, 1);
+    cut.resize(300);                  // a lost packet
+    cut.back() = 0xF7;
+    sync.feed(cut);
+    Bytes info = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x14, 0x01, 0x00};
+    info.resize(266, 0);
+    info.push_back(0xF7);
+    sync.feed(info); // a bank info nobody waits for: nothing to file it in
+    for (int b = 0; b <= 5; b++)
+        CHECK(!sync.has_late(b));
+    std::vector<Dump> cache;
+    CHECK_EQ(sync.file_late(1, cache), 0);
+    CHECK(cache.empty());
+}
+
+TEST(memsync_late_filing_held_while_a_ram_write_runs)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.feed(fake_single(1, 3, 1));
+    sync.hold_late(true); // a RAM write or download starts: what came before may be older than what it writes
+    CHECK(!sync.has_late(1));
+    sync.feed(fake_single(1, 4, 1)); // and what comes while it runs too
+    std::vector<Dump> cache;
+    CHECK_EQ(sync.file_late(1, cache), 0);
+    sync.hold_late(false);
+    CHECK(!sync.has_late(1));
+    sync.feed(fake_single(1, 4, 2)); // after it: filed again
+    CHECK(sync.has_late(1));
+}
+
+// the answer a transact takes is newer than a dump kept for the same slot before; a dump of another slot that comes
+// meanwhile is kept
+TEST(memsync_transact_answer_replaces_a_kept_dump)
+{
+    MemorySync *ms = nullptr;
+    MemorySync sync([&](const Bytes &) {
+        ms->feed(fake_single(1, 6, 1));
+        ms->feed(fake_single(1, 4, 2));
+        return true;
+    });
+    ms = &sync;
+    sync.pause_ms = 5;
+    sync.feed(fake_single(1, 4, 1));
+    CHECK(sync.single(1, 4) == fake_single(1, 4, 2));
+    std::vector<Dump> cache;
+    CHECK_EQ(sync.file_late(1, cache), 1);
+    CHECK(cache[6] == fake_single(1, 6, 1) && cache[4].empty());
+}
+
 TEST(memsync_bank_file_round_trip)
 {
     namespace fs = std::filesystem;
@@ -1377,4 +1474,14 @@ TEST(memsync_file_watch_sees_a_rewritten_cache_file)
     CHECK(!w.changed(path)); // gone: nothing to reload
     CHECK(save_bank_file(path, b));
     CHECK(w.changed(path)); // there again
+}
+
+TEST(memsync_drop_late_forgets_kept_dumps)
+{
+    // T18: a dump kept from a Virus that went away is not filed into the cache of the one that comes back
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.feed(fake_single(1, 5, 7));
+    CHECK(sync.has_late(1));
+    sync.drop_late();
+    CHECK(!sync.has_late(1));
 }

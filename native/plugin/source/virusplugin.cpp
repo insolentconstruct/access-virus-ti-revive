@@ -1636,6 +1636,8 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
             for (auto &c : ram_confirmed_) // its RAM may change while it is away; the check at the return confirms it
                 c = false;
             held_notes_.away(); // released at the return: a note-off in the gap never reaches it (R6-4)
+            if (sync_)
+                sync_->drop_late(); // another Virus may come back on this slot (T18)
             set_lcd("Virus disconnected", std::string(), std::string(), std::string());
             return;
         }
@@ -1793,6 +1795,8 @@ tresult PLUGIN_API VirusPlugin::setActive(TBool state)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 if (!stop_warm_ && start_bank_check())
                     sync_banks(false);
+                if (!stop_warm_)
+                    file_late_dumps();
             }
         });
     }
@@ -4083,6 +4087,42 @@ bool VirusPlugin::start_bank_check()
     return true;
 }
 
+// like the original files any single dump at any time (research R1-5/R10-6): the late answer to a given-up slot, a
+// second answer, one nobody asked for (MemorySync::has_late). Here, not on the reader thread: the cache file is
+// written. After a sync (this thread runs it, and owns sync_->unconfirmed), under download_mu_ so no RAM write or
+// download starts meanwhile; while one runs MemorySync keeps nothing (hold_late)
+void VirusPlugin::file_late_dumps()
+{
+    if (!sync_)
+        return;
+    std::lock_guard<std::mutex> g(download_mu_);
+    if (downloading_.load())
+        return;
+    for (int b = 0; b < 4; b++) {
+        if (!sync_->has_late(b + 1))
+            continue;
+        Bank bank;
+        std::string dir;
+        int n;
+        {
+            std::lock_guard<std::mutex> lk(banks_mu_);
+            auto &v = banks_[b];
+            n = sync_->file_late(b + 1, v);
+            if (n == 0) // the cache had it already (a second answer)
+                continue;
+            std::copy(v.begin(), v.begin() + 128, bank.begin());
+            dir = ram_cache_from_;
+            drop_.forget(); // the Virus' RAM is not what an undo would assume
+        }
+        if (!dir.empty() && !save_bank_file(dir + "/RAM " + (char)('A' + b), bank) && out_)
+            out_->log("Virus TI native: RAM %c: saving the bank cache failed\n", 'A' + b);
+        if (out_)
+            out_->log("Virus TI native: RAM %c: %d single dump(s) no request waited for filed into the cache (T18)\n",
+                      'A' + b, n);
+        ui_dirty_ = true;
+    }
+}
+
 void VirusPlugin::sync_banks(bool at_start)
 {
     // until the Virus is ready it works through the start-up messages and the state and plays notes up to 1.6 s late
@@ -4767,6 +4807,7 @@ bool VirusPlugin::download_bank(int bank)
     }
     if (download_thread_.joinable())
         download_thread_.join(); // the previous one has ended (downloading_ was false)
+    sync_->hold_late(true); // a dump kept from before could be older than what it reads (T18)
     download_thread_ = std::thread([this, bank] {
         Bank old, cache;
         {
@@ -4816,6 +4857,7 @@ bool VirusPlugin::download_bank(int bank)
         if (out_)
             out_->log("Virus TI native: download of RAM %c %s\n", 'A' + bank, n == 128 ? "done" : "stopped");
         ui_dirty_ = true;
+        sync_->hold_late(false);
         downloading_ = false;
     });
     return true;
@@ -5069,10 +5111,14 @@ bool VirusPlugin::send_ram_writes(std::vector<BankDrop::Write> w, const std::str
         return false;
     if (download_thread_.joinable())
         download_thread_.join(); // the previous one has ended (downloading_ was false)
+    if (sync_)
+        sync_->hold_late(true); // a dump kept from before could be older than what it writes (T18)
     download_thread_ = std::thread([this, w = std::move(w), rename, on_fail]() mutable {
         if (!write_ram(w, rename) && on_fail)
             on_fail();
         ui_dirty_ = true;
+        if (sync_)
+            sync_->hold_late(false);
         downloading_ = false;
     });
     return true;

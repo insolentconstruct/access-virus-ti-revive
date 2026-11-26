@@ -868,6 +868,7 @@ private:
     void sync_banks(bool at_start = true);
     BankCheck bank_check_; // the bank check again at every connection, like the original (R6-1)
     bool start_bank_check(); // the sync thread: true = a check is due, syncing_ set
+    void file_late_dumps();  // the sync thread: RAM dumps no request waited for into the bank cache (T18)
     // ROM A.. for the connected model: from the user's firmware.bin, except the banks with the user's own patches
     // (E381, #22), which come from their cache file; returns the number of their programs still to read from the Virus
     int load_rom_banks();

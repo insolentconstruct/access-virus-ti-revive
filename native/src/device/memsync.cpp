@@ -127,15 +127,70 @@ MemorySync::~MemorySync()
         broker_->on_rx(nullptr);
 }
 
+// a RAM single dump as the Virus sends it, worth filing (has_late)
+static bool fileable(const std::vector<uint8_t> &m)
+{
+    if (m.size() != SINGLE_SIZE || m[6] != 0x10 || m[7] < 1 || m[7] > 4 || m[8] > 127 || m.back() != 0xF7)
+        return false;
+    Dump c = m;
+    BankDrop::checksums(c);
+    return c == m;
+}
+
 void MemorySync::feed(const std::vector<uint8_t> &m)
 {
     if (m.size() > 8 && m[0] == 0xF0 && m[1] == 0x00 && m[2] == 0x20 && m[3] == 0x33) {
+        const bool single = fileable(m); // outside the lock: the reader thread holds it as short as it can
         std::lock_guard<std::mutex> lk(mu_);
+        const bool answer = waiting_ && m.size() >= 6 + match_.size() &&
+                            std::equal(match_.begin(), match_.end(), m.begin() + 6);
+        if (single && !answer && !late_held_)
+            late_[{m[7], m[8]}] = m;
         if (!waiting_) // the plug-in sees every Access SysEx of a session: keep only what a request waits for
             return;
         inbox_.push_back(m);
         cv_.notify_all();
     }
+}
+
+bool MemorySync::has_late(int bank)
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = late_.lower_bound({bank, 0});
+    return it != late_.end() && it->first.first == bank;
+}
+
+int MemorySync::file_late(int bank, std::vector<Dump> &cache)
+{
+    std::map<int, Dump> got;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        for (auto it = late_.lower_bound({bank, 0}); it != late_.end() && it->first.first == bank;)
+            got[it->first.second] = std::move(it->second), it = late_.erase(it);
+    }
+    if (got.empty())
+        return 0;
+    cache.resize(128);
+    int changed = 0;
+    for (auto &[p, d] : got) {
+        unconfirmed[bank].erase(p);
+        if (cache[p] != d)
+            cache[p] = std::move(d), changed++;
+    }
+    return changed;
+}
+
+void MemorySync::hold_late(bool on)
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    late_held_ = on;
+    late_.clear();
+}
+
+void MemorySync::drop_late()
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    late_.clear();
 }
 
 size_t MemorySync::queued()
@@ -155,6 +210,8 @@ bool MemorySync::wait_slice(const std::vector<uint8_t> &match, Dump &reply, std:
         for (auto &m : inbox_)
             if (m.size() >= 6 + match.size() && std::equal(match.begin(), match.end(), m.begin() + 6)) {
                 reply = m;
+                if (m.size() == SINGLE_SIZE && m[6] == 0x10) // newer than a dump kept for the slot before (T18)
+                    late_.erase({m[7], m[8]});
                 return true;
             }
         return cancelled_;
@@ -199,6 +256,7 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
             // late answer to an earlier request (a probe after a reconnect, R2-5). Kept over all tries (E591 (1))
             std::lock_guard<std::mutex> lk(mu_);
             inbox_.clear();
+            match_ = match; // feed() keeps the rest for file_late (T18)
             waiting_ = true;
             open_ = true; // before the send: the answer can come at once
         }

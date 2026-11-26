@@ -128,6 +128,21 @@ public:
     // stale ones a stop at the 3rd left unread. Written on the caller's thread; read it there after the call.
     std::map<int, std::set<int>> unconfirmed;
 
+    // Like the original (0x18008eaf0 -> 0x18009c150 -> 0x1800a1cd0, research R1-5/R10-6, T18): a single dump of RAM
+    // bank 1..4 that no transact waits for (the late answer to a given-up slot, a second answer, one nobody asked
+    // for) is kept, the newest per slot, when it is 524 bytes with our checksums (E552), until file_late takes it. A
+    // transact's own answer for the slot drops an older kept one. Not bank 0 (edit buffers, the probe's 10 00 00), not
+    // a user ROM bank (its cache is read_missing's, once per empty slot), not a bank info (14: we keep no fingerprints
+    // apart from the dumps, so there is nothing to file it in).
+    bool has_late(int bank);
+    // Moves the kept dumps of `bank` into `cache` (made 128 long) and out of unconfirmed[bank]: the number of slots
+    // whose content changed. On the thread that runs sync_bank (unconfirmed).
+    int file_late(int bank, std::vector<Dump> &cache);
+    // true while a RAM write or download runs: drops what is kept and keeps nothing (it may be older than what the
+    // write or the download puts in the cache)
+    void hold_late(bool on);
+    void drop_late(); // the Virus went away: what it sent must not be filed into the next one's cache
+
 private:
     bool give_up(int bank, int program); // true at the 3rd: stop
     void note_reply(const char *what, int bank, int program, size_t got, size_t want, int t);
@@ -142,6 +157,9 @@ private:
     std::vector<Dump> inbox_;
     bool cancelled_ = false; // under mu_
     bool waiting_ = false;   // under mu_: a transact is running, feed() keeps Access SysEx
+    std::vector<uint8_t> match_;                  // under mu_: what the running transact waits for
+    std::map<std::pair<int, int>, Dump> late_;    // under mu_: (bank, program) -> kept dump (has_late)
+    bool late_held_ = false;                      // under mu_ (hold_late)
     std::atomic<bool> missed_{false}; // set under tx_mu_, read by the plug-in after the transact
     std::atomic<bool> open_{false};   // set under tx_mu_ (request_open)
 };
