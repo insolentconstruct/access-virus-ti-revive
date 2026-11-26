@@ -18,6 +18,7 @@
 #include "device/markerscan.h"
 #include "device/memsync.h"
 #include "device/answerwatch.h"
+#include "device/bankcheck.h"
 #include "device/resync.h"
 #include "device/slipwatch.h"
 #include "device/slotpick.h"
@@ -802,7 +803,11 @@ private:
     AnswerWatch answers_;
     void note_answer(bool answered);
     std::atomic<bool> sync_started_{false};
-    void sync_banks(); // brings the bank cache up to date with the Virus (background thread)
+    // brings the bank cache up to date with the Virus (the sync thread): at start after the start-up wait, later
+    // (at_start false) when bank_check_ is due, the Virus already ready
+    void sync_banks(bool at_start = true);
+    BankCheck bank_check_; // the bank check again at every connection, like the original (R6-1)
+    bool start_bank_check(); // the sync thread: true = a check is due, syncing_ set
     // ROM A.. for the connected model: from the user's firmware.bin, except the banks with the user's own patches
     // (E381, #22), which come from their cache file; returns the number of their programs still to read from the Virus
     int load_rom_banks();

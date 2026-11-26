@@ -428,6 +428,68 @@ TEST(memsync_no_virus_ends_a_request_at_once)
              524u);
 }
 
+// research R2-5: the late answer to an earlier probe came while the next probe still waited for the queue and ended
+// it before its own request was even written (the Virus not ready yet). A transact takes only answers that arrive
+// after its first request went out.
+TEST(memsync_transact_ignores_an_answer_from_before_its_request)
+{
+    std::atomic<bool> busy{true};
+    MemorySync *self = nullptr;
+    int sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        sends++;
+        self->feed(fake_single(0, 0, 2)); // the answer to this request
+        return true;
+    });
+    self = &sync;
+    sync.sending = [&] { return busy.load(); };
+    std::thread before([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        self->feed(fake_single(0, 0, 1)); // the earlier probe's answer, while this one waits for the queue
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        busy = false;
+    });
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 300, 1);
+    before.join();
+    CHECK_EQ(sends, 1);
+    CHECK(r == fake_single(0, 0, 2));
+}
+
+// research R6-2: a Virus lost during the bank sync (the plug-in's `present` is false then) stops it like a cancel: no
+// "given up" slots, no miss, nothing more sent to the gone Virus, the patches fetched so far kept. Run again when it is
+// back (the plug-in does at the reconnect), only the slots still stale are fetched.
+TEST(memsync_sync_bank_stops_cleanly_when_the_virus_goes_and_runs_again)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    for (int p = 0; p < 128; p++)
+        v.ram[1][p] = fake_single(1, p, p);
+    std::atomic<bool> here{true};
+    sync.present = [&] { return here.load(); };
+    size_t sent_at_loss = 0;
+    Bank cache;
+    int n = sync.sync_bank(1, cache, [&](int p, bool) {
+        if (p == 9) { // switched off after the 10th patch
+            here = false;
+            sent_at_loss = v.requests.size();
+        }
+    });
+    CHECK_EQ(n, -2);
+    CHECK_EQ(v.requests.size(), sent_at_loss); // not even the display message for the next slot
+    CHECK_EQ(sync.given_up, 0);
+    CHECK(sync.unconfirmed[1].empty());
+    CHECK(!sync.missed());
+    CHECK(cache[9] == v.ram[1][9]);
+    CHECK(cache[10].empty());
+    here = true;
+    CHECK_EQ(sync.sync_bank(1, cache), 118);
+    bool same = true;
+    for (int p = 0; p < 128; p++)
+        same = same && cache[p] == v.ram[1][p];
+    CHECK(same);
+}
+
 TEST(memsync_bank_info_and_single)
 {
     FakeVirus v;

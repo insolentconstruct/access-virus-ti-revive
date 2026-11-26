@@ -6103,3 +6103,30 @@ a Control Center restore refuses a bank with a given-up slot. No placeholder is 
 - **Method:** static analysis (REA, Ghidra 12.1.4, procedure_assembly of 0x18008e220, 0x18008e0d0, 0x18008ded0); unit tests against a fake Virus (vtitests, Linux)
 - **Confidence:** HIGH (the original's counts: read from the instructions; our code: unit tests) / open (behaviour on a Virus that really stops answering: not run on hardware)
 - **Hardware:** no
+
+### E595
+
+The original Virus Control checks the RAM banks again at every connection, TI Revive did it once per instance; TI
+Revive's port (fix item T3, research R6-1, R6-2, R10-2, R2-3, R2-5 of 2026-11-26). Original (from the research's static
+analysis, not re-read for this entry): the CRemoteDevice tick 0x18007ec30 mounts the library again in its connect
+branch (0x18008d070) and marks the RAM banks for a new bank info (0x18008ded0), so every connection runs the bank check
+(bank infos, then the changed programs); a loss unmounts it (0x18008d560), which ends a running check cleanly. TI Revive
+before: `sync_banks` ran once, at the first `setActive`; a reconnect, a resume or a Virus switched on after the plug-in
+started only got the readiness probe, so the browser kept the RAM names of the last check (or none) for the session.
+MemorySync's `present` was "slot claimed" only, so a Virus lost during the sync made its requests wait out every try
+and the sync ended "failed" for good; and a late answer to an earlier readiness probe, arriving while the next probe
+still waited for the queue, ended that probe before its own request went out (code reasoning, not reproduced). TI
+Revive now (round 0.8.44): every answered readiness probe asks for a bank check (BankCheck); the sync thread starts it
+once the Virus is ready (`starting_` over) and no RAM download or write runs, cache first as at start; the check covers
+the probes before it. A loss or a reconnect marks RAM A..D "not checked" until then. `present` also needs the Virus
+itself (`connected()`): a loss stops the sync like a cancel (-2, no given-up slot, no miss, no further message to the
+gone Virus) and the reconnect's probe runs it again. After a sync ended by a miss, the re-probe that follows the cable
+re-send (E591) resumes it when it answers, once per connection (AnswerWatch). A request accepts only answers that
+arrive after its first try went out; one that still comes after that is taken as before (the Virus answers 30 00 00
+the same way every time, they cannot be told apart).
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 0x18007ec30, 0x18008d070, 0x18008ded0, 0x18008d560 (as read in work/research-2026-11-26 R6, R10); native/src/device/bankcheck.h; native/src/device/memsync.cpp (transact, sync_bank); native/plugin/source/virusplugin.cpp (sync thread loop, start_bank_check, sync_banks, probe_virus_ready, after_reconnect, on_device, present); native/tests/test_bankcheck.cpp, test_memsync.cpp; E322, E591, E594, E144, E148
+- **Method:** static analysis by the research round (REA); code review; unit tests (vtitests, Linux)
+- **Confidence:** HIGH (the original re-checks at every connection: research, code) / HIGH (our code: unit tests of BankCheck and MemorySync; the plug-in's threads not unit tested) / open (on hardware: not run)
+- **Hardware:** no

@@ -56,7 +56,8 @@ public:
 
     // One request/reply round trip: sends `request` (a SysEx), waits for a SysEx reply whose bytes 6..8 equal
     // `match` (prefix). Retries `tries` times, each waiting `timeout_ms` + 1.5 s (plus the queue, see `sending`); a
-    // reply to any try of it counts, also one that comes after the next try went out (E591). Empty result on failure.
+    // reply to any try of it counts, also one that comes after the next try went out (E591), but none that came before
+    // its first request went out (a late answer to an earlier one, R2-5). Empty result on failure.
     Dump transact(const Dump &request, const std::vector<uint8_t> &match, int timeout_ms = 3000, int tries = 3);
     // the last transact got no reply although every try went out and waited its whole time: the Virus did not answer
     // (not a cancel, a handover, a send that failed, or a reply of the wrong size). The plug-in's cue for AnswerWatch
@@ -103,8 +104,9 @@ public:
     std::function<bool()> sending;
     int queue_wait_ms = 15000;
     // optional (the plug-in): false while this instance has no Virus (handed over to the played instance, #51, or
-    // waiting for another one): a request does not start and one waiting ends at once, counted as a stop like
-    // cancel() (no "no reply" line, sync_bank returns -2) but not for good (E591 (2))
+    // waiting for another one, or the Virus gone, R6-2): a request does not start and one waiting ends at once,
+    // counted as a stop like cancel() (no "no reply" line, no given-up slot, sync_bank returns -2) but not for good
+    // (E591 (2)); the plug-in checks the banks again when the Virus is back
     std::function<bool()> present;
     // optional (the plug-in): sends the reply-cable start-up messages again (AnswerWatch::routing_messages). bank_info
     // calls it before its 5th and 6th ask, like the original's event 0x22 (0x18008e220, E591, E594)

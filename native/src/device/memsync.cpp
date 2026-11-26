@@ -181,8 +181,6 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
         std::lock_guard<std::mutex> lk(mu_);
         if (cancelled_)
             return {};
-        inbox_.clear();
-        waiting_ = true; // before the first send: a fast reply must not be lost; kept over all tries (E591 (1))
     }
     using clock = std::chrono::steady_clock;
     Dump reply;
@@ -195,6 +193,13 @@ Dump MemorySync::transact(const Dump &request, const std::vector<uint8_t> &match
                 return reply;
         if (!wait_slice(match, reply, clock::now())) // cancelled, no Virus, or an earlier try's answer came meanwhile
             return reply;
+        if (t == 0) {
+            // only now, right before the first send: a fast reply must not be lost, and one that came before is the
+            // late answer to an earlier request (a probe after a reconnect, R2-5). Kept over all tries (E591 (1))
+            std::lock_guard<std::mutex> lk(mu_);
+            inbox_.clear();
+            waiting_ = true;
+        }
         if (!send_(request))
             return {};
         // the timeout starts when the request is out of the queue, not when it was queued (E591 (1))
@@ -334,7 +339,7 @@ int MemorySync::sync_bank(int bank, Bank &cache, const std::function<void(int, b
             return -2;
         bool stale = RemoteDevice::single_fingerprint(cache[p]) != info[p];
         if (stale) {
-            if (before_request && !before_request())
+            if ((before_request && !before_request()) || was_cancelled()) // no display message to a Virus gone (R6-2)
                 return -2;
             // a dump of the right size that does not match the bank info: ask again before giving up, bounded. A wrong
             // dump is never cached. Each request after Rise Message 4 like the original's start-up sync (its capture:

@@ -1425,7 +1425,9 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     // E591: every request (probe, bank sync, downloads) goes out only when the queue is empty, like the original, and
     // its timeout starts once it is written; an instance without a Virus (handed over, waiting) asks nothing
     sync_->sending = [this] { return out_->busy(); };
-    sync_->present = [this] { return out_->has_virus(); };
+    // and the Virus itself (R6-2): one lost during the bank sync stops it like a cancel, not "failed" for good, and
+    // the check runs again when it is back (every return comes with on_device(true), also a bounce)
+    sync_->present = [this] { return out_->connected() && out_->has_virus(); };
     // a bank info without an answer: the cable messages again before its last asks, like the original (E594). Only
     // the user's own known start-up messages, 3 per ask, at most twice per bank info (rule 2)
     sync_->resend_routing = [this] {
@@ -1458,6 +1460,8 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
             // not ready until the return's probe: a new audio stream can start before the state goes out again (a
             // broker reconnect: 3 s of flash read in between), and an anchor and sync ping on it would go unanswered
             ready_ = false;
+            for (auto &c : ram_confirmed_) // its RAM may change while it is away; the check at the return confirms it
+                c = false;
             set_lcd("Virus disconnected", std::string(), std::string(), std::string());
             return;
         }
@@ -1592,6 +1596,13 @@ tresult PLUGIN_API VirusPlugin::setActive(TBool state)
         sync_thread_ = std::thread([this] {
             sync_banks();
             warm_categories();
+            // every later connection (reconnect, resume, a Virus switched on after the start, an answer after a missed
+            // sync): the bank check again, cache first like at start (R6-1, R2-3); ends with terminate()
+            while (!stop_warm_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!stop_warm_ && start_bank_check())
+                    sync_banks(false);
+            }
         });
     }
     if (state && !state_loaded_ && !default_.empty()) { // new instance: the original's default project
@@ -3711,13 +3722,16 @@ bool VirusPlugin::probe_virus_ready()
     // one try: a second request behind a slow first one would only lengthen the Virus' backlog. It goes out when the
     // queue (start-up messages, state) is empty, the 10 s count from then (MemorySync::sending, E591)
     Dump r = sync_->transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 1);
-    if (r.empty() && !out_->has_virus()) { // handed over while it waited: ended at once, not a Virus that did not answer
-        out_->log("Virus TI native: readiness probe stopped after %.1f s, the Virus went to another instance\n",
-                  (now_ms() - tp) / 1000.0);
+    // handed over or gone while it waited (R6-2): ended at once, not a Virus that did not answer
+    if (r.empty() && (!out_->has_virus() || !out_->connected())) {
+        out_->log("Virus TI native: readiness probe stopped after %.1f s, the Virus went %s\n", (now_ms() - tp) / 1000.0,
+                  out_->has_virus() ? "away" : "to another instance");
         return false;
     }
     out_->log("Virus TI native: Virus ready after %.1f s%s\n", (now_ms() - tp) / 1000.0,
               r.empty() ? " (no reply to the probe)" : "");
+    if (!r.empty()) // the Virus is there and ready: check its RAM banks (again), like the original at every connection
+        bank_check_.request();
     if (!r.empty() || sync_->missed()) // not a stop (closing): the plug-in's terminate() cancels the wait
         note_answer(!r.empty());
     return !r.empty();
@@ -3770,6 +3784,8 @@ void VirusPlugin::resend_to_virus()
 void VirusPlugin::after_reconnect()
 {
     answers_.reset(); // a new connection: its own re-send of the cables if it does not answer (E591)
+    for (auto &c : ram_confirmed_) // a resume, a late first arrival: its RAM unchecked until the probe's bank check
+        c = false;
     if (!sync_)
         return;
     std::lock_guard<std::mutex> g(reconnect_mu_); // terminate() joins under it
@@ -3799,15 +3815,31 @@ void VirusPlugin::after_reconnect()
     });
 }
 
-void VirusPlugin::sync_banks()
+// the sync thread's poll (R6-1): a bank check asked for by a probe, and no RAM job runs. syncing_ is set under
+// download_mu_, where download_bank and send_ram_writes look at it, so none of them starts alongside the check
+bool VirusPlugin::start_bank_check()
+{
+    if (!bank_check_.due(ready_, starting_, downloading_))
+        return false;
+    std::lock_guard<std::mutex> g(download_mu_);
+    if (downloading_.load())
+        return false;
+    syncing_ = true;
+    return true;
+}
+
+void VirusPlugin::sync_banks(bool at_start)
 {
     // until the Virus is ready it works through the start-up messages and the state and plays notes up to 1.6 s late
     // (E144), so note-ons are held back; from then on notes play, and the sync pauses while they arrive (dump requests
     // delay the Virus' notes by ~130 ms and the sync stalls - measured 2026-10-14)
     // a RAM bank without a cache file is read in full: its "Syncing memory" page follows "Starting up" directly,
     // without the editor in between (user, L4)
-    wait_virus_ready();
-    starting_ = false;
+    if (at_start) {
+        wait_virus_ready();
+        starting_ = false;
+    }
+    bank_check_.begin(); // this check covers the probes before it; one after it (a reconnect meanwhile) runs it again
     // no Virus (also one handed over to the played instance, E591 (2)): no sync, the editor as usual
     if (stop_warm_ || !out_ || !out_->connected() || !out_->has_virus()) {
         syncing_ = false;
@@ -4466,9 +4498,11 @@ bool VirusPlugin::sort_ram_bank(int bank)
 // again keep their cached patches
 bool VirusPlugin::download_bank(int bank)
 {
-    if (bank < 0 || bank > 3 || !sync_ || !out_ || !out_->connected() || syncing_.load())
+    if (bank < 0 || bank > 3 || !sync_ || !out_ || !out_->connected())
         return false;
     std::lock_guard<std::mutex> g(download_mu_);
+    if (syncing_.load()) // under the lock: a bank check starts under it too (start_bank_check)
+        return false;
     if (downloading_.exchange(true)) { // a download or a RAM write runs (one at a time)
         lcd_message("Not downloaded:", "the last RAM operation still runs");
         return false;
