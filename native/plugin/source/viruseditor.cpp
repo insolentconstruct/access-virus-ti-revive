@@ -1080,11 +1080,12 @@ public:
             keep_runloop(); // a new instance's setHostContext may have replaced it (E183)
 #endif
             plugin_->diag_report();
+            plugin_->check_ram_files(); // a Control Center restore wrote a RAM bank's cache file (R11-2)
             tick_info();
             tick_tips();
             tick_alert();
             if (!plugin_->gesture_timer_running()) // the plug-in's own timer does it; this only without a run loop
-                plugin_->tick_gestures(); // knob moves on the Virus -> host edits (E304)
+                plugin_->tick_timer(); // knob moves on the Virus -> host edits (E304), the latency check (#37)
             if (int kb, kp; key_load_.due(now_ms(), kb, kp)) // Up/Down in the browser stopped
                 plugin_->load_patch_remembered(kb, kp, plugin_->ui_value(plugin_->layout().frame_parameter, -1));
             drop_switched_selections();
@@ -1386,15 +1387,13 @@ public:
         // the sync page's notes, only while that page shows (since round 0.8.27 only when banks are really fetched;
         // a bank check paused for playing drew them over the EASY page - user, W block)
         const bool sync_page = plugin_->ui_value("VirusControl/InitialSyncProgress", -1) < 127;
-        if (sync_page && plugin_->sync_paused()) // under the sync page's progress bar (the original hides the LCD meanwhile)
-            renderer_.status_text(canvas_, "FNT_LCD_5x7_Rot.png", "SYNC PAUSED WHILE YOU PLAY", 480, 290, 381, 12);
-        else if (int eta = plugin_->sync_eta(); sync_page && eta >= 60) { // a first sync: tell how long, not "a couple of seconds"
+        if (int eta = plugin_->sync_eta(); sync_page && eta >= 60) { // a first sync: tell how long, not "a couple of seconds"
             char t[64];
             snprintf(t, sizeof t, "READING THE VIRUS' BANKS: ABOUT %d MIN LEFT", (eta + 59) / 60);
             renderer_.status_text(canvas_, "FNT_LCD_5x7_Rot.png", t, 480, 290, 381, 12);
         }
         // the patch just fetched, as the Virus display shows its entry (user 2026-11-11); the LCD is hidden here
-        if (sync_page && !plugin_->sync_paused())
+        if (sync_page)
             if (const std::string item = plugin_->sync_item(); !item.empty())
                 renderer_.status_text(canvas_, "FNT_LCD_5x7_Rot.png", item, 480, 304, 381, 12);
         // "No Virus TI can be found": name another installed Virus driver under the page's text (our own, E366)
@@ -2094,14 +2093,7 @@ private:
     vti::InfoScroll info_scroll_;  // a page taller than its room (fit_info_page's scroll)
     vti::InfoRect info_track_{};   // where draw_info put the scrollbar, for the mouse
     double info_grab_ = -1;        // dragging the thumb: where it was grabbed, -1 = not
-    static const char *tirevive_version()
-    {
-#ifdef TIREVIVE_VERSION
-        return TIREVIVE_VERSION;
-#else
-        return "";
-#endif
-    }
+    static const char *tirevive_version() { return VTI_NATIVE_VERSION; }
     void open_info(vti::InfoStart which, bool from_menu)
     {
         const vti::InfoState st = plugin_->info_state();
@@ -2430,7 +2422,7 @@ private:
 #else
         fs->setInitialDirectory(vti::u8str(vti::u8path(dir) / vti::u8path(name)).c_str()); // zenity/kdialog: a full path
 #endif
-        auto *plugin = plugin_;
+        Steinberg::IPtr<VirusPlugin> plugin(plugin_); // the macOS sheet ends later: the instance stays until then
         fs->run([plugin](CNewFileSelector *sel) {
             if (sel->getNumSelectedFiles() == 1)
                 plugin->create_library(sel->getSelectedFile(0));
@@ -3056,11 +3048,9 @@ private:
         }
         vti::BuiltMenu m = vti::help_menu(st);
         const int checked = m.checked;
-        show_list(std::move(m.items), checked, 0, where,
-                  [this, actions = std::move(m.actions), args = std::move(m.args)](int i) {
-                      const bool in = i >= 0 && i < (int)actions.size();
-                      menu_action(in ? actions[(size_t)i] : vti::MenuAction::None, in ? args[(size_t)i] : 0);
-                  });
+        auto items = std::move(m.items); // before m moves into the callback (argument order is unspecified)
+        show_list(std::move(items), checked, 0, where,
+                  [this, m = std::move(m)](int i) { menu_action(m.action_at(i), m.arg_at(i)); });
     }
     std::vector<std::string> manual_paths_; // the manuals found when the "?" menu last opened, by kManual*
 
@@ -3147,7 +3137,7 @@ private:
 #else
         fs->setInitialDirectory(vti::u8str(vti::u8path(vti::cc::plugin_dir()).parent_path() / name).c_str());
 #endif
-        auto *plugin = plugin_;
+        Steinberg::IPtr<VirusPlugin> plugin(plugin_); // see create_library_dialog
         fs->run([plugin](CNewFileSelector *sel) {
             if (sel->getNumSelectedFiles() != 1)
                 return;
@@ -3174,11 +3164,9 @@ private:
         st.comparing = st.part >= 0 && plugin_->comparing(st.part);
         vti::BuiltMenu m = vti::edit_menu(st);
         const int checked = m.checked;
-        show_list(std::move(m.items), checked, 0, where,
-                  [this, actions = std::move(m.actions), args = std::move(m.args)](int i) {
-                      const bool in = i >= 0 && i < (int)actions.size();
-                      menu_action(in ? actions[(size_t)i] : vti::MenuAction::None, in ? args[(size_t)i] : 0);
-                  });
+        auto items = std::move(m.items); // before m moves into the callback (argument order is unspecified)
+        show_list(std::move(items), checked, 0, where,
+                  [this, m = std::move(m)](int i) { menu_action(m.action_at(i), m.arg_at(i)); });
     }
     EditorRenderer renderer_;
     std::map<std::string, SharedPointer<CBitmap>> bitmaps_;

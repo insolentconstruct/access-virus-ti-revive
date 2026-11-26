@@ -258,7 +258,7 @@ def page_landing(latest, releases, sums):
                          "Connect the Virus, rescan plug-ins in your DAW and load <strong>TI Revive</strong>. "
                          "The ASIO device <strong>TI Revive Audio</strong> makes the Virus a "
                          "sound card."])
-    mac = os_card("macOS", "macOS 14.4 or newer, Apple Silicon and Intel (Intel since 0.8.39, not tested on an Intel Mac yet). For Intel Macs on macOS 13 Ventura there is a test package (<code>TI-Revive-&lt;version&gt;-mac-ventura.zip</code>) and for macOS 10.15 Catalina one with its own USB audio service (<code>-mac-libusb.zip</code>); neither is tested by us.", asset(latest, "-mac.zip"), None, sums,
+    mac = os_card("macOS", "macOS 14.4 or newer, Apple Silicon and Intel (Intel since 0.8.39, not tested on an Intel Mac yet). For Intel Macs on macOS 13 Ventura there is a test package (<code>TI-Revive-&lt;version&gt;-mac-ventura.zip</code>) and for macOS 10.15 Catalina one with its own USB audio service (<code>-mac-libusb.zip</code>); neither is tested by us, the Ventura package works for a user (Intel iMac, macOS 13.7.8, #52).", asset(latest, "-mac.zip"), None, sums,
                   ["Unpack the zip and open <code>TI Revive.pkg</code> (not signed: right-click <span class='sep'>&rsaquo;</span> "
                    "<em>Open</em>).",
                    "Put your Access <code>.pkg</code> next to <code>Set up Access Virus TI files.command</code> and "
@@ -314,8 +314,6 @@ def page_landing(latest, releases, sums):
         <ul>
           <li>In our timing test the original plug-in played the first note late and dropped the second. TI Revive puts all 256
           notes on the grid.</li>
-          <li>While it starts up or syncs banks, the original plug-in drops the notes you play and sends &ldquo;All Notes
-          Off&rdquo;. TI Revive holds the notes back at start-up and pauses its bank sync while you play.</li>
           <li>Owners reported drifting notes and sync errors over USB
           (<a href="https://gearspace.com/threads/fixing-access-virus-sync-issues.839737/">Gearspace</a>,
           <a href="https://forum.ableton.com/viewtopic.php?p=938076">Ableton forum</a>). TI Revive stamps every note
@@ -343,7 +341,7 @@ def page_landing(latest, releases, sums):
         <ul>
           <li>One plug-in instance per Virus (<a href="https://forum.ableton.com/viewtopic.php?p=823712">Ableton
           forum</a>): it controls all 16 parts. A second instance shows &ldquo;Virus unavailable&rdquo; and takes over
-          when the first one is removed.</li>
+          when the first one is removed, or (since 0.8.44) when the DAW has not played the first one for 2 seconds.</li>
           <li>The Virus follows the project's sample rate (44.1 or 48 kHz) and shows &ldquo;Audio clock changed&rdquo;
           when it switches (since 0.8.32).</li>
           <li>Owners advised a USB port directly on the computer instead of a hub
@@ -395,8 +393,8 @@ def page_landing(latest, releases, sums):
       <div><h3>Point it at your Access installer</h3><p>The setup unpacks the skin, the parameter descriptions and the
       ROM banks from the installer you own. No Access files come with TI Revive.</p></div>
       <div><h3>Load the plug-in</h3><p><strong>TI Revive</strong> on a MIDI track. Projects made with the
-      original plug-in (VST3) open with it. The first start reads RAM A&ndash;D from the Virus once, which takes a few
-      minutes; you can play meanwhile. New names since 0.8.43: the plug-in is &ldquo;TI Revive&rdquo; (before &ldquo;TI Revive Virus Control&rdquo;), the ASIO driver &ldquo;TI Revive Audio&rdquo; and the MIDI inputs &ldquo;TI Revive Synth&rdquo; and &ldquo;TI Revive MIDI&rdquo; (before &ldquo;Virus TI Synth&rdquo; and &ldquo;Virus TI MIDI&rdquo;). Projects saved with the old name open with it (same plug-in ID). If a track used one of the MIDI inputs, choose it there once more.</p></div>
+      original plug-in (VST3) open with it. The first start reads RAM A&ndash;D from the Virus once, which takes about 9
+      minutes; after that every start and every reconnect checks the banks (a few seconds) and reads only the patches that changed, about a second each. Like the original, notes you play meanwhile are not played. New names since 0.8.43: the plug-in is &ldquo;TI Revive&rdquo; (before &ldquo;TI Revive Virus Control&rdquo;), the ASIO driver &ldquo;TI Revive Audio&rdquo; and the MIDI inputs &ldquo;TI Revive Synth&rdquo; and &ldquo;TI Revive MIDI&rdquo; (before &ldquo;Virus TI Synth&rdquo; and &ldquo;Virus TI MIDI&rdquo;). Projects saved with the old name open with it (same plug-in ID). If a track used one of the MIDI inputs, choose it there once more.</p></div>
     </div>
   </div>
 </section>
@@ -465,6 +463,8 @@ def page_landing(latest, releases, sums):
       &ldquo;USB 1&rdquo; in the plug-in to send the setting again. On macOS also check that your DAW may use the
       microphone. On Linux, if notes and knobs work but no audio comes over USB, connect the Virus directly to the
       computer, not through a USB hub.</p></details>
+      <details><summary>Every note sounds twice (Keyboard, Polar)</summary>
+      <p>A key on a Keyboard or Polar sounds twice when two paths play the Virus at once: its own keyboard (Local On) and your DAW, which sends the key back to the plug-in when the track listens to the Virus&rsquo; MIDI input with input monitoring on. The original Access plug-in does the same. Use one of them: switch Local Off on the Virus, then the DAW plays it and records the keys (best for recording), or switch the track&rsquo;s input monitoring off. In one report only unplugging the USB cable and plugging it in again helped; if that is your case, save the logs before you replug and open a report.</p></details>
       <details><summary>Three separate outputs (USB 3)</summary>
       <p>PATCH UTILITY <span class='sep'>&rsaquo;</span> Preferences <span class='sep'>&rsaquo;</span> &ldquo;Input and Output Configuration&rdquo; = &ldquo;3 Outs / No
       Input&rdquo;. Then a part's output can be &ldquo;USB3 L+R&rdquo; and its sound comes out of the plug-in's Out 3.
@@ -547,6 +547,7 @@ def page_landing(latest, releases, sums):
       <div><h3>Without code</h3><p>Test reports, reports about problems in the original, and help with reading
       someone's logs are as useful as pull requests.</p></div>
     </div>
+    {thanks_block()}
     <p class="actions contribute-actions"><a class="second" href="{GH}/blob/main/CONTRIBUTING.md">How to
     contribute</a> <a class="second" href="{GH}">Open the repository</a></p>
   </div>
@@ -613,8 +614,8 @@ def features_section():
         <li>Your own ROM banks (since 0.8.37, <a href="{GH}/issues/22">issue #22</a>): if you burned your own banks into
         the Virus' ROM slots with the original Control Center, TI Revive reads those banks from the Virus instead of
         taking the factory banks from your Access installer, like the original. The Virus marks these banks itself.
-        TI Revive reads each of them once, patch by patch (about 2 minutes per bank, progress on the LCD, notes
-        still play), and keeps them for that Virus; it reads them again when the Virus' record of them changes. Until a bank is
+        TI Revive reads each of them once, patch by patch (about 2 minutes per bank, progress on the LCD; like the
+        original, notes you play meanwhile are not played), and keeps them for that Virus; it reads them again when the Virus' record of them changes. Until a bank is
         read, a patch chosen from it on the Virus is left alone instead of being replaced by the factory sound.
         Tested with a TI2 Desktop with factory ROMs and a bank marked by hand on Linux (REAPER), Windows 11 (VM,
         Ableton Live 11) and macOS (Ableton Live 12); on Linux the patches read from the Virus were byte for byte
@@ -627,7 +628,7 @@ def features_section():
         stops on is loaded. Up and Down tested on Linux (REAPER), Windows 11 (VM, Ableton Live 11) and macOS (Ableton
         Live 12), and by a user on macOS (Logic Pro); Left and Right on Linux (REAPER) and by a user on macOS.</li>
         <li>Patch libraries from the original's three places, each its own menu (since 0.8.29): Personal Libraries (your Documents folder), User Libraries and Public Libraries. On the Mac the factory libraries that Access installs in /Library/Application Support appear under Public Libraries. On Linux only Personal Libraries. To add a library, drop its .mid or .syx file from Explorer, Finder or your file manager onto the browser (since 0.8.35, our own addition: the original takes no file drops). It is copied into Access Music/Virus TI/Patches in your Documents folder, never over an existing file, and the browser shows it at once; a .syx is saved as a .mid so the original finds it too. Copying the file into that folder yourself works as well; it shows up the next time the plug-in is loaded. Damaged patches in a library (dumps of the wrong length) are left out, as in the original; since 0.8.35 the plug-in's log names the library and how many.</li>
-        <li><strong>RAM backup.</strong> Before TI Revive writes patches into the Virus' RAM banks (SAVE, a drop, swap, rename or sort in the browser, Undo last operation), it saves the patches that would be overwritten in a library of the day, "RAM Backup 2026-10-31" in Personal Libraries (since 0.8.36, our own addition). To get a patch back, drag it from that library onto a RAM slot. If the backup cannot be written, nothing is written to the Virus. The backup knows what the plug-in's bank cache knows: a patch you stored on the Virus itself since the last sync is not in it. Tested on Linux with a TI2 Desktop: the backup and the drag back restored the slot byte for byte; the backup and the restore also on Windows 11 (VM, Ableton Live 11) and macOS (Ableton Live 12).</li>
+        <li><strong>RAM backup.</strong> Before TI Revive writes patches into the Virus' RAM banks (SAVE, a drop, swap, rename or sort in the browser, Undo last operation), it saves the patches that would be overwritten in a library of the day, "RAM Backup 2026-10-31" in Personal Libraries (since 0.8.36, our own addition). To get a patch back, drag it from that library onto a RAM slot. If the backup cannot be written, nothing is written to the Virus. Since 0.8.44 a slot about to be overwritten is read from the Virus first whenever the plug-in's copy may be old (always for a SAVE), so a patch you stored on the Virus itself is backed up too; a swap, sort or drop of several patches backs up every slot it overwrites, and closing the plug-in lets queued RAM writes finish first (up to 20 s). Tested on Linux with a TI2 Desktop: the backup and the drag back restored the slot byte for byte; the backup and the restore also on Windows 11 (VM, Ableton Live 11) and macOS (Ableton Live 12). The 0.8.44 changes were tested on Linux (REAPER).</li>
       </ul>
       <h4>On the Virus and in the DAW</h4>
       <ul>
@@ -648,7 +649,7 @@ def features_section():
         <li>Setup Tips for Your DAW in the ? menu (since 0.8.38): opens by itself the first time for a DAW and for a point not read before. Seen on Linux (REAPER), macOS (Ableton Live, Logic) and Windows 11 (Ableton Live).</li>
         <li>In Logic, Plug-in Latency Compensation must be on. With it off, TI Revive and a Logic instrument played about 100 ms apart; with it on they were in sync by ear, and an export measured at most 0.42 ms apart. Logic warns when you turn it off.</li>
         <li>The Virus leaves remote mode when the plug-in closes, as with the original (since 0.8.38). Tested on Linux with a TI2 Desktop; the effect on a Virus with keys is not tested.</li>
-        <li>One bad reply no longer ends a bank sync (since 0.8.38): a bank info of the wrong size or a dump that does not match it is asked for again, up to 3 times. The retry is covered by unit tests; on our TI2 Desktop only the normal sync has run with it.</li>
+        <li>A missing or bad reply no longer ends a bank sync (since 0.8.44, like the original): a bank info is asked for up to 6 times, a patch up to 3 times. A patch that still does not come is given up and not cached, the sync goes on, and the display says the RAM banks may be out of date; the third given-up patch ends the sync, as in the original. Covered by unit tests; a Virus that really stops answering has not been tested.</li>
         <li>Linux: notes no longer get later in long sessions (since 0.8.38). From clock drift, the broker added 30 ms about every 22 minutes on our TI2, and notes stayed late until the plug-in restarted. Measured with the fix past that point. Linux only: macOS and Windows take their timing from the device, by reading the code.</li>
         <li>A crash when the plug-in closes just as the Virus connects is fixed (since 0.8.38): 3 hits before, 25 of 25 clean after, on Linux.</li>
         <li>The numbers 100 to 127 in the browser no longer touch the names (since 0.8.38, issue #28).</li>
@@ -788,7 +789,7 @@ def features_section():
       <ul>
         <li>A flood of parameter changes can hang the audio of the Virus until it is switched off, and so did one extreme note flood in a test of ours. Automation is limited to
         250 messages per second and merged per parameter; a 4-minute full-load test passes.</li>
-        <li>The Virus releases every sounding note about a second after the last Active Sensing message it received. Since 0.8.26 the plug-in sends one every 300 ms, like the original; before, it sent one at the start only.</li>
+        <li>The Virus releases every sounding note about a second after the last Active Sensing message it received. Since 0.8.26 the plug-in sends one every 300 ms; before, it sent one at the start only. The original sends it at that pace only while the DAW processes no audio.</li>
         <li>The Virus keeps time-stamped MIDI in a small buffer without an overflow check. Since 0.8.26 the plug-in keeps its time-stamped MIDI well under that buffer's limit; normal playing and automation never come near it.</li>
         <li>When the Virus is busy for a moment, for example while you change a patch on its panel, it holds back what the computer sends. Since 0.8.26 the plug-in sends it again instead of dropping it, so a bank sync or patch dump no longer breaks.</li>
         <li>Choosing a patch for one part no longer stops the other parts for a moment. Since 0.8.27 the plug-in sends the patch like the original: in small pieces on its own USB-MIDI cable, with the other parts' notes in between.</li>
@@ -798,7 +799,8 @@ def features_section():
         <li>At host sample rates other than 44.1 kHz the first notes after Play and after a render no longer come late and catch up over several seconds (since 0.8.27).</li>
         <li>The Virus drops the message right after a multi dump. The plug-in pauses after one, so new projects reset
         the synth reliably.</li>
-        <li>Bank sync requests make the Virus play its notes late. The sync pauses while you play and continues in the gaps.</li>
+        <li>Like the original, a bank sync runs without notes: what you play while it runs is not played and the MIDI clock pauses, so no dump request makes the Virus play notes late (by about 130 ms).</li>
+        <li>While the plug-in waits for the answer to a dump request (about a second each, while it reads presets it has not cached yet), it holds its MIDI clock, like the original, and the DAW's automation. The arpeggiator and clock-synced LFOs can stop for that moment; automation goes out with its latest value right after.</li>
         <li>Switch the Virus off and on, or replug it, while the DAW runs: the editor shows the original's &ldquo;No Virus
         TI can be found&rdquo; page meanwhile, then the plug-in waits until the Virus is ready and plays in time again.
         Two DAWs share it: one plays, the other waits and takes over. Linux: after a cable replug, or when the Virus is
@@ -813,8 +815,10 @@ def features_section():
       <p>A separate app in the look of the Access Virus Control Center, when that is in your Access installer. It
       shows the connected Virus and its RAM banks, backs them up as patch libraries, restores a bank from such a backup
       and converts libraries between <code>.mid</code> and <code>.syx</code>. A restore (since 0.8.30) writes only the
-      programs that differ, into the Virus' RAM, and reads each one back; unlike Access' Control Center it never writes
-      the Virus' flash.</p></div>
+      programs that differ, into the Virus' RAM, and reads each one back; since 0.8.44 it first saves the bank as it is on
+      the Virus. Unlike Access' Control Center it never writes the Virus' flash. Nerd mode and the device info work next
+      to your DAW; for the RAM bank list, a backup or a restore close the plug-in (or the DAW) first (since 0.8.44, like
+      Access' Control Center).</p></div>
       <figure class="shot"><img loading="lazy" src="control-center.png" width="687" height="463"
       alt="TI Revive Control Center: the device, backups and Nerd mode">
       <figcaption>The Control Center in the Access look. TI Revive does not offer Burn To Flash ROM and OS updates; since 0.8.43 their buttons are gone. TI Revive ships no Access files; it draws this look at runtime from the skin in your own Access installer. Not affiliated with Access Music or Kemper.</figcaption></figure>
@@ -824,7 +828,7 @@ def features_section():
       <div><h3>Nerd mode</h3>
       <p>Shows live what goes between TI Revive and the Virus, decoded: notes, parameter changes by name, dumps, the
       bank sync. It lists which programs use the Virus, shows the plug-in's and the broker's logs, and saves them all
-      for a bug report in one file. Since 0.8.42 Nerd mode, the Options page and the RAM banks (on BACKUP & RESTORE) are pages of the Access look, with a scrolling table and the plug-in log's switch on the Options page; the plain window is only used when the Access files are missing. It only watches; it never sends anything to the Virus. Its Options page (since 0.8.41; also View &gt; Options) switches the plug-in's options: lower latency (experimental), the restart of scrambled audio, notes played live skipping the delay (on by default since 0.8.39), even rhythm for played notes, the plug-in log (on by default since 0.8.41), the update check (since 0.8.42, off by default: once a day, when the Control Center opens, it asks GitHub for the newest release, with nothing about you or your setup; the plug-in itself never goes online, it shows a note once and a Download entry in its ? menu), a Virus TI Snow setting (since 0.8.42, off by default, macOS and Linux: after a quiet second TI Revive's service asks an idle Snow every 4 ms instead of every 1 ms, for less CPU; the first MIDI message after a pause can then come up to 3 ms later), and two switches for comparisons with the original (the output delays only on change instead of at every Play/Stop, the timing as before 0.8.35). A change applies from the next start of the plug-in; the update check runs at once and the Snow setting within a few seconds.</p></div>
+      for a bug report in one file. Since 0.8.42 Nerd mode, the Options page and the RAM banks (on BACKUP & RESTORE) are pages of the Access look, with a scrolling table and the plug-in log's switch on the Options page; the plain window is only used when the Access files are missing. It only watches; it never sends anything to the Virus. Its Options page (since 0.8.41; also View &gt; Options) switches the plug-in's options: lower latency (experimental), the restart of scrambled audio, notes played live skipping the delay (on by default since 0.8.39), even rhythm for played notes, the plug-in log (on by default since 0.8.41), the update check (since 0.8.42, off by default: once a day, when the Control Center opens, it asks GitHub for the newest release, with nothing about you or your setup; the plug-in itself never goes online, it shows a note once and a Download entry in its ? menu), a Virus TI Snow setting (since 0.8.42, off by default, macOS and Linux: after a quiet second TI Revive's service asks an idle Snow every 4 ms instead of every 1 ms, for less CPU; the first MIDI message after a pause can then come up to 3 ms later), clean first notes after Play (since 0.8.44, on by default: when the DAW reads ahead at Play, TI Revive keeps the difference instead of correcting it on the first notes; notes you play live can then sound up to about 40 ms later until the next correction), and two switches for comparisons with the original (the output delays only on change instead of at every Play/Stop, the timing as before 0.8.35). A change applies from the next start of the plug-in; the update check runs at once and the Snow setting within a few seconds.</p></div>
       <figure class="shot"><img loading="lazy" src="control-center-nerd-mode.png" width="860" height="612"
       alt="Nerd mode in the Access look: the notes the plug-in sends to the Virus, decoded live">
       <figcaption>Nerd mode in the Access look (0.8.42): the notes the plug-in sends to the Virus, decoded live. TI Revive ships no Access files; it draws this look at runtime from the skin in your own Access installer. Not affiliated with Access Music or Kemper.</figcaption></figure>
@@ -876,7 +880,64 @@ def page_changelog_landing(releases):
 SHARED_IMAGES = ["control-center.png", "control-center-nerd-mode.png", "plugin-help-mode.png", "plugin-help-inactive.png",
                  "plugin-menus.png", "plugin-library-drop.png",
                  "plugin-section-lock.png", "plugin-edit-menu.png", "plugin-help-menu.png"]
-TESTS = 848 # unit tests in native/tests (vtitests), as of 2026-11-21 (0.8.43)
+TESTS = 1081 # unit tests in native/tests (vtitests), as of 2026-11-26 (0.8.44)
+
+# The "Thank you" list, in the Contributing block; the README's "Thank you" section is the same list (unit test).
+# (GitHub name, what they did); "#N" becomes a link to issue/PR N. Code and findings first, then testing and reports.
+THANKS_CODE = [
+    ("insolentconstruct", "macOS broker control requests (#1), firmware evidence (#55 to #58)"),
+    ("vmunoz82", "the Snow's bulk MIDI on Linux (#27), the Snow on Linux and under Wine (#26), the Windows installer "
+     "leaving the Access driver behind (#31)"),
+    ("wirrareka", "findings from their own native macOS TI2 project (#7)"),
+]
+THANKS_TESTS = [
+    ("packman83", "many test rounds in Logic on Catalina for the Play and timing fixes (#37)"),
+    ("christopherdoerr", "latency and bus pre-delay in Logic (#30, #41)"),
+    ("timemachine70", "TI Keyboard MIDI and latency (#29, #39)"),
+    ("sbostock76", "flashed banks in the browser, audio glitches, several TIs in one project (#22, #24, #50)"),
+    ("psychowsky", "RAM presets in the browser (#36)"),
+    ("ManuAnilkumar23", "the first Snow on macOS (#4)"),
+    ("JAMES77-LAB", "Intel Macs (#33)"),
+    ("jwalkermed", "mod wheel, part bar and section locking (#18, #21)"),
+    ("alexs1986-utils", "the Virus TI Desktop test (#16)"),
+    ("edy013", "clicks with two audio interfaces on Windows (#51)"),
+    ("substrate13", "the crackle that a USB cable fixed (#34)"),
+    ("Give-me-a-signal", "the first macOS bench test (#5)"),
+    ("coconutPhreak", "modulation matrix destinations (#11)"),
+]
+THANKS_INTRO = "TI Revive got where it is through the people who sent code, findings, logs and test reports."
+THANKS_REST = "And everyone who opened an issue, sent logs or tested a pre-release."
+
+
+def thanks_links(text, fmt):
+    return re.sub(r"#(\d+)", lambda m: fmt.format(n=m.group(1)), text)
+
+
+def thanks_block():
+    link = '<a href="' + GH + '/issues/{n}">#{n}</a>'  # no backslash inside the f-string: CI's Python is < 3.12
+
+    def items(rows):
+        return "".join(f'\n        <li><a href="https://github.com/{n}">{n}</a>: '
+                       f'{thanks_links(w, link)}</li>' for n, w in rows)
+    return f"""<h3>Thank you</h3>
+    <p>{THANKS_INTRO}</p>
+    <div class="testing thanks-list">
+      <div><h3>Code and findings</h3><ul>{items(THANKS_CODE)}
+      </ul></div>
+      <div><h3>Testing and reports</h3><ul>{items(THANKS_TESTS)}
+      </ul></div>
+    </div>
+    <p>{THANKS_REST}</p>
+    """
+
+
+def thanks_markdown():
+    def items(rows):
+        return "\n".join(f"- [{n}](https://github.com/{n}): {thanks_links(w, '[#{n}](' + GH + '/issues/{n})')}"
+                          for n, w in rows)
+    return (f"{THANKS_INTRO}\n\nCode and findings:\n\n{items(THANKS_CODE)}\n\nTesting and reports:\n\n{items(THANKS_TESTS)}\n\n"
+            f"{THANKS_REST}\n")
+
 
 # Important information shown at the top of the page, newest first (empty list = no box). The README starts with the
 # same text ("Important" block), keep both identical. Remove an entry when it no longer matters to users.

@@ -41,3 +41,14 @@ TEST(dragsend_reset_at_a_new_drag)
     d.reset(); // mouse down: the first value of a new drag always goes out (a click sets it like before)
     CHECK(d.changed("Filter/Cutoff", 0, 64));
 }
+
+TEST(dragsend_two_parameters_in_one_drag) // review 2026-11-25 E2: an x+y graph handle or the arp step corner
+{
+    DragSend d;
+    int sent = 0;
+    for (int move = 0; move < 500; move++) { // both values stay inside one step
+        sent += d.changed("Filter/Env Attack", 0, 40);
+        sent += d.changed("Filter/Env Decay", 0, 70);
+    }
+    CHECK(sent == 2);
+}

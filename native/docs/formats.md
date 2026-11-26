@@ -70,7 +70,19 @@ one MIDI message). The state IS the list of messages the plug-in sends to the Vi
 5. 224 CCs: controllers 1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 for channels 1..16 (CC7 = 100, CC8 = 64,
    CC11 = 127, others 0 in the default project).
 Default project: 10329 bytes. The rewrite reads and writes exactly this format -> projects saved with the original
-load in the rewrite and vice versa.
+load in the rewrite and vice versa. The Snow type has 4 parts (type table 0x1801c52f0): 4 single dumps and the
+controllers of channels 1..4 (56), in the original and, since 0.8.44, in the rewrite (R8-3, E600).
+
+Loading (the original's setChunk 0x180079b50 and container parser 0x180060080, E600; the rewrite does the same):
+- a length (total or record) whose big-endian value has one of its top 10 bits set is read little-endian;
+- a declared total longer than the data loads nothing (the rewrite then saves the data back unchanged until something
+  is edited); a record longer than the rest of the total ends the list;
+- every 524-byte single dump gets byte 10 = 0x20 ("eLIB") and both checksums afresh, then the format upgrade;
+- 11-byte page 0x6F parameter 0x7E records (Input/Atomizer) are removed; a 0xFF record is the original's
+  "Parameter Mapping" slot table (the rewrite keeps it in the project and never sends it);
+- the stored multi is not sent as stored: at connect the original writes its per-part Detune (bytes 137..152) and
+  Output Select (185..200) into the fixed start-up multi; the rewrite sends that patched table with the project's
+  records when it differs from the fixed one.
 
 ## VST3 identity and parameter list of the original (vtihost class listing, VTI_LISTPARAMS)
 - One single-component class per product (no separate controller class). The listing printed the raw TUID bytes:
@@ -118,6 +130,8 @@ Versions 10..12 are only written into edit-buffer dumps (bank byte 7 = 0); store
 Virus' firmware converts them. Without the default page C/D, patches below version 8 are left unchanged. After an
 upgrade both checksums are recomputed: byte 265 = sum of bytes 5..264 & 0x7F, byte 522 = sum of bytes 5..521
 (including byte 265) & 0x7F. Checked by tests/test_upgrade.cpp (3080 generated dumps, all versions).
+A library dump of a version no format is known for is left out (never sent): above 12, or 8 and up in a 267-byte
+(Virus C, pages A/B only) dump - those have no pages C/D, and the upgrade adds them only below version 8.
 
 ## editor rendering rules (verified against a screenshot of the original, Easy page 97.0 % identical pixels)
 - Knob/slider bitmaps are vertical filmstrips: frames = bitmap height / control height, frame = (v-min)/(max-min).

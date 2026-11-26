@@ -1440,9 +1440,11 @@ FX 1 changes on a held note (issue #4, nasguile: "the effect doesn't take hold; 
 
 How the original holds notes at start-up and while it is busy (closes E153's open part). REA/Ghidra, Virus Control.dll 5.1.7 x64: every MIDI message from the host passes 0x18007aa50 (via CRemoteDeviceFromHostQueue 0x18006cc00); while the byte CRemoteDevice +0xccc49 is set, note-on, note-off (status 0x80/0x90) and the MIDI clock F8 are dropped - not delayed - while all other messages go on. The constructor (0x18006ce00) and the connection set-up in the timer 0x18007ec30 set +0xccc49/+0xccc4a to 1; on every timer tick 0x18007a9b0 sets +0xccc49 = busy, where busy = its library/sync object +0xccc90 is syncing (+0x548) or has requests open (+0x5d4 > 0), or the start-up queue +0xcd058 still holds messages, or the flags +0xcd0f0 / +0x136580 are set; when busy turns on, it sends All Notes Off (B0..BF 7B 00) on all 16 channels. So the original plays nothing while it works through its start-up messages, a bank sync or dump requests. The native plug-in instead holds notes back until the readiness probe is answered (E149) and pauses its bank sync while the host plays (README: "you can play while it runs") - kept that way on purpose: no lost notes, same start-up safety
 
+Update 2026-11-26 (maintainer decision, round 0.8.44): the native plug-in now does the same during a bank sync or check: note-ons and F8 are dropped while `syncing_` is set, the held notes are released (pedal up, all notes off on the channels in use) before the first request, and the sync no longer pauses for notes. TI2/Linux 2026-11-26, nativehost with C4 every second (work/hil/2026-11-26-fullsync, git-ignored): a full sync without cache read 512 of 512 (none given up) in 540.5 s, the four new bank files byte-identical to the cache from before; the recording has no sound from 0 to 545 s and every note from 546 s on (53 of 53, max 0.93 ms off the grid). With a full cache the start-up check takes ~3.6 s and the first note comes at ~12 s (hil.sh H1-H6 pass).
+
 - **Date:** 2026-10-16
 - **Pointer:** REA static analysis (addresses above)
-- **Method:** native/plugin/source/virusplugin.cpp (wait_virus_ready, the note hold, the sync pause)
+- **Method:** native/plugin/source/virusplugin.cpp (wait_virus_ready, the note gate in process(), sync_banks)
 - **Confidence:** HIGH
 
 ### E162
@@ -2138,6 +2140,7 @@ The DSP's Active Sensing watchdog, and what the plug-in did wrong with it (stati
 - **Method:** work/firmware/out/dsp_X_04f000.asm, dsp_P_000000.asm; native/plugin/source/virusplugin.cpp
 - **Confidence:** HIGH (handler, counter, one-shot release), MED (what 0x5362b releases), LOW (1.1 s - depends on the tick length)
 - **Hardware:** no (as written in this entry; a later entry may have tested it)
+- **Status:** corrected by E602 (only its premise about the original's FE cadence)
 
 ### E238
 
@@ -3295,7 +3298,7 @@ How the original keeps notes in time in every host (REA, Virus Control.dll 5.1.7
 - **Pointer:** REA static analysis
 - **Method:** work/rea/virus-control-5.1.7-x64.ghidra12.snapshot (local)
 - **Confidence:** HIGH (stamp rule, lead 3072 forced, host table contents), MED (device position = the driver's real-time position: from the call site and E329, the device class not decompiled)
-- **Status:** corrected by E400
+- **Status:** corrected by E400, E598
 
 ### E365
 
@@ -5409,3 +5412,953 @@ process ("another program uses Virus 1").
 - **Method:** plug-in log over SSH, code reading, unit test
 - **Confidence:** HIGH (cause from the log + code) / not yet verified on the Mac (fix)
 - **Hardware:** yes (TI2 Desktop on the Mac: the bug); fix not yet run
+
+### E567
+
+Issue #52 (user report, 2026-11-21): the Ventura test package (0.8.43, `TI-Revive-0.8.43-mac-ventura.zip`, Core
+Audio path, built for macOS 13 x86_64) works on an Intel iMac (2017) with macOS Ventura 13.7.8, Ableton Live 12
+Suite and a TI2 Desktop, with the Access and AURA drivers still installed ("works a treat"). Their diag.log: build
+"TI Revive 0.8.43 (d06c2505)", "audio input: 1 Virus audio device, taken for Virus 1" (once "no Virus audio device"
+right at the connect, the next try found it), sync markers found (3697 and 1201 frames after the ping), 1 drop at the
+stream start and none after, no read pull-backs, timing safety net 16 stamps in ~18 min, 48 kHz block 512. First
+report of TI Revive on macOS 13; timing of recorded notes not checked by the reporter.
+
+- **Date:** 2026-11-21
+- **Pointer:** issue #52 (diag.log attachment of 2026-11-21 12:01 UTC)
+- **Method:** user report + plug-in log
+- **Confidence:** MED (one user, one session log)
+- **Hardware:** yes (user's TI2 Desktop, Intel iMac, Ventura 13.7.8)
+
+### E568
+
+Issue #37 (user, Catalina, Logic Pro, libusb package, TI with OS 5.0.8, 44.1 kHz block 2048): "out of sync when
+running Logic for the first time or after reopening the project", with crackling. Their log has the same pattern at
+both project opens (1795171041, 1795264022): "Virus ready" after ~1.8 s, then "no sync marker - time stamps relative
+to the ring" for 50-70 s, timeline err down to -9800 frames, sync error shown, drops 3 -> 20; raw peaks show sound on
+USB 1 (ring channels 2/3) and USB 2 silent. The marker is found only after the music pauses (raw peaks 1 1, then
+"sync marker at frame 3311078 ... 5053 frames later" and a second one 7 s later), followed by "pulled back 14 blocks,
+largest 2702 frames"; after that err stays within about +-250. Cause in the code: MarkerScan::candidate took a frame
+as the marker only while USB 1 was silent; the first ping goes at most 6 s after the stream start even when not
+quiet, and its retries need 1 s of quiet on USB 1/2 and 2 s without host playback, so a project that plays on USB 1
+right after opening finds no marker until it stops. The marker itself is on USB 2 only (protocol.md, 2026-10-14);
+the USB 1 condition has no recorded reason. Change (round 0.8.44): candidate looks at USB 2 only (the USB 2 silence
+check around the marker stays). TI2 A/B on Linux (2026-11-21, nativehost, C4 held from 6 s on part 1 = USB 1, a ping
+every 4 s through a temporary local build where the S094 re-sync switch VTI_NATIVE_RESYNC=4 also pings while sound
+plays; never committed): old rule 0 of 5 pings found a marker while the note sounded (2 runs, the note audible in the
+recording), new rule 6 of 6. The marker on USB 2 stays a clean single sample while USB 1 plays. Seen in both variants,
+also without sound: consecutive re-sync pings alternate between ~600 and ~6300-9500 frames from ping to marker (the
+Virus acts on the ping's stamp 3072 on its own clock, E247; not caused by this change). In nativehost a note before
+"Virus ready" is lost and the first ping goes out at ready, so #37's exact start (sound before the first ping) was
+not reproduced. Whether the crackling comes from the drops in that phase or from the 2702-frame pull-back is not
+shown.
+
+- **Date:** 2026-11-21
+- **Pointer:** issue #37 (TI-Revive-logs-2026-11-21-1559.txt); native/src/device/markerscan.h candidate, native/plugin/source/virusplugin.cpp scan_audio + the anchor/retry rule in process()
+- **Method:** user log + code reading, unit test, hardware A/B (nativehost)
+- **Confidence:** MED (cause from the log + code) / HIGH (marker found while USB 1 plays, TI2 A/B)
+- **Hardware:** yes (user's TI, Catalina: the bug; our TI2 Desktop, Linux: the A/B)
+
+### E569
+
+rc1 in the field (v0.8.44-rc1, 99345e2e). Issue #37 (user, Catalina, Logic Pro, libusb package, TI with OS 5.0.8,
+44.1 kHz block 2048; log TI-Revive-logs-2026-11-21-1930.txt, 5 rc1 sessions 1795276412-1795276842): "slightly
+better", still out of sync and a little crackle at the first Play after loading or reopening, back to normal after
+a few seconds; waiting 5-10 s before Play changes little. The marker fix of E568 works: every session finds the sync
+marker 1-6 s after "Virus ready" (ping to marker 753-5846 frames), against 50-70 s or none before. What is left: the
+first 10 s window after the marker has err down to -1048..-1901 frames (the timeline up to ~43 ms off), the next
+windows -177..-252 to +260; windows where Logic processes ahead of the Virus (host frames 452608-464896 / virus
+441000) have 3-5 anchors, err to -6000 and "pulled back 13-17 blocks, largest 3143-3584 frames". Reading (LOW, not
+reproduced, code not checked): the start-of-Play burst of E341 (REAPER, timeline ahead of the ring; its fix was
+reverted in 0.8.34), now in Logic. Asked whether a start a bar or two before the notes (count-in) avoids it
+(issuecomment-7066234256).
+Issue #50 (user, macOS, two TI2 Desktops, rc1; log TI-Revive-logs-2026-11-21-1555.txt): the first rc1 open read
+Virus 2's banks into its own folder ("RAM cache: Virus 2's own folder", 4 x 128 fetched, bank sync 515.5 s); every
+reopen after that loads both folders (4 of 4 banks each, 0 fetched, ~3.4 s) - the per-Virus cache works for the
+reporter. The instances take the Virus by USB order ("no serial match"); no errors, no drops.
+
+- **Date:** 2026-11-21
+- **Pointer:** issues #37 and #50 (logs above); native/src/device/markerscan.h, native/plugin/source/virusplugin.cpp process() / TimelineFollow
+- **Method:** user logs
+- **Confidence:** HIGH (#37 marker found, #50 cache) / LOW (#37 remaining error = the Play burst)
+- **Hardware:** yes (users' TI on Catalina and two TI2 Desktops on macOS)
+
+### E570
+
+The Play-burst jump of E351 (TimelineFollow::play_started/activated, reverted in round 0.8.34) brought back in round
+0.8.44 for #37 (E569: Logic's first seconds after Play, err to -1901, pulled back up to 3584 frames). Ported from the
+local branch round-0.8.34-reaper-timeline (8106379, 40f6294, f87c0aa) onto the current process(): activated() before
+the anchor branch, anchor() instead of reset() at an anchor, play_started() at a Transport Start next to the restart's
+tick; the anchor/jump notes go to the worker log (note_timeline). Built on Linux, ctest 7/7 (vtitests incl. the 19
+model tests of E351). Repro on our TI2 Desktop (Linux, nativehost --rate 44100 --block 2048 --transport 8 --ahead
+113@8 --ahead 113@18 --notes, Logic-like block and a ~5000-frame burst; work/repro-37): rc1 (99345e2) err -4127 /
+-4796, 3 + 1 anchors, pulled back 11 blocks (largest 1567) and 2 (3559), 1 of 20 notes lost, 1 off the grid; with the
+port: jumps -1988 at the first Play block, then -2946 and -4155 (the burst spans ~2.4 blocks of 2048, the "err no
+longer falls" test ends it too early), pulled back 10 and 11 blocks, 2 of 23 lost, 2 off the grid, the rest within
+0.70 ms. scripts/hil.sh with the port (work/hil-0.8.44-e351): ALL PASS (H1, H2 x2, H3, H6; max 0.46-1.35 ms, drift +2..+41 ppm). So at block 2048 the port is not better in the model run. User's REAPER on Linux (2026-11-21, pw-jack, TI2
+Desktop): no crackle. Sent to the #37 reporter as an experimental build (user's decision) to see whether Logic on
+Catalina behaves like REAPER or like the nativehost burst.
+
+- **Date:** 2026-11-21
+- **Pointer:** native/src/device/timelinefollow.h (play_started, activated, anchor), native/plugin/source/virusplugin.cpp process(), native/tests/test_timelinefollow.cpp; issue #37
+- **Method:** port of E351, unit tests, hardware A/B (nativehost), user's REAPER check
+- **Confidence:** LOW (whether it helps Logic: the model run at block 2048 is slightly worse)
+- **Hardware:** yes (our TI2 Desktop, Linux: nativehost A/B and the user's REAPER)
+
+### E571
+
+rc2 (d8ba24d, the E351 port of E570) in Logic on Catalina (#37 reporter's TI2, log 2026-11-21 22:47, 5 plug-in opens
+with rc2 next to earlier rc1 opens in the same log): no change at Play. Each Play at block 2048 gives a 10 s stats
+window with host frames 11608 above the Virus' (about 263 ms ahead), 3 anchors, err down to -5703/-6144 and 12 blocks
+pulled back (largest 3584); rc1 in the same log: +11608, 3 anchors, 13 blocks. The next windows are calm (anchors 0, no
+pull-back). Windows at block 128 (`largest 128`, presumably the selected track in Logic, not tested) are clean. The
+reporter: starting 1-2 bars before the notes avoids the offset and the crackle, starting on the notes does not; the
+buffer setting changes nothing. The user: REAPER shows the same at the start, and the port trades the short crackle
+for notes missing at the start. So a jump after the burst cannot cover a burst longer than the read margin; the
+remaining options are a larger buffer (more latency) or holding notes until the burst ends, planned as an opt-in
+option for such DAWs (user's decision 2026-11-21).
+
+- **Date:** 2026-11-21
+- **Pointer:** issue #37 (issuecomment-7068606152); work/issue37-rc2 (git-ignored log)
+- **Method:** field log (stats lines), reporter's and user's listening tests
+- **Confidence:** MEDIUM (the burst size and its effect; that small blocks are clean comes from the log, not a test)
+- **Hardware:** yes (reporter's TI2, Logic on Catalina; user's REAPER on Linux)
+
+### E572
+
+REAPER's Play burst against the block size (user, Linux, pw-jack, TI2 Desktop, dev build 69779ebc = rc2 code, 48 kHz,
+2026-11-21 21:26). Block 256 (reported latency 3840): two Plays in one 10 s window, host frames +7680 above the
+Virus' (about 3840 per Play = the reported latency), 4 anchors, 200 blocks pulled back (largest 1663); heard: a short
+metallic crackle at the start. Block 2048 (latency 5632): two Plays, +17601 (about 8800 per Play), 5 anchors, 7 blocks
+pulled back (largest 3584); heard: a glitch, the start not right. Earlier today at 44.1 kHz/2048 (VTI_NATIVE_STATS):
+each Play two jumps (about -1900 then -4200/-4380), +11658 for one Play. So the burst is not a fixed number of blocks:
+it is at least the latency the plug-in reports (as E351 already suspected: delay compensation rendered at once at
+Play), in Logic (E571, 11608 at latency 5632) about twice. A larger reported latency (option (a) of E571) would make
+the burst larger by the same amount, so it cannot cover it.
+
+- **Date:** 2026-11-21
+- **Pointer:** ~/.local/share/virus-ti-native/diag.log (local, 21:26-21:27); E351, E571
+- **Method:** user's listening test + stats lines
+- **Confidence:** MEDIUM (two runs, two Plays each; the per-Play split of a 10 s window is inferred)
+- **Hardware:** yes (our TI2 Desktop, Linux, REAPER)
+
+### E573
+
+What the original does when the DAW reads ahead at Play (#37, E571/E572; static REA/Ghidra 12.1.4 on the user's
+Virus Control.dll 5.1.7 x64, sha256 a622f9a2.., bounded search, nothing run) and what Access advises. (1) The host-side
+process (0x1800aa7c0) reads each output channel from a CSampleRateConverter (vtable 0x180158208) with slot +0x90
+(0x180025910): a ring of 65536 frames (+0x40040), a fractional read position (+0x40048) that advances by the
+converter's rate per output sample and wraps; the write position (+0x40044) is NOT checked inside the loop, so a read
+past the newest frame takes whatever the ring still holds from about 1.5 s earlier. Afterwards it returns the fill
+(write - read - a target at +0x18) and counts a read that passed the writer (+0x40050). Once per device block the
+process feeds that fill into a slow rate correction (factor 1e-8, slots +0x38 rate, +0x40) - no jump, no re-sync, no
+silence. Without the converter (+0x08 clear) slot +0x98 (0x180025ae0) copies the frames straight from the read
+position, also without a check against the writer. So in a DAW's Play burst the original plays stale ring audio too.
+How the read position gets back behind the writer after a burst in the copy path was not found (the device callback
+0x1800a8f60 not read for this). (2) Access' own documentation (Virus Control Tutorial, General Hints and Tips,
+"Pre-roll"; the Ableton Live and Cubase tutorials for bouncing) advises, in our words, two bars of silence before
+the first notes so they always play right, and a pre-roll of at least two bars when bouncing so everything can sync.
+So TI Revive's limit at Play (E572) is the original's too; a pre-roll is the documented answer, a clean start
+(silence instead of repeated frames, E572) would be better than the original.
+
+- **Date:** 2026-11-21
+- **Pointer:** Virus Control.dll 0x1800aa7c0, 0x180025910, 0x180025ae0, vtable 0x180158208; Access documentation (user's installer, local: work/mac/payload/.../Documentation)
+- **Method:** static analysis (REA), documentation search (pdftotext)
+- **Confidence:** MEDIUM (read path HIGH from the code; behaviour after the burst open)
+- **Hardware:** no
+
+### E574
+
+Pre-shift at Play (#37, commit 6a192f0): TimelineFollow::play_started(from_stop) measures the burst of a Play from a
+stop (the most-ahead error over a second, counted without the follower's own moves, against the error's low before
+Play) and at the next Play from a stop returns it as a shift back before the burst; while the burst eats it nothing
+moves and process() skips its 8192-frame re-anchor (expects()); a burst smaller or larger than learned is fixed by a
+jump and learned anew; the "burst never ends" limit is now SETTLE or 16 blocks (at block 2048 SETTLE alone ended
+Logic's burst after one block, E570); loop restarts and jumps while playing never shift (TransportWatch::from_stop).
+Unit tests 874 pass (7 new for the shift, 1 for from_stop), ctest 7/7. TI2 A/B (Linux, nativehost --block 2048, Play at
+8 s and again at 20 s, 263 ms burst each; work/repro-37b): rc2 3 jumps and 12 pulled-back blocks at both Plays; new
+build: first Play as rc2, second Play one shift of 11607 frames, 0 jumps, 0 pull-backs. The note exactly at Play is
+about 260 ms late in both (the DAW renders that spot before the Virus has the note; unavoidable, E572/E573);
+the notes from Play + 1 s on are exact. scripts/hil.sh on it: ALL PASS (work/hil-0.8.44-preshift). User's REAPER test
+(Linux, pw-jack, 48 kHz, TI2 Desktop, plug-in ce68817b, 2026-11-21 22:00-22:02): buffer 256, 7 Plays after the
+first each 'timeline back by 3840 frames' (= the reported latency), no jump, no pull-back - heard: perfect; buffer
+2048, 4 Plays each back by 6112-6144, no jump, no pull-back - heard: ok, smaller buffers better.
+
+- **Date:** 2026-11-21
+- **Pointer:** native/src/device/timelinefollow.h (play_started, expects, settle), native/src/device/transport.h (from_stop), native/plugin/source/virusplugin.cpp process(); native/tests/test_timelinefollow.cpp, test_transport.cpp; scripts/playstart_check.py; issue #37
+- **Method:** unit tests, nativehost A/B on the TI2, hil.sh, user's REAPER listening test + diag.log
+- **Confidence:** MEDIUM (REAPER on Linux and the model run; Logic not tested by us)
+- **Hardware:** yes (our TI2 Desktop, Linux)
+
+### E575
+
+Issue #41: keeping the Virus' own Multi mode (splits / key zones) while the plug-in is open. (1) Original, static (REA/Ghidra 12.1.4, Virus Control.dll 5.1.7 x64 a622f9a2..., start-up 0x180070520): the GlobalInit list is sent in a loop without any condition or option (list at +0xccf40, one send per entry); its first entry is `73 00 7A 03` = Global Master/Mode 3. The value list in the user's own description ("Val Playmodes") reads 0 SINGLE, 1 MULTI, 2 SEQ MODE, 3 MIDI REMOTE (4/5 SEARCH/TAP TEMPO), so the manual's "Sequencer mode" for the PC state is MIDI REMOTE, not SEQ MODE. Then a fixed 267-byte multi dump (0x18007aa50 with the table at 0x1801c5cc0, length 0x10b, the per-part bytes filled in a loop) and the ParamInit list (part n on MIDI channel n, `72 0n 22 0n`, Panel Part 1). At close it sets SINGLE, not the previous mode (E391, E395). TI Revive does the same. (2) Firmware, static (sim, host listing): only a write of 0x7A changes the mode (handler FUN_0578); the USB connect and the broker handshake (0x52) do not. (3) Simulator S148 (virus-ti-sim f57a6eb, TI2 image with the real DSP core; nothing on hardware): entering MULTI or REMOTE resets every part to channel = part, keys 00-7F (FUN_66ca); leaving MULTI saves the state (16 part buffers + multi, 0x2A00-0x4AFF) to page 1 0xA200-0xC2FF and entering MULTI reads it back, but FUN_66ca then resets channels and zones; SEQ MODE keeps its own block (0xC300-0xE3FF) and keeps its zones (S149 corrects S148's addresses). Whether entering MULTI reloads a stored multi (FUN_4b23 -> FUN_0319, global 0x69) is not shown (the model's stored multis are blank, a `31` request failed in the check). Original start-up with 7A=1 instead of 3: Mode stays 1, but `72 0p 22` and the multi dump reset channels and zones; without the multi dump the zones survive but stamped notes give silence on USB (cause not traced). With 7A=1 and the multi dump: sync marker, stamped notes on USB 1, single dump request and pot CCs work (USB 2/3, parameter echo, Local/keybed not checked). Mode 1 survives a simulated reboot from battery RAM; Mode 3 comes back as 0. (4) So keeping the hardware Multi would need: Mode left or 7A=1, no channel writes and no multi dump at start-up, and finding what the plug-in's parts need from the multi dump. Because Mode 1 survives a power cycle, any shipped change falls under rule 2's "own Virus first". (5) S149 (virus-ti-sim 5ade478): MULTI entry reads no stored multi (FUN_4b23 reads global 0x69 = the SINGLE program slot, loads nothing); a multi dump `11 00 00` sets zones in REMOTE, but in Mode 1 it is applied with channels and zones at defaults, so in Mode 1 only `72 0p 22/23/24` set them on the model; storing a multi (`11 01 0x`) changed nothing visible on the model (flash overlay empty) and `31 00 00` got no reply. Inferred (MED): a real unit's Multi set-up comes from choosing a stored multi (program change in MULTI), not from the mode switch; not run. Not done: nothing on our TI2; a program change in MULTI.
+
+- **Date:** 2026-11-22
+- **Pointer:** Virus Control.dll 0x180070520, 0x18007aa50, 0x1801c5cc0; E391, E392, E395; virus-ti-sim docs/FINDINGS.md S148 (src/mode_checks.inc); issue #41 (issuecomment-7075376655)
+- **Method:** static (REA), vtimodel init / value list from the user's own files, simulator run
+- **Confidence:** HIGH (1), MED (2), MED (3: model, one image, stored-multi reload open)
+- **Hardware:** no
+
+### E576
+
+Issue #41: a personal library on macOS could not be saved and no new library could be created, while the plug-in
+still listed the libraries. Reporter's `ls -leO@` of ~/Documents/Access Music/Virus TI/Patches (2026-11-22): every
+file has the ACL `0: group:everyone deny write,delete,append,writeattr,writeextattr,chown`, every subfolder
+`0: group:everyone deny add_file,delete,add_subdirectory,delete_child,writeattr,writeextattr,chown`; the subfolders
+carry the xattr `com.apple.timemachine.private.directorycompletiondate` and all date from 15 Nov 10:50; owner is the
+user (not root, so not E182). A Terminal `touch` of a new file in Patches gives "Permission denied", so the folder
+itself has the same deny ACL and every process is blocked, not only Logic's AU. This deny-everyone ACL is the one
+macOS puts on items inside a Time Machine backup; the reporter confirmed he copied Documents back out of a backup,
+which kept it. Reads keep working, so the plug-in lists libraries but every save fails (before eb55734 silently: the SAVE
+menu and Create Empty Library logged to stderr only). Suggested fix `chmod -R -N ~/Documents/"Access Music"`
+(removes ACLs only). Reporter 2026-11-22 12:13: after it saving works, and he confirms he copied Documents back from a Time Machine backup on 15 November.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/access/library.cpp save_library/commit_library; native/plugin/source/virusplugin.cpp library_saved; issue #41 (issuecomment-7078878581); E182
+- **Method:** reporter's ls -leO@ and touch output
+- **Confidence:** HIGH (ACL, touch test, fix confirmed by the reporter, Time Machine copy confirmed)
+- **Hardware:** no (reporter's Mac, Snow, Logic)
+
+### E577
+
+Jumps at the first Play at small blocks (REAPER on Linux, pw-jack 48 kHz, block 128, dev build f47d3e8, user
+diag.log 2026-11-22): the window with the first three Plays had "pulled back 202 blocks, largest 1855 frames, err
+-2495"; at block 256 the first Play only 14 (the learning Play, E574). Reproduced on our TI2 with nativehost (local
+--play A:B repeatable + --reactivate = REAPER's setActive cycle at Play, burst ~ the latency, 6 Plays): block 128 Play 1
+202 pulled back + 2 jumps every run, Plays 2-6 clean (the learned pre-shift is right); the parent of 6a192f0 (before the
+pre-shift) has the 202 + 2 jumps at EVERY Play, so the pre-shift did not make 128 worse. Cause (code, HIGH): the "burst
+never ends" limit settle() = max(SETTLE 2048, 16 blocks) (timelinefollow.h) ended REAPER's burst (latency 3712 at block
+128) half way; the jump restarted the Play window and the rest of the burst waited for the half-second rule. Below
+~240-frame blocks only; at 256 the limit is 4096 > burst. Fix: SETTLE = AT_ONCE (4096); TI2 with the fix: block 128 / 64
+/ 256 Play 1 one jump inside the burst, Plays 2-6 clean. Not fixed: a burst beyond ~4100 frames (Logic ~2x latency at
+small blocks) still jumps at AT_ONCE mid-burst at the first Play.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (SETTLE, settle()); native/tests/test_timelinefollow.cpp timeline_first_play_burst_at_block_128_jumps_once; native/tools/nativehost.cpp --play/--reactivate; work/repro-128
+- **Method:** user diag.log, nativehost A/B on the TI2 (8 runs), unit test failing before / passing after
+- **Confidence:** HIGH (cause and fix on the TI2; user REAPER retest 2026-11-22 at block 128, plug-in 2b2cd1e3: first Play 26 blocks pulled back inside the burst, the next 3 Plays the learned shift and 0 pulled back; heard: perfect, no jumps; 256 not retested)
+- **Hardware:** yes (our TI2 Desktop, Linux)
+
+### E578
+
+#51 fix (two clocks, E564), model: with drift the 2 s mean of TimelineFollow parks at the STEP/HOLD band edge (-256..-128)
+on the side where the Virus is slower than the sound card, and delivery jitter then takes single blocks past the read
+margin (pulled back = click); the other sign only uses stamp lead. Also in the model: an anchor block that sees the ring
+~200 frames early leaves the mean inside the band for good. Fix: the follower knows the margin (set_margin(timing_m()),
+VTI_NATIVE_MARGIN honoured); the mean counts err after the owed steps; a window whose lowest err passed 3/4 of the margin
+and whose range fits 1.5 margins is lifted so its low sits at half the margin; wider windows (rough cadence E337, Play
+bursts) unchanged; reported latency, stamps and jump paths unchanged. Unit tests (90/200 ppm, +-300 jitter, blocks
+32-2048, late anchor): today 1190-49203 pulled-back blocks, fixed 0; step count within ~3 % of the drift's need, E337
+rough-cadence steps 184. TI2 with nativehost --ppm (new option) 5 min each at block 256, fixed build only: -100 ppm
+margin 512 / 384 and +100 ppm margin 384: 0 pulled back, 0 jumps - Linux jitter does not provoke the defect, so this
+shows no regression but does not prove the fix. Not tested with a second interface or by the reporter.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (set_margin, mean_lo_/mean_hi_, update), virusplugin.cpp process() set_margin; native/tests/test_timelinefollow.cpp (two_clocks tests, late_anchor); nativehost --ppm; issue #51
+- **Method:** model unit tests, TI2 nativehost runs, hil.sh ALL PASS (work/hil/20261122-140302)
+- **Confidence:** MED (mechanism HIGH from E564; fix shown in the model only)
+- **Hardware:** yes (TI2 no-regression runs only; the two-clock case not on hardware)
+
+### E579
+
+Short metallic sound after REAPER xruns (Linux, pw-jack 48 kHz, block 128, user diag.log 2026-11-22): the 10 s windows
+with hundreds of timeline steps have 3746 of 3750 process calls, i.e. the host dropped cycles (4 blocks = 512 frames).
+The ring runs on, the stamp-aligned timeline does not: it is 256-512 frames behind for good, and TimelineFollow paid
+that back with one 1-frame skip per block (owed = mean - HOLD up to ~384: ~375 skips a second for ~1 s, the pitch
++0.8 % and a skip every 2.7 ms = the sound). Separate, open: one 6022 us process() of ours at block 64 during the RAM
+bank sync in the same log (a cause of xruns of its own). Two bugs of the #51 guard (E578) were fixed on the way: one late
+USB delivery lowered a window's low end and the guard lifted the band (now only when more than 1/16 of the blocks
+passed 3/4 of the margin), and a lift past STEP was stepped back down by the next window, out and back, 280-384
+skips per hiccup and ~4500 a minute on a skewed cadence in the model (now only if the lifted mean stays inside STEP). Fix: a catch-up
+is one crossfaded jump (Move::fade): at a window end where the step rule owes something and the last half second's mean
+(the 2 s mean is diluted by an xrun inside the window) owes more than FADE = 192 frames (drift up to 500 ppm owes at
+most ~176), and the two lasting-offset jumps outside Play (half a second beyond JUMP, the 2 s mean beyond JUMP) are
+crossfaded too; Play burst, pre-shift, AT_ONCE, anchor and slip stay hard. The read path (direct and resampled, all
+output channels) reads the first 128 frames once more at the old position and fades raised-cosine from it to the new
+one (crossfade.h, no allocation); where the old frames are not in the ring (past the newest, or older than
+VTI_AUDIO_RING - 1024) it jumps hard, counted as "cut". TI2 with nativehost --ahead -MS@T (dropped cycles), block 128,
+48 kHz, 4 Plays + --reactivate, 180 s each: fade from the full 2 s mean: fades 223/380/222/209 frames, then 130-173
+one-frame steps in the next window (period track of the WAV: bursts of ~0.3 s at +0.8 % pitch); with the tail mean:
+3 fades (351/224/255), 0 steps after the anchor, one hard jump by 608 for a 513-frame loss; with the offset jumps faded
+(xruns of 512 and 1024 frames): 5 fades (253/1123/352/1118/352), 0 cut, 0 hard jumps, 0 steps, no burst in the WAV. 96 kHz
+host (resampled path), block 256, 60 s: 1 fade, 0 steps (WAV not checked: the period track does not work there).
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (FADE, tail_sum_, faded(), the #51 guard), native/src/device/crossfade.h, virusplugin.cpp process() and read_resampled (xfade_, "timeline caught up by N frames (crossfaded)", stats "fades N (M cut)"); native/tests/test_timelinefollow.cpp (xrun, large xrun, drift, one late delivery, skewed cadence), native/tests/test_crossfade.cpp; nativehost --ahead -MS@T
+- **Method:** user diag.log, unit tests failing before / passing after, TI2 nativehost runs with WAV period tracking, hil.sh
+- **Confidence:** HIGH (cause from the log and reproduced on the TI2; the fix on the TI2), not yet heard by the user in REAPER
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in REAPER)
+
+### E580
+
+#41 (Chris, 2026-11-22 14:01 UTC, 0.8.43, Snow, Logic Pro 13, I/O buffer 32, Processing buffer small): the bus recording
+of TI Revive sat 32 ms before the grid; changing the I/O buffer to 128 and back to 32 fixed it (his reply 15:23 UTC):
+Logic kept a stale latency, the E546 kind, also the pattern of #37/#33 (E543, E532). Our Mac (MacBook Air M3, macOS
+27.2.1, Logic, TI2 Desktop, his "Project Latency", 48 kHz): at every project open the plug-in first reports 3085
+samples (block 512) and 2816 once the Virus' audio is open (the value E546 found in his November log, 269 samples
+apart), the latency watch announces 2816 and our Logic reads it. A one-time nudge was added: 6014095 fired 1 s after
+activation, which was before the Virus was ready (at 3085, wasted); 1d3b029 fires once ~1 s after the latency settled and
+the audio is open ("latency 2816 samples announced once more after the latency settled (host read 2816)", seen in the log
+17:20). Takes measured (onset = first sample over 20 % of the peak walked back to 2 %, beats at 120 BPM against the
+file start = bar 1): #05 (6014095, Virus connected after the project) and #06 (1d3b029, fresh Logic start, I/O 32) all
+16 beats 0.00 ms. Not shown: that the nudge cures his case - our Logic took the new value without it (also E544); his
+test with an rc is the real check. Where the extra 269 before the Virus is ready comes from is not traced (likely the
+resampler's share while virus_rate() is not the host's rate).
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/latencywatch.h nudge(), VirusPlugin::check_latency; issue #41 (issuecomment-7080304263, -7081427381); work/logic-41 (takes, not in git)
+- **Method:** reporter's statement; diag.log on our Mac over SSH; WAV onset measurement
+- **Confidence:** HIGH (stale latency in his Logic; our takes on grid; the nudge fires as designed) / open (that the nudge cures his case)
+- **Hardware:** yes (our TI2 Desktop, Apple Silicon Mac, Logic); his Snow not
+
+### E581
+
+rc5 (E579) in REAPER (Linux, pw-jack 48 kHz, user diag.log 2026-11-22 from 1795365640): started at block 256 the log
+shows "timeline caught up by -3075 frames (crossfaded)" and 107 blocks pulled back, a block switch to 128 while playing
+two more crossfaded catch-ups and 395 pulled back, the next Play "back by 765" (correct ~3600), and 4 s after a later,
+right Play (3616) a crossfade of 287. Cause (model and TI2, HIGH): the jumps inside the bursts are the same as in
+fd33fc4 (2b2cd1e3, the build heard as perfect) - rc5 only flagged them as fades, and the read path cut each one to a hard
+jump ("fades 1 (1 cut)", "2 (2 cut)"); the model gives identical moves for both builds in every burst case, and a burst
+with no Play window (REAPER's extra setActive cycles at a start or a block switch) waits half a second in both: 107
+pulled back at block 256 in the model too. Two real faults: (1) the wrong learned burst, also in fd33fc4: a Play within a
+second after such a burst took that burst's low as the cadence's normal low and learned the rest (model: 0 or 765-like
+values; TI2 with a burst 0.6 s before a Play: fd33fc4 learned nothing, rc5 3112); (2) the E579 catch-up rule also fired
+on a pre-shift's rest after a Play (rc5's 287; fd33fc4 stepped it). Fix (timelinefollow.h): a crossfaded catch-up only
+forward (an xrun leaves the timeline behind; a host ahead is a burst) and not for 4 s (QUIET = 8 half-second windows)
+after a Play window, a setActive(1), an anchor or a hard jump - there every move is as in fd33fc4; the burst is measured
+from the calm cadence's low, else from the lowest error since the last jump. TI2 nativehost A/B (--block 128 / 256,
+48 kHz, 5 Plays with --reactivate and a burst of the latency, xruns of 512 and 1024 frames 5 and 8.5 s after a Play,
+46 s): fd33fc4 128: 27 pulled back (first Play), 2 hard jumps, xruns 802 one-frame steps + a hard jump of 1165; rc5
+(e762e50) 128: 28, 1 jump, 2 fades (609, 1119), 0 steps; fix 128: 26, 1 jump, 2 fades (477, 1123), 192 steps (after
+the first Play's jump, as fd33fc4); at 256: fd33fc4 14 / 2 jumps / 689 steps, rc5 14 / 1 / 2 fades / 0, fix 13 / 1 / 2
+fades (419, 1144) / 0; learned shifts 3680-3712 (128) and 3840 (256) in all builds. A burst 0.6 s before a Play (block
+128, twice, 40 s): fd33fc4 454 pulled back and 1 of 3 Plays pre-shifted, rc5 611 and shifts 3112 / 3712, fix 402 (only
+the two bursts without a Play, 215 + 187) and shifts 3712 / 3712 / 3712, the Plays 0 pulled back. Not fixed: a burst
+with no Play window still waits half a second (also fd33fc4); not heard in REAPER yet.
+
+- **Date:** 2026-11-22
+- **Pointer:** native/src/device/timelinefollow.h (QUIET, quiet_left_, faded(), since_lo_, play_started base_); native/tests/test_timelinefollow.cpp (timeline_reaper_*, timeline_burst_before_play_does_not_spoil_the_learned_burst, timeline_preshift_rest_after_play_steps_not_fades, timeline_xrun_after_a_play_still_crossfades); work/ab-581 (runs, not in git)
+- **Method:** user diag.log, a model of REAPER's bursts run against both headers, unit tests failing on e762e50 / passing after, TI2 nativehost A/B of three builds, hil.sh
+- **Confidence:** HIGH (rc5's burst jumps equal fd33fc4's, model and TI2; the learning fault and its fix on the TI2) / open (the user's REAPER retest)
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in REAPER)
+
+### E582
+
+#37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:46 local, session 18:56-18:58 UTC at block 2048 with
+blocks of 128): the reporter hears crackling on the first notes wherever Play starts, the same at I/O 128 and 512.
+The log's four pre-shifted Plays learned 10779, 11847, 11847, 10642 frames: Logic's burst varies by up to ~1200 frames
+from Play to Play (REAPER: ~30, E581). A burst larger than the shift read past the newest frame (1 block pulled back by
+1097 / 343 / 516) and jumped back hard, a smaller one jumped forward hard; the 10 s windows with a Play show 17-45
+one-frame timeline steps and read margin min 0, windows without a Play 0 steps. All of it falls on the first notes after
+Play. Fix (timelinefollow.h): the pre-shift keeps room = the largest difference seen between two learned bursts plus a
+block up to JUMP, at most a quarter of the burst, only when that difference exceeds HOLD (REAPER gets none); when the
+learn second ends, the rest (from the learn second's lowest error, so no read ends up ahead) is one crossfaded move
+(Move::fade, inside the quiet time too), only if nothing else moved the timeline in that second (a burst 0.3 s before
+the Play otherwise faded forward and jumped back in the model). Unit test timeline_logic_varying_bursts_no_click_after_play
+(the log's bursts, blocks 512 and 2048) failed before (3 pulled back, 4 hard jumps after the third Play at 512), passes;
+timeline_preshift_rest_after_play_is_one_crossfade replaces the E581 rule that stepped the rest. TI2 nativehost A/B
+(44.1 kHz, 7 Plays from a stop with --ahead 268.6/244.4/268.6/268.6/241.3/268.6/244.4 ms, C4 every second, 60 s),
+from the second Play on: rc6 code at 512: 7 pulled back, 3 hard jumps (868, -1155, 1074); fix: 1 hard jump (-1289, the
+second Play, before a spread is known), 4 fades (497-2799), 0 steps, 5 pulled back (largest 777) in the 10 s window
+of the second and third Play (likely the second's jump back; the windows do not say), none later; at 2048: rc6
+4 pulled back, 4 hard jumps, 60 steps; fix 0 pulled back, 0 hard jumps, 0 steps, 6 fades (542-2778). The REAPER pattern
+of E581 (run.sh, block 128 / 256) is unchanged against E581's build: shifts 3680-3712 / 3807-3840, the same xrun fades,
+192 / 0 steps after the first Play's jump. Cost: the rest is a crossfaded skip of up to ~63 ms about a second after Play
+(not heard yet). hil.sh on the TI2 with the fix: one item failed per run (H2-2 first note at 17 s, then H2-1 no
+sound), the rc6 build failed the same way (H1 first note at 17 s): the start-up messages queued for ~10 s / "no reply
+to the probe", the TI2 slow to answer after a reopen (it froze on the Mac on 2026-11-22), not the timeline.
+
+- **Date:** 2026-11-23
+- **Pointer:** native/src/device/timelinefollow.h (spread_, block_, play_started room, learn end rest, faded(burst_rest)); native/tests/test_timelinefollow.cpp (timeline_logic_varying_bursts_no_click_after_play, timeline_preshift_rest_after_play_is_one_crossfade, the learned-burst tests); work/issue37-rc6/TI-Revive-logs-2026-11-22-2246.txt, work/ab-37 (runs, not in git), work/hil/20261123-*
+- **Method:** reporter's diag.log, model unit tests failing before / passing after, TI2 nativehost A/B against the rc6 code, hil.sh
+- **Confidence:** HIGH (the moves at Play from the log and on the TI2) / MEDIUM (that these moves are the crackle he hears) / open (heard in Logic or by us)
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in Logic)
+
+### E583
+
+#54 (Mac Studio, Apple Silicon, TI Desktop, Virus OS 5.1.7.00, 0.8.43 VST3, Ableton Live native, 48 kHz block 64):
+clicks on USB 1 at 48 kHz, clean at 44.1 kHz and on the analog Out 1 - the picture of #34 (E560), which a new USB
+cable fixed (reporter 2026-11-18). Plug-in log (diag-click.log, 2181 stats windows): raw peaks of USB 1 RIGHT at
+full scale while left is normal in 4 windows (646 26985, 5081 32640, 613 31097, 6195 32383; each window is the last
+second of 10 s, so more clicks than these are possible); the first raw pair's right channel at 258 (or 515) in silence
+while left is at 3-4 in 1467 of 2181 windows (3 3 in 675). drops 0 while playing (one at stream start, filled 1568),
+no byte slips, no stream restarts, read margin min 64-128, timeline steps 0. The first RAM bank sync had 19 "reply
+with a wrong checksum" retries (all 512 patches arrived) - none in any other report's log we have or our hil.sh runs.
+Reading (inferred, not tested): damaged bits on the USB link (cable, hub, port) before Core Audio hands the values to
+the plug-in (audioin.cpp: Float32 * 32768); 48 kHz carries ~9 % more audio data per packet than 44.1 kHz. Broker log:
+the plug-in owns the Virus, no LIBUSB_ERROR_ACCESS; the read/write errors at 19:31:09 end with NO_DEVICE (the Virus
+switched off or unplugged). Asked (issuecomment-7109412140): another short USB 2.0 cable, directly on the Mac, the same
+sequence again, the log if it still clicks; libusb audio on current macOS pointed to #40. Reporter 2026-11-23 19:56 UTC:
+"A shorter USB cable fixed it: 48 kHz, buffer 64, part on USB 1, no clicks" - the second case (after #34) where a
+cable swap alone ended one-sided clicks at 48 kHz; issue closed as solved.
+
+- **Date:** 2026-11-23
+- **Pointer:** issue #54 (diag-click.log, tirevive-vtibroker.log in work/issue54, not in git), E560 (#34), native/plugin/source/virusplugin.cpp (stats: raw peaks), native/src/device/memsync.cpp (wrong checksum)
+- **Method:** the plug-in log's stats lines (raw peaks per pair, drops, margin) and retries, the broker log
+- **Confidence:** HIGH (one-sided full-scale values and checksum retries in the log, clean timeline; the cable as the cause: a shorter cable fixed it, reporter 2026-11-23)
+- **Hardware:** no (the reporter's unit)
+
+### E584
+
+#37 rc6 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-22 22:28 local): crossfaded catch-ups while playing. Session
+18:54:52-18:56:10 UTC at block 512 throughout: "timeline caught up by 1461 / 1108 / 2037 / 1329 / 1733 frames
+(crossfaded)", no xrun report, no anchors. The 10 s windows around them count host frames 436736 against Virus frames
+441441 (the first three) and 439808 against 441000 (1329 and 1733, one window each); windows without a fade 440832 /
+441000. So Logic did not process whole blocks of frames there, the ring ran on, and a catch-up is needed (the fades sum
+to about the missing frames). 1461 at err 2373 and 1108 a second later fit one loss of ~2300 paid twice (inferred from
+the amounts and the times, the log has no per-block err): in timelinefollow.h a 2 s mean window that ends while err is
+already beyond +JUMP faded by its last half second's mean, diluted by the blocks before the loss, and the half-second
+path then paid the rest as a second fade (or one-frame steps below FADE). Fix: a mean window does not end while err is
+beyond +JUMP (far_side_ > 0); the half-second path pays the whole loss once, or err comes back inside JUMP and the
+window ends then. The wait is bounded: err beyond +JUMP for a whole half second fires the far path, which restarts the
+windows. Logic's switch from block 2048 to 128 after a setActive(1) (18:56:29 UTC) has one fade of 1339 at err 1525
+right after it (host frames 438272 / 441000 in its window): likely the same kind of loss, in the unit test as Case
+2048 -> 128 / 512. The fade of 208 at block 2048 (18:57:01 UTC) after a 128 -> 2048 switch without setActive follows
+29 steps and a read margin of 0 in the window before: E581 open item (b) (a burst without a Play window), not covered
+here. Model (unit test timeline_logic_lost_frames_one_crossfade_at_any_phase, 40 phases of the mean window per case,
+blocks 512 / 128 and 2048 -> 128 / 512, losses 1024-2300): 4-9 phases per case paid in two fades or 149-171 steps
+before, 0 after. Where err keeps dipping back inside JUMP (a scratch model with uniform jitter of +-700 or more around
+a loss of ~1000) both rules pay in two moves in about half the phases: unchanged, not addressed.
+
+TI2 A/B 2026-11-23 (work/ab-584/run.sh, not in git: 44.1 kHz, 60 s, C4 every second, 7 host losses of 52 ms ~2290
+frames spaced 6.1-6.45 s so each lands late in a 2 s window; old = 775d6f8 build 40329e7a, new = 140617e build
+52fa05f5): block 512 old 11 catch-ups (2251, 909, 1373, 1541, 752, 1881, 276, 561, 1855, 2284, 2296) + 160 one-frame
+steps, new 7 catch-ups (2285-2398) + 0 steps; block 128 old 10 catch-ups (549-2292) + 161 steps, new 7 (2164-2292)
++ 0 steps; 0 pulled back in all four. hil.sh on the new build ALL PASS (work/hil/20261123-195257-e584).
+
+- **Date:** 2026-11-23
+- **Pointer:** native/src/device/timelinefollow.h (update(): the mean window's end, far_side_); native/tests/test_timelinefollow.cpp (timeline_logic_lost_frames_one_crossfade_at_any_phase, pipewire() block_after); work/issue37-rc6/TI-Revive-logs-2026-11-22-2228.txt (not in git)
+- **Method:** reporter's diag.log (fade lines and 10 s stats windows), model unit test failing before / passing after, mutation check on the changed condition
+- **Confidence:** HIGH (the fades pay frames Logic did not process: host vs Virus frames in the log) / MEDIUM (1461 + 1108 = one loss paid twice, inferred) / open (the fix in Logic)
+- **Hardware:** yes (our TI2 Desktop, Linux, nativehost; not in Logic)
+
+### E585
+
+Follow-up to E323 (5) and E331 (1–2), firmware 5.1.7.00. In retained DSP interpreter runs,
+delivering global Frequency (page 115, index 16) = 1 reaches P:$05205b, stores the rate selector at
+P:$05205e, and executes the PLL write at P:$052096. In the DSP listing, the code then updates
+the ESAI_1 dividers (RCCR_1/TCCR_1) and re-arms port D (the DAX pins) after a frame sync (P:$052000). Feeding the host
+emulator's messages from its SysEx receive path into the DSP emulator's HDI08 queue produces the
+same selector and rate-table state. Both DSPs log the PLL change. Either the forwarded SysEx or the
+separate parameter delivery suffices in these runs. In a separate TUSB harness entering SET_CUR
+at CODE:0x1868, an equal stored rate leaves the rate report and audio clock generator unchanged.
+A changed rate produces a new report and rewrites the clock generator. The order of a complete
+USB-to-host-to-DSP transition, the physical frequencies and the cause of E175/E241 remain open.
+
+- **Date:** 2026-11-22
+- **Pointer:** firmware 5.1.7.00 DSP emulator ROM (SHA256 prefix 8e3daea8552f9ecb), P:$05205b/$05205e/$052096/$0520a3–$0520ac/$052000–$052007; TUSB payload (SHA256 prefix e7d5304f818c2e8a), CODE:0x1868/0x02dc/0x11a2
+- **Method:** retained DSP interpreter traces (parameter only, relay only, both and value-0 controls), DSP listing for divider and port writes, and retained TUSB equal/changed-rate harness results. The host and DSP emulators were joined at recorded messages. The TUSB harness entered the handler directly.
+- **Confidence:** HIGH (recorded DSP execution and static register targets) / MED (composed host-to-DSP handoff and TUSB harness result) / open (historical failure cause and hardware timing)
+- **Hardware:** no
+
+### E586
+
+An unresolved Input Follower Release mapping in firmware 5.1.7.00. The parameter catalog names
+page 112, index 58 as Input Follower Release. In retained DSP1 interpreter runs with Input Follower
+selected (113/38 = 1, 113/39 = 0), P:$04f36e reads the 112/55 effect cell at X:(part base - $39)
+in all 683 recorded follower evaluations per arm. Comparing raw values 0 and 127 for 112/58 changes
+its own cell at X:(part base - $36) through P:$04f4a1, and the follower read stays the same.
+The corresponding 112/55 comparison changes the follower read. The absolute X addresses depend
+on the allocation. In our preset 1:0 runs, the part base is X:$049b9e and the cells are
+X:$049b65 and X:$049b68. The runs cover one filtered record per arm. The original editor's
+control mapping and the audible effect on hardware remain open.
+
+- **Date:** 2026-11-22
+- **Pointer:** firmware 5.1.7.00 DSP emulator ROM (SHA256 prefix 8e3daea8552f9ecb), follower P:$04f365/$04f36e, parameter writers P:$04f443/$04f4a1
+- **Method:** compare recorded parameter writes and follower reads in four DSP1 interpreter runs (112/55 and 112/58 at raw 0/127), and compare the listing's follower operand with the writer addresses and the run's part base
+- **Confidence:** HIGH (relative offsets and recorded reads and writes in this setup) / open (editor mapping and audible hardware behaviour)
+- **Hardware:** no
+
+### E587
+
+Follow-up to E257 and E260's private serial F5/F6 analysis, firmware 5.1.7.00 TUSB payload.
+F5 at CODE:0x06a0 requests the USB connection state. Value zero clears internal bit address
+0x11. A nonzero value sets bit 0x11 and clears bit 0x14. When bit 0x11 differs from its copy
+in bit 0x12, the main loop writes USBCTL to connect and enable the USB function for the
+cleared state (CODE:0x0196), or disconnect it for the set state (CODE:0x0184). The disconnect
+path also clears bit 0x10 and sets IRAM 0x87 to 3. F6 at CODE:0x06af appends two mailbox bytes
+only if the initial count is below 15, and sets P3.5 if the resulting count is exactly 16.
+With preserved state and an initial count in 0–15, count 14 appends both bytes and signals.
+Count 15 appends neither. E260 describes the two-byte frames, 16-byte buffer and P3.5
+handshake, and infers at MED confidence that the data supply the USB serial number for
+iSerialNumber. The host-side sender and hardware effects remain open.
+
+- **Date:** 2026-11-23
+- **Pointer:** firmware 5.1.7.00 TUSB payload (SHA256 prefix e7d5304f818c2e8a), CODE:0x06a0–0x06cc, main loop 0x016d–0x0196, helpers 0x10e7/0x10f0, and TUSB3200A data manual SLES018B, appendix A.5.1.4 (USBCTL)
+- **Method:** static TUSB listing review of the F5 dispatch, main-loop state check and F6 append path. Original F5 analysis dated 2026-09-22, F6 recheck dated 2026-11-23.
+- **Confidence:** HIGH (static connection-state, side effects and append logic) / open (hardware effects)
+- **Hardware:** n/a (static analysis)
+
+### E588
+
+Follow-up to E549 and issue #43, firmware 5.1.7.00. The host 8051 stored-single receive path
+clears the staged flags byte at XDATA:0x4d01 (CODE:0x40db–0x40df) before the stored copy at
+CODE:0x40f0 (through CODE:0x562d), regardless of the incoming value. This is payload byte 1, or
+dump byte 10 counting from zero, the byte whose clearing E549 inferred. In two retained
+write/read runs of a synthetic single at bank 1/program 5, all 512 ordered copied bytes and
+all 524 dump-reply bytes matched the receive/reply model. The model assumes configured device
+ID 0, Receive Dump 1, independent writable logical pages, successful helper returns and a
+completed store before the read. ID 0 was an emulator setup premise. These runs started with
+flags zero. Clearing nonzero flags was confirmed by the maintainer's emulation in #58: inputs
+0x55 and 0x7F both read back as zero at byte 10, with the other 523 bytes matching. Physical
+storage backing, persistence and DSP consumption remain open.
+
+- **Date:** 2026-11-24
+- **Pointer:** E549, [PR #58 maintainer check](https://github.com/derpsn/ti-revive/pull/58#issuecomment-7123210401), firmware 5.1.7.00 host 8051 image (SHA256 prefix dd57749a1efb1b88), CODE:0x40db–0x40df/0x40f0/0x562d, XDATA:0x4d01, and retained emulator comparisons (SHA256 prefixes 5e0c698d5bcdb096, 77d673d7752d4c4a, e2ffbaf7e0d4d6f4)
+- **Method:** static receive-path and reply-serializer review, review of two retained emu8051 write/read runs with flags zero, and the maintainer's nonzero-flag emulation (2026-11-24)
+- **Confidence:** HIGH (static flag clear and recorded emulator results under the stated premises) / MED (composed receive-to-reply model) / open (hardware persistence)
+- **Hardware:** no
+
+### E589
+
+#37 rc7 (Logic on Catalina, 44.1 kHz, diag.log 2026-11-24, build c7e07331) and the design that follows from it:
+"keep the rest" plus every forward move and one-frame step faded. **Model only, not run on hardware, not in Logic.**
+(1) The log. Every pre-shifted Play was followed about a second later by "timeline caught up by 374..2067 frames
+(crossfaded)" (block 512) or 404..1835 (block 2048), and err at that block was still 250-1960 above the fade (e.g.
+"caught up by 2067, err 3673"); the windows with one Play then show "anchors 1" (a hard jump forward, not crossfaded
+because of QUIET) or 138-174 timeline steps. The logged shifts follow exactly from rc7's rule (the burst before plus
+its room: 5441 + 886 = 6327, 5867 + 1466 = 7333), so the bursts at block 512 were 5441-5924 with one of 4260; the
+room of a quarter of the burst made a rest of ~1400 at every Play. Inferred (the log has no per-block err): Logic
+idles after its burst, so the steady cadence sits 250-1960 above the learn second's lowest err and the fade from
+that low left a second move. Windows without a Play: 0 steps, 0 fades, read margin 280-530, drops unchanged since
+stream start, virus frames 441000/441441 per 10 s - the Virus stream is clean. The windows with 43 and 139 blocks
+pulled back have fewer "timeline back" lines than bursts (0-1 against 1-6 hard jumps): bursts without a pre-shift,
+43 blocks at 512 being the half-second far window; why they got none is not known. (2) Why the rest need not be
+paid (code, HIGH): with the marker an event at timeline t is due at ring frame t + lead and process() reads the
+ring latency behind that (virusplugin.h, "R5 timing"), so a timeline behind the ring by r still plays every stamped
+event exactly; r only uses stamp lead, and StampFloor moves a stamp only beyond A - floor_min = 3072 - 1024 = 2048
+(unit test timeline_rest_inside_the_room_floors_no_stamp). Simulator (virus-ti-sim-95, earlier model runs, nothing
+new run; the real unit's border is not measured): a lead of 1100-2000 frames at arrival is sample-exact (0 of 16
+off at every sender lead 576..2048, S051; 896..8192, S052), queued notes keep their stamps when a later F5 comes
+(S065 Q1), and by reading nothing reacts to a lead that changes while the stamps stay monotonic (E246, E251).
+(3) The change (timelinefollow.h): set_room(A - floor_min) gives the follower a rest of 0..room - 256 frames it may
+sit behind the ring; every rule works on err - rest, and an offset a rule wants gone is first taken into or out of
+the rest (no move), only what does not fit moves the timeline, then all of it. After a pre-shifted Play the rest is
+the steady cadence's low (the learn second's last half) above the normal low. The pre-shift is the largest of the
+last eight bursts + 128 + block/8, counted from where the timeline already is. One-frame drift steps are not taken
+into the rest (200 ppm would fill it in minutes and then cost one large crossfade). Only with the marker; a lead
+that leaves no room (Live Mode, Plugin Latency, the experimental low lead) keeps the rules of E582. Also: every move
+forward is crossfaded (the skipped audio is in the ring; E581's hard jump inside QUIET is gone), a move back stays
+hard; each one-frame step is reported with Move::fade and the direct read renders it as a 128-frame fade (the
+resampled read steers smoothly already), two steps at least 128 frames apart so a fade is never restarted mid-way;
+the fade's gains are a table built off the audio thread. A live stamp counts S + rest so it stays the original's.
+(4) Model (work/issue37-keep, not in git: the real header against a copy of the rc7 one; Plays rebuilt from the log
+as a burst then an idle, five idle values assumed), from the third Play on. Block 512, 9 Plays: rc7 9 fades, 6 hard
+jumps, 325 steps, 15 blocks pulled back, 0 Plays without a move; new 1 fade, 0 hard, 0 steps, 0 pulled back, 8
+without a move. Block 2048, 7 Plays: rc7 8 fades, 3 hard, 88 steps; new 2 fades, 0 hard, 0 steps, 4 without a move,
+and one kept rest at the room's edge whose band top passed 2048 by up to 72 frames (33 blocks with floored stamps:
+notes up to 1.6 ms late, no click). Bootstrap of 398 Plays from the same lists (+-100 frames): 512 rc7 3 without a
+move, 209 hard jumps, 20661 steps, 136 pulled back; new 362 without a move, 32 fades, 0 hard, 620 steps, 0 pulled
+back; 2048 rc7 0 without a move, 508 fades, 160 hard, 9691 steps, 1 pulled back; new 201 without a move, 167
+fades, 0 hard, 2423 steps, 8 pulled back (a burst larger than the last eight by more than the guard). A synthetic
+saw (numpy, one step per 512-block): a hard step leaves -49.5 dB of energy above 12 kHz, through the fade -111.6 dB.
+(5) Not shown, open: anything on the TI2 or in Logic; the 2048 model does not have Logic's real cadence (the log's
+band is -2013..73); notes played live sound up to the rest later (at most ~41 ms) while a rest is kept; the lead
+left for a host stall shrinks by the rest (to 1280 frames at least; E496 had 1408 exact on Linux, Logic is rougher,
+E363).
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/timelinefollow.h (set_room, rest(), moved(), play_started, SPACE), native/src/device/crossfade.h (gain table), native/plugin/source/virusplugin.cpp process() (set_room, the step's fade, "frames behind kept" log line, live_s); native/tests/test_timelinefollow.cpp (timeline_logic_rest_inside_the_lead_room_is_kept, timeline_kept_rest_does_not_add_up, timeline_xrun_on_a_kept_rest_pays_once_crossfaded, timeline_lasting_offset_inside_the_room_is_absorbed, timeline_forward_move_is_always_faded, timeline_xrun_inside_the_quiet_time_is_crossfaded, timeline_step_is_reported_as_faded, timeline_steps_leave_room_for_their_fade, the timeline_room_* guards), native/tests/test_crossfade.cpp (crossfade_renders_one_frame_steps_without_a_jump); work/issue37-rc7/log.txt, work/issue37-keep (model, not in git); issue #37; E574, E581, E582, E584
+- **Method:** reporter's diag.log, code reading, simulator answer (model runs cited, nothing new run), a model of the log's Plays run against both headers, unit tests failing before / passing after
+- **Confidence:** HIGH (what the log's Plays show; that a rest inside the room floors no stamp, from the code) / MEDIUM (the idle after the burst, inferred; the simulator's lead border) / open (that it removes the crackle the reporter hears: not run on hardware or in Logic)
+- **Hardware:** no
+
+### E590
+
+#51 (rc7 c7e07331, Windows 11, Studio Pro 8, Apollo Twin, 48 kHz / 256; reporter's description 2026-11-24, the log
+itself did not arrive: an e-mail reply, GitHub drops its attachments). Opening a song with one TI Revive instrument
+left two plug-in instances in the DAW's process. Instance A got setState, setActive(1) and "device connected" and held
+Virus 1, but its process() was never called ("process calls 0 ... largest 0"). Instance B, the one the DAW processed
+("process calls 1876"), found Virus 1 taken, tried Virus 2-4 ("another instance uses Virus 1 - trying Virus 2", "no
+Virus 2 - trying the others, waiting"), each try starting a vtibroker.exe for that slot, and then waited: silence
+while the song played. File > Revert closed B and processed A, after which the audio was fine. Cause, from the code:
+within one process the first instance to claim a slot (claim_owner, virusplugin.cpp g_owner) owns that Virus until it
+is destroyed, whether the DAW processes it or not; a waiting instance only takes over when the owner goes. This was
+so before #45 as well (a second instance always waited behind the first); #45 added the tries on Virus 2-4 and their
+short-lived brokers (they exit after 30 s without clients, vtibroker.c IDLE_EXIT_MS). Why Studio Pro kept an instance
+it never processes is not known. Change for rc8: an instance records each process() block with samples
+(note_processed); an owner not processed for 2 s while an instance of the same process without a Virus was processed
+within the last 0.5 s lets the Virus go without the close sequence and does not claim one again in that state
+(slotpick.h slot_yield); the played instance takes over through the existing takeover (its own start-up and state).
+Two instances that are both processed behave as before.
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/slotpick.h (slot_yield, YIELD_MS, PLAYED_MS); native/plugin/source/virusplugin.cpp (note_processed, yield_due, the claim gate and the "handing Virus N over (#51)" log line); native/tests/test_slotpick.cpp (slotpick_an_unplayed_owner_yields_to_a_played_waiting_instance); native/tools/nativehost.cpp --idle-first; issue #51; E553
+- **Method:** reporter's description of their diag.log, code reading, unit test failing before / passing after
+- **Confidence:** HIGH (the cause in our code: first claim wins regardless of processing) / MEDIUM (that Studio Pro's unprocessed instance is the whole story: the log is missing) / open (the fix on Studio Pro)
+- **Hardware:** no
+
+### E591
+
+Lost SysEx answers ("Virus ready after 11.5 s (no reply to the probe)", "bank info RAM A: no reply", "single RAM D 34:
+no reply", "bank sync failed") on Mac (#48, #37 rc6), Windows (#51) and our TI2, investigated 2026-11-24 by four agents
+(log forensics, code review, the original via REA, TI2 runs + simulator), each result checked by the orchestrator.
+Not one cause but several:
+(1) Late answers are thrown away (code, verified: native/src/device/memsync.cpp transact). The wait starts when the
+request is queued, not written; a matching reply in the 1.5 s drain is kept in the inbox but never checked and the
+next try clears it; after the last try every reply is dropped. Bank info waits 3 s, the probe 10 s. The original Virus
+Control 5.1.7 x64 (REA, static) waits about 4-5 s per bank info (0x18008e220 / 0x18008ea30) and up to 10 s per single
+(0x18008e980), and its reply entry 0x18008eaf0 takes any 10/14 reply of 267 or 524 bytes, also a late one; it asks only
+when the start-up queue is empty and less than about 0x220 bytes wait to go out (0x18007ec30, 0x1800aac00), drops notes
+while syncing, re-sends the reply-cable globals after repeated bank-info misses (listener 0x180086bf0) and after
+too many misses aborts and shows "A communication error has occurred..." (0x180080ba0). TI Revive gives up silently.
+(2) A false "no reply" after a handover (TI2, 3 of 3 with nativehost --duplicate 99 --idle-first, also in today's
+diag.log 18:29): the instance that gave its Virus away (E590) still runs its probe and logs 11.5 s, while the other one
+was answered in 1.1 s. #51's rc7 line after "another instance uses Virus 1" is this kind.
+(3) The Virus refuses EP 0x06 for about 8.7 s (TI2, broker journal: 27 "write ep 06: 5 timeout(s), gave up" since
+2026-11-01, clustered on 11-23 14:52-15:10 after the unit froze on the Mac, none after the user's power cycle, none in
+19 sessions today), always while the 16 part dumps are uploaded, nearly all at 44.1 kHz. Two old captures
+(captures/m512-44100-115232): EP 0x86 silent during the stall, an unsolicited 73 00 40 00 about 1.5 s after it, edit
+buffers kept. Simulator (static): no 8051 dump/main-loop wait that long; the only ~8.2 s wait is the DSP boot handshake
+(0x5168-0x519b), so a DSP-side restart is suspected (inferred). A probe queued behind the state on a reconnect then
+times out (with (1)).
+(4) MIDI IN dead until the Virus re-enumerates (#48, Mac, 0.8.43; log + code, inferred): the device open behind both
+distorted sessions logged one isolated LIBUSB_ERROR_IO on EP 0x86 (05:22:50) and EP 0x85 (05:23:23) and afterwards no
+reply and no 0x54 sync report came in, while OUT and audio worked; two earlier opens with the same pair of errors ended
+with "0 messages handed to macOS". The libusb reader (src/broker/vticore.c reader loop, rxqueue.h vti_rx_probe_now /
+vti_rx_unpark_after) resubmits a failed transfer only when none is in flight and unparks only after data: if the
+transfers still pending never complete, the endpoint stays silent and no rule reopens it. Cleared when the Virus left
+USB at 05:25:36. Whether #48's distortion has the same cause is not shown.
+Also: 62 of the 68 "no reply" lines in our diag.log.1 are instances closed during the probe (0.0-5.8 s), not misses;
+the pattern exists since 2026-10-17 (probe added in 582bda5), not new in 0.8.41.
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/memsync.cpp (transact, feed); native/plugin/source/virusplugin.cpp (probe_virus_ready, wait_virus_ready, reconnect path); src/broker/vticore.c (rx_done, reader loop), src/broker/rxqueue.h; Virus Control.dll 5.1.7 x64 addresses above (user's own, REA snapshot work/rea/virus-control-5.1.7-x64.ghidra1214-20261109.snapshot); work/sysex-noreply (reporters' logs, runs/ with diag, journal and pcapng per run, not in git); issues #48, #51, #37; E145, E464, E529, E582, E590
+- **Method:** log forensics over 3 reporters and our TI2 logs; static code review; REA static analysis of the original; 19 nativehost/hil.sh sessions on our TI2 (only the plug-in's own traffic) with usbmon; simulator (static)
+- **Confidence:** HIGH (1), (2), the stall counts of (3) / MED (the original's details) / LOW-MED (3)'s DSP restart, (4)'s mechanism (not reproduced)
+- **Hardware:** yes (our TI2 Desktop, Linux; the #48 case only from its log)
+
+### E592
+
+The fixes for E591's lost SysEx answers (round 0.8.44, after rc8), done by three agents and reviewed by the orchestrator.
+(A) MemorySync::transact keeps every reply to any try of the same request (also in the 1.5 s pause after a try and after
+the next try went out) and starts a try's timeout only once the request has left the out queue; (B) a request goes out
+only when the plug-in's out queue is empty, both waits together at most 15 s per try, like the original's pacing; bank
+info waits 5 s x 3, a single dump 10 s x 2 (at most 19.5 s / 23 s without a reply); (C) an instance without a Virus
+(DeviceOut::has_virus false: handed over, waiting) neither probes nor syncs; (D) the libusb broker resets an IN
+endpoint's transfers once (cancel, clear halt, one probe) when it stays silent for 2 s after an error with a transfer
+parked, and gives up on the device (reopen) if they still do not come back; (E) the first unanswered probe or bank sync
+of a connection re-sends the three start-up messages that set the reply cables (73 00 3A/3B/3C from the user's
+GlobalInit, unchanged; E039), then probes once more; a miss after that shows "The Virus does not answer / switch it off
+and on" on the plug-in's display and logs it; an answer clears it. Like the original (E591), bounded to once per
+connection. Hardware (our TI2 Desktop, Linux, new plug-in + new broker c5441638): hil.sh ALL PASS (H1-H3, H6; probes
+1.1 s, 3.7 s after the broker kill), nativehost --duplicate 99 --idle-first: handover, played instance ready after
+1.1 s, no false "no reply" (before: 3 of 3); no re-send, warning or transfer reset on the healthy unit. Not run: a Virus
+that really stops answering (the recovery and the warning), the broker reset on macOS (#48's case), Windows.
+
+- **Date:** 2026-11-24
+- **Pointer:** native/src/device/memsync.{h,cpp} (transact, wait_slice, sending, present, missed); native/src/device/answerwatch.h; native/plugin/source/virusplugin.cpp (probe_virus_ready, note_answer, wait_virus_ready, sync_banks, after_reconnect), virusplugin.h (has_virus); src/broker/vticore.c (rx_reset, reader), src/broker/rxqueue.h (vti_rx_stuck); native/tests/test_memsync.cpp, test_answerwatch.cpp, test_rxqueue.cpp, test_access.cpp; commits efcbd2e, df67e27 and the E commit; work/hil/20261124-e591-fixes; E591
+- **Method:** unit tests failing before / passing after (946 tests), TI2 runs with only the plug-in's own traffic
+- **Confidence:** HIGH (A-C on the TI2 and in tests) / MED (D, E: tested in units only for the failure case)
+- **Hardware:** yes (our TI2 Desktop, Linux; the failure cases not reproduced)
+
+### E593
+
+Library files: what TI Revive keeps out and refuses (code review 2026-11-25, items M1, M2, M3, M5 of the round 0.8.44
+review). (1) A single dump whose version byte has no known format stays out of the library: above 12 (the latest,
+formats.md), and 8 or higher in a 267-byte dump (only a Virus C dump, version below 8, gets pages C/D from the upgrade;
+before, a 267-byte dump of version 8 was padded and later sent with its old F7 at byte 266 and stray bytes after it).
+The original lists such dumps (E356, it does not check the version); what they do on the Virus is unknown, so they never
+go on the wire (rule 2). A read-only scan of the user's own libraries found only 267-byte v7 and 524-byte v8/v9/v11/v12
+dumps, so no real patch is affected. (2) A dump ends at its first status byte: one cut off before its F7 no longer
+swallows the next intact dump. (3) save_library refuses ("More than 128 patches") instead of writing positions 0..127
+only and dropping the rest; a .syx library is written back as .syx; sort/swap refuse a library of more than 128
+entries. (4) The write is checked after the stream is closed (a full disk failed only at the flush and the rename then
+replaced the library with an empty file); the .tmp is removed on every failure.
+
+- **Date:** 2026-11-25
+- **Pointer:** native/src/access/library.cpp (load_library_file, save_library); native/src/model/bankdrop.h (LibraryEdit::swap, sort); native/docs/formats.md; native/tests/test_library.cpp, test_bankdrop.cpp; E356, E298
+- **Method:** code review + unit tests (vtitests, Linux); scan of the user's library files (local, read-only)
+- **Confidence:** HIGH (code behaviour, tests) / open (what the original does with a version-13+ or 267-byte v8+ dump on the device)
+- **Hardware:** no
+
+### E594
+
+How the original Virus Control gives up during its start-up bank sync, with the exact counts, and TI Revive's port
+of it (fix item T1, research R1-1, R1-2, R2-2, R10-1, R10-3, R10-5 of 2026-11-26). Original, scheduler 0x18008e220
+(one step per scheduler visit, waits in whole `_time64` seconds): (1) **Bank info**: a visit that asks the same bank
+again counts repo+0x5e8 up (a different bank resets it to 0, 0x18008e466). Above 3 (the 5th, 6th and 7th request)
+it first fires listener event 0x22 (0x18008e40f-0x18008e42b), which re-sets the three reply-cable globals (E591);
+above 5 (the 7th visit) it aborts (0x18008e0d0) and fires event 0x21, and the 7th request still goes out
+(0x18008e464 -> 0x18008e46d -> 0x18008ea30). So: 6 requests with a 5 s wait each, cables re-sent before the 5th and
+6th, a 7th request at the abort without a wait. R1/R2 (6 asks) and R10 (7) count the same code differently. (2)
+**Single dump**: the same slot asked again counts repo+0x5e4 (0x18008e629); at 3 (the 4th visit, 0x18008e635) it
+fires event 0x21 (the communication-error message, E591), counts repo+0x5e8 up and, below 3, stores the
+"!NOTSYNCED" placeholder in the slot (0x18008daa0 + 0x1800a1730) and resets +0x5e4; at 3 it aborts (0x18008e66e ->
+0x18008e0d0, which fills every remaining invalid slot of every bank with the placeholder and switches the bank-info
+phase off). Both branches still send the slot's request once more (0x18008e6a0 -> 0x18008e980), so: 3 requests with a
+10 s wait each, then the slot is given up and a 4th request goes out unwaited (a late reply replaces the placeholder).
+(3) repo+0x5e8 is shared: it is not reset between the bank-info phase and the single phase (0x18008ded0 and
+0x18008e0d0 do not touch it), so repeats left over from the last bank info count toward the 3 given-up slots. TI
+Revive (round 0.8.44): bank info asks 6 times (5 s + 1.5 s each), the plug-in re-sends the user's own 73 00 3A/3B/3C
+start-up messages (AnswerWatch::routing_messages, E039) before the 5th and 6th ask; a single dump is asked 3 times (10 s
++ 1.5 s each). The unwaited 7th / 4th request is not sent (overlapping requests, E145). A slot without an answer, or
+with only replies of the wrong size, a bad checksum or a fingerprint other than the bank info's (3 tries each, the
+E552 "same reply twice" rule kept) is given up: its cache entry is emptied (never a wrong or stale dump), it is listed
+in MemorySync::unconfirmed, one log line "single RAM X n: given up, not cached (k of 3)", and the sync goes on. The 3rd
+given-up slot of a sync (RAM banks and user ROM reads together, the leftover bank-info repeats of (3) not counted) ends
+it with -1; the stale slots of that bank it did not reach are emptied and listed too. The plug-in saves such a bank, so
+the next start asks for those slots again, and shows "RAM banks may be out of date / n patches not read" once per sync;
+a Control Center restore refuses a bank with a given-up slot. No placeholder is written into the cache.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 (sha256 a622f9a2...) 0x18008e220 (0x18008e3f1-0x18008e4a5 bank info, 0x18008e603-0x18008e6d5 single), 0x18008e0d0, 0x18008ded0, 0x1800a1730, 0x180086bf0 (events 0x21/0x22, E591); native/src/device/memsync.{h,cpp} (bank_info, single, sync_bank, read_missing, give_up, unconfirmed, given_up, resend_routing); native/plugin/source/virusplugin.cpp (sync_banks, resend_routing hook); native/src/cc/controlcenter.cpp (restore); native/tests/test_memsync.cpp; work/research-2026-11-26 R1, R2, R10; E591, E592, E552, E145
+- **Method:** static analysis (REA, Ghidra 12.1.4, procedure_assembly of 0x18008e220, 0x18008e0d0, 0x18008ded0); unit tests against a fake Virus (vtitests, Linux)
+- **Confidence:** HIGH (the original's counts: read from the instructions; our code: unit tests) / open (behaviour on a Virus that really stops answering: not run on hardware)
+- **Hardware:** no
+
+### E595
+
+The original Virus Control checks the RAM banks again at every connection, TI Revive did it once per instance; TI
+Revive's port (fix item T3, research R6-1, R6-2, R10-2, R2-3, R2-5 of 2026-11-26). Original (from the research's static
+analysis, not re-read for this entry): the CRemoteDevice tick 0x18007ec30 mounts the library again in its connect
+branch (0x18008d070) and marks the RAM banks for a new bank info (0x18008ded0), so every connection runs the bank check
+(bank infos, then the changed programs); a loss unmounts it (0x18008d560), which ends a running check cleanly. TI Revive
+before: `sync_banks` ran once, at the first `setActive`; a reconnect, a resume or a Virus switched on after the plug-in
+started only got the readiness probe, so the browser kept the RAM names of the last check (or none) for the session.
+MemorySync's `present` was "slot claimed" only, so a Virus lost during the sync made its requests wait out every try
+and the sync ended "failed" for good; and a late answer to an earlier readiness probe, arriving while the next probe
+still waited for the queue, ended that probe before its own request went out (code reasoning, not reproduced). TI
+Revive now (round 0.8.44): every answered readiness probe asks for a bank check (BankCheck); the sync thread starts it
+once the Virus is ready (`starting_` over) and no RAM download or write runs, cache first as at start; the check covers
+the probes before it. A loss or a reconnect marks RAM A..D "not checked" until then. `present` also needs the Virus
+itself (`connected()`): a loss stops the sync like a cancel (-2, no given-up slot, no miss, no further message to the
+gone Virus) and the reconnect's probe runs it again. After a sync ended by a miss, the re-probe that follows the cable
+re-send (E591) resumes it when it answers, once per connection (AnswerWatch). A request accepts only answers that
+arrive after its first try went out; one that still comes after that is taken as before (the Virus answers 30 00 00
+the same way every time, they cannot be told apart).
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 0x18007ec30, 0x18008d070, 0x18008ded0, 0x18008d560 (as read in work/research-2026-11-26 R6, R10); native/src/device/bankcheck.h; native/src/device/memsync.cpp (transact, sync_bank); native/plugin/source/virusplugin.cpp (sync thread loop, start_bank_check, sync_banks, probe_virus_ready, after_reconnect, on_device, present); native/tests/test_bankcheck.cpp, test_memsync.cpp; E322, E591, E594, E144, E148
+- **Method:** static analysis by the research round (REA); code review; unit tests (vtitests, Linux)
+- **Confidence:** HIGH (the original re-checks at every connection: research, code) / HIGH (our code: unit tests of BankCheck and MemorySync; the plug-in's threads not unit tested) / open (on hardware: not run)
+- **Hardware:** no
+
+### E596
+
+One program at a time on the Virus, and one SysEx at a time on the wire; TI Revive's port (fix item T6, research R3-2,
+R11-1, R12-3, R12-6, R12-9, R9-2 of 2026-11-26). Original (from the research's static analysis, not re-read for this
+entry): Access' Control Center refuses to start while the Virus Control plug-in is master and shows a dialog that the
+Virus is in use by the plug-in (Virus Control Center 0x14006f6a0, FUN_140029130, FUN_140005d40, FUN_140027360); the
+driver's raw pipe has one opener, a second open fails with 0xC0000038 (VirusUSB.sys 0xf1009090), so one program writes
+EP 0x06 and asks for dumps; at every (re)open the driver flushes its own RX/TX rings (IOCTLs 0x22008C / 0x2200AC, E036
+log), it sends nothing to the Virus for a half-sent message. The Virus has one request slot and a 256-event send FIFO
+without a room check (R9, E515, E145), and the host CPU parses every cable but 5 with one byte parser (E252), so a note
+inside a running dump would end it (E270). TI Revive before: the Control Center (backup, restore, the RAM bank list)
+shared EP 0x06 with a playing plug-in; the broker passed every client's WRITE message as it came, so a cable-2 byte of
+one client could land inside another client's dump in pieces; `Broker::write` cut writes above 1024 bytes into WRITE
+messages and released its lock between them, so a second thread of the same process (MemorySync next to the plug-in's
+worker) could fall between two pieces. TI Revive now (round 0.8.44): (1) new broker message `VTIMSG_OWNER` /
+`VTIMSG_OWNER_REPLY` (vtiproto.h): the Control Center, `tirevive-cc` and the app ask before each bank of a backup or
+the bank list and before each program of a restore, and refuse with "The Virus is in use by the TI Revive plug-in.
+Close the plug-in (or the DAW) and try again." (also when the broker does not answer: older than 0.8.44); device info
+and Nerd mode still run next to the plug-in. (2) Both brokers (sxhold.h): while one client's SysEx is open on the wire
+(F0 sent, F7 not yet, any cable), other clients' writes wait until it ends, its client goes, it has been quiet for 2 s
+or they waited 2 s; the client's own writes are not held. (3) `Broker::write` holds its lock across all pieces of one
+call. Open (R12-9): a client that dies inside its SysEx leaves the Virus' parser mid-message; no lone F7 or other reset
+is known to be harmless, so the broker sends nothing to close it (it logs "the client left inside a SysEx") and only
+stops holding the others; whether the next F0 restarts the host parser is not known (a known-write test on our own
+Virus could tell). The broker's existing note-offs for a client that played notes still go out at its exit.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control Center 0x14006f6a0, FUN_140029130, FUN_140005d40, FUN_140027360; VirusUSB.sys 0xf1009090 (as read in work/research-2026-11-26 R3, R11, R12); src/broker/vtiproto.h, sxhold.h, vtibroker_posix.c, vtibroker.c (tx_lock, VTIMSG_OWNER, client exit); native/src/device/broker.cpp (write, plugin_owner); native/src/cc/controlcenter.cpp (virus_free, backup_ram, restore_ram); native/tests/test_brokermsg.cpp, test_broker.cpp; E036, E145, E252, E270, E515
+- **Method:** static analysis by the research round (REA); code review; unit tests (brokertests with the POSIX broker and a stub device, vtitests against a fake broker; Linux)
+- **Confidence:** HIGH (the original's exclusivity: research) / HIGH (our code: unit tests; the Windows broker built with mingw, not run) / open (whether an F0 restarts the parser after a cut SysEx; two clients on a real Virus: not run on hardware)
+- **Hardware:** no
+
+### E597
+
+Closed-loop sending, as the original's TX pump; TI Revive's port (fix item T7, research R3-3, R12-2, R12-8 of
+2026-11-26). Original (from the research's static analysis, not re-read for this entry): Virus Control's TX pump
+(0x1800a8ba0, a tick about every 5 ms) reads the raw pipe's TX ring fill (IOCTL 0x2200A8, E035; 3855 polls in the
+E036 trace) and hands the driver only as much as keeps about 64 bytes (2 x wMaxPacketSize) outstanding, up to a
+quarter of the buffer or 512 bytes with large audio buffers; everything else waits in the plug-in's own 128 KB queue,
+short messages (queue A) before long SysEx (queue B) at every tick, so a new event overtakes queued SysEx and a
+request's wait starts when it is nearly on the wire. E270's dump pieces of 64/56/44 bytes fit "window minus fill".
+TI Revive before: open loop. Stamped traffic was paced by bytes per second (sendbudget.h), dumps by DumpPacer, other
+queued SysEx not at all, and all of it went into the broker socket/pipe (Unix socket buffer, Windows pipe 64 KB), which
+the broker drains one blocking write at a time; while the Virus was slow a backlog built there that the plug-in's
+events-first rules could not reorder, and MemorySync's request timeout (E592 (A)) started when the request entered the
+socket. TI Revive now (round 0.8.44): (1) protocol 6 (vtiproto.h): to a client whose HELLO says 6 or newer the broker
+sends `VTIMSG_WRITTEN` after each of its WRITE messages once it is handled (on the wire, refused or dropped), with the
+running count of its data bytes; observers and older clients get none. (2) `Broker` counts what it wrote and what was
+reported (`room`, `written`); the plug-in's worker hands the broker a new write only while fewer than 256 bytes are
+unreported (4 dump pieces, 32 stamped notes; at E231's link rate about 8-15 ms of wire time) and caps a block's events
+at the room left, so the rest stays in its own queues where events go first; the report wakes it. (3) A queued message
+counts in `busy()` until the broker reported its write, so a request goes out when nothing is below it and its timeout
+starts when the broker wrote it. (4) R12-8: during a dump in pieces, a queued note on or off goes between the pieces on
+cable 5 (as the DAW's notes do, E270), before the next piece; every other queued message still waits for the dump's
+end: on cable 2 or 3 it would land in the host CPU's parse of the dump (E252, R9-5), on cable 5 a controller or program
+change would reach the DSPs only (E274), so requests, parameters and state still wait. A broker older than protocol 6
+never reports: the plug-in writes as before. Nothing new on the audio thread.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control 0x1800a8ba0, 0x1800fe600, 0x18007a690; VirusUSB.sys 0x2200A8 handler (as read in work/research-2026-11-26 R3, R12); src/broker/vtiproto.h, vtibroker_posix.c, vtibroker.c (VTIMSG_WRITTEN); native/src/device/broker.{h,cpp} (write end, room, written, on_written); native/plugin/source/virusplugin.{h,cpp} (DeviceOut TX_WINDOW, count_written, the worker's wait and selection); native/src/device/dumppacer.h (between_pieces); native/tests/test_brokermsg.cpp, test_broker.cpp, test_dumppacer.cpp; E035, E036, E231, E252, E270, E274, E592
+- **Method:** static analysis by the research round (REA); code review; unit tests (brokertests with the POSIX broker and a stub device, vtitests against a fake broker, Linux; the timeout test fails with the reports ignored)
+- **Confidence:** MED (the original's window and queue order: research, static plus capture fit) / HIGH (our code: unit tests; the Windows broker built with mingw, not run) / open (note delay and dump timing on a real Virus)
+- **Hardware:** no
+
+### E598
+
+The original's stamp clock is host-driven, not the driver's real-time position; this corrects E364 in part (1)
+(research R5-4 of 2026-11-26). E364 (1) took the "current position" the stamp starts from (vtable +0x60 of the device
+object) for the driver's real-time position. From the research's static analysis (not re-read for this entry): the
+stamp function 0x1800a8420 calls slot +0x60 of input converter 0 of the device's converter array (dev+0x940), and that
+slot (0x180024f30) returns the converter's read position (+0x40048). The input converters are CSampleRateConverter
+objects (built by 0x180024f50, vtable 0x180158208); their read position moves when the host process 0x1800aa7c0 reads
+each host output from them (slot +0x90 = 0x180025910, a fractional position stepped by the converter rate), so with
+the host's frames, not with the USB stream in real time. So the original stamps from a host-driven clock, as TI
+Revive's timeline does. What keeps a late or bursty host from making its stamps late is the converters' fill window:
+the lead is 3584 frames (2X + 256 + 3072 at X = 128, E400, E402) and the window check 0x1800a94c0 resets every input
+converter to the 512-frame target (0x1800251d0, a hard jump, no fade) once any fill leaves [16, 1024], so a stamp is
+still at least about 2560 frames ahead; when a reset moves the stamp clock back the original pings again (E491).
+E364's "a late or bursty block cannot make it late" therefore holds inside that window, with a hard reset beyond it.
+TI Revive: no code change; the StampFloor comment (stamprule.h) said the original "cannot have that" and now says what
+bounds it.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 (sha256 a622f9a2...) 0x1800a8420, 0x180024f30, 0x180024f50 (vtable 0x180158208), 0x1800aa7c0, 0x180025910, 0x1800a94c0, 0x1800251d0, 0x1800aa090 (as read in work/research-2026-11-26 R5, partly from the text dump work/disasm/vc.asm); native/src/device/stamprule.h (StampFloor); E364, E400, E402, E491
+- **Method:** static analysis by the research round (REA/Ghidra on the user's own file); not re-read for this entry
+- **Confidence:** HIGH (the stamp reads input converter 0's read position: research, code path) / MED (that nothing but the host's reads moves it: the converter class read, the clock object at dev+0x948 not followed)
+- **Hardware:** n/a
+
+### E599
+
+USB audio in 4 ms pieces, a gentler fallback read and the ASIO input latency; TI Revive's port (fix item T14, research
+R5-1, R5-3, R5-5, R5-6 of 2026-11-26). Original (E402, research R5): Virus Control gets the Virus' audio in X = 128-frame
+blocks and reads 512 (2X + 256) behind the newest frame, so the newest frame's sawtooth is about +-64. TI Revive before:
+both brokers handed the IN stream over in 10-packet transfers (441/480 frames) with the same 512-frame margin, so the
+sawtooth alone was +-220..240 (fits E465's thin "read margin min" and E564's err range; not measured as the cause). The
+code comment that kept 10 packets said "4 ms was too short, E077", but in E077 both fix6 (4 ms) and fix7 (10 ms) failed
+on the packet-offset bug that fix8 fixed; 4-packet reads streamed cleanly in E076 (vtiisotest). TI Revive now (round
+0.8.44): (1) vtiaudioshm.h VTI_AUDIO_NP = 4 packets per read and delivery (176/177 frames at 44.1 kHz, 192 at 48),
+VTI_AUDIO_NR = 20 reads in flight (80 ms as before), in both brokers. 4 rather than 2: the size with earlier evidence on
+WinUSB (E076, E077 after fix8), 250 completions a second instead of 500, and 2 would gain only about 44 frames more. The
+Linux OUT transfers are 160 / NP = 40 (160 ms as before): with 16 a held thread's return mirrored only 16 of its 20 IN
+transfers (vlatests); the Windows OUT slots are 128 instead of 64: in a stub test of vtiusbaudio.c under Wine (fake
+1 ms frame clock, the thread held 250 ms) the return's burst of 76 mirrored packets filled 64 slots and send_out then
+waited for a slot at every packet from then on (about 1480 waits in the 1.5 s after it; NP 10: 5; NP 4 with 128 slots: 0).
+The stall detection on Linux (stallfill.h) scales its limit with the transfer: 12 ms instead of 30. Consumers checked
+in code for the piece size: AudioIn read()/read_at(), the ASIO driver's clock (any piece size), the sidechain (fill
+averaged), OfflinePacer (learns the step). (2) R5-3: AudioIn::read() (before the sync marker and stretches without one)
+skipped or repeated a frame hard per drift step and re-anchored hard; each move now crossfades from the old position
+(Crossfade, as the aligned path since E579/E589), one step per crossfade at most, hard only when the old frames left the
+ring. With 4 ms pieces its +-128 band also holds the sawtooth at equal clocks (no steps; with 441-frame pieces it stepped
+back and forth all the time, unit test). (3) R5-5: the ASIO driver reported input latency = buffer size; now buffer +
+(NP / 2 + 1) ms of frames (a packet's transfer plus half a piece on average): 388 at 256 / 44.1 kHz (the original
+reports 392, E082). Inferred, not measured. (4) R5-6 checked and not ported: the Windows broker sends no OUT packets for
+a stall's gap, Linux does. In the same stub test the OUT stream had run dry during the stall either way (234 empty
+frames), the reads completed meanwhile were mirrored on return, and OUT packets for the gap only filled the free slots:
++60 ms OUT latency for good and, with the slots full, a wait at every later packet. Linux by code reading: its gap OUT
+fills the free transfers, so after a stall longer than the 80 ms queued its OUT latency stays up to about 160 ms until the
+stream restarts (before this change too; not run, open).
+
+- **Date:** 2026-11-26
+- **Pointer:** src/broker/vtiaudioshm.h (VTI_AUDIO_NP, VTI_AUDIO_NR), vtiusbaudio.c (NP, NR, NW, fill_silence), vtiusbaudio_libusb.c (NP, NR, NW), stallfill.h; native/src/device/audioin.{h,cpp} (read), asioclock.h (asio_in_latency), native/asio/asiodriver.cpp (getLatencies); native/tests/test_vla.cpp, test_audioin.cpp, test_stallfill.cpp, test_asioclock.cpp; work/research-2026-11-26 R5; E076, E077, E082, E402, E465, E564, E579, E589
+- **Method:** code review; unit tests (vtitests, vlatests, Linux); a stub test of the Windows stream under Wine (scratch, not in the repo); the Linux and Windows brokers built (make, mingw)
+- **Confidence:** HIGH (E077's cause, our code: unit tests) / MED (Windows stream: stub test only) / open (that the sawtooth drives E465/E564; the new piece size, latency and CPU on a real Virus)
+- **Hardware:** no
+
+### E600
+
+How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 and R8-8
+of 2026-11-26). Original, static analysis of Virus Control.dll 5.1.7 x64 (REA/Ghidra): (1) the container parser
+0x180060080 clears the queue, reads the total and each record length big-endian, or little-endian when the big-endian
+value has one of its top 10 bits set; a total longer than the data loads nothing; a record longer than the rest of the
+total stops the parse (the records before it are already queued). (2) setChunk 0x180079b50: a 0xFF record goes to the
+automation slot map (0x1800add00) and is removed; every 524-byte record that starts F0 00 20 33 01 xx 10 gets byte 10 =
+0x20 ("eLIB", E369) and then the format upgrade 0x1800a0c00, which recomputes the checksums; an 11-byte record with
+F0 at 0, 0x6F at 6 and 0x7E at 8 (page D 126, Input/Atomizer, E276) is removed; everything else, the stored multi
+included, goes into the start-up queue unchanged; F0 7D records are not filtered. (3) research R8, not re-checked here:
+getChunk writes as many single dumps and controller lists as the device type has parts (type table 0x1801c52f0: 16 TI,
+4 Snow), and at connect 0x180070520 writes the model's per-part Detune (multi byte 137+p) and Output Select (185+p,
+"Control2", or "Control3" when the USB IO configuration is not 0) into the fixed start-up multi before sending it.
+TI Revive before: big-endian only and a truncated container accepted; single dumps kept their saved origin bytes; 6F/7E
+records sent; the Snow class saved and sent 16 parts and 224 controllers; the stored multi was neither shown nor sent,
+so an original project's per-part routing and detune were lost; a state that did not parse left the default to be
+saved over it. TI Revive now (round 0.8.44): parse_container with the same length rules; setState drops 6F/7E records,
+keeps a Snow's records to parts 1-4 (also getState and the default state: 4 dumps, 56 controllers), marks every single
+dump eLIB with fresh checksums, logs a 0xFF record (kept in the project, never sent; automation follows automation.xml);
+the editor shows the stored multi's Detune and Output Select (later page-0x72 records win), and send_state sends the
+fixed start-up multi with them (startup_multi) in the stored multi's place when it differs from the fixed table, so a
+default project sends exactly what it did before; a state that does not parse is saved back unchanged until the
+instance's records change. Form chosen for the multi: the original's patched start-up table, not page-0x72 records and
+never parameters 0-3 (E209). It goes out a second time after the start-up messages because ours queues those before the
+host's setState (inferred from the code order, not traced on the wire).
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 0x180060080, 0x180079b50, 0x1800a0c00, 0x180070520, 0x1801c52f0; native/src/model/state.{h,cpp} (parse_container, mark_project_dumps, drop_input_atomizer, keep_parts, startup_multi, multi_routing_values, UnreadState); native/plugin/source/virusplugin.cpp (setState, getState, send_state, apply_state_to_params, default state); native/tests/test_state.cpp; native/docs/formats.md, architecture.md; work/research-2026-11-26 R8; E209, E221, E276, E361, E369
+- **Method:** static analysis (REA/Ghidra 12.1.4 on the user's own file: 0x180060080 and 0x180079b50 re-read for this entry); unit tests (vtitests, Linux)
+- **Confidence:** HIGH (the parse, eLIB and 6F/7E rules: decompiled code) / MED (the Snow's 4 parts and the connect-time multi patch: research R8, not re-read) / open (the effect on a Virus: no routed original project and no Snow tested)
+- **Hardware:** no
+
+### E601
+
+The link global 0x52 in the re-send after missed answers (fix item T16, research R9-1 of 2026-11-26). (1) The
+user's GlobalInit (remotedevice.xml of their Access files, read by the unit test with VTITESTS_VERBOSE) holds
+USB MidiPort active = 1 (global idx 82 = 0x52, E014's list) after the three cable globals: 7A 03, 78, 60, 3B 01,
+3C 02, 3A 03, ... 5E, 5F, 52 01, 41, ... So TI Revive's start-up list (RemoteDevice::init_messages) already sends
+the SysEx `F0 00 20 33 01 10 73 00 52 01 F7` at every start, after the cables, the same message and the same place as
+the original's start-up (E039 capture; E524 (2), whose "from GlobalInit" inference this confirms for the list, not on
+the wire). (2) The firmware reason to send it again: with 0x52 = 0 the host CPU drops the link bit on every main-loop
+pass and forces 3A/3B/3C back to 1, so answers go to the 5-pin MIDI OUT (R9-1, static, HIGH; who would clear 0x52 in a
+session: not found). (3) The original's own miss handler (listener 0x180086bf0, event 0x22, E591, E594) re-sets only
+the three cable globals (research R1, R2, R10); sending 0x52 there too is ours, beyond the original. TI Revive now
+(round 0.8.44): AnswerWatch::routing_messages also takes the start-up's `73 00 52 01`, only that exact message from
+the user's list (never a link off, never built), the link first and then the cables in start-up order, so both re-sends (the first missed probe of a
+connection, E591; before the 5th and 6th bank-info ask, E594) send 4 messages instead of 3. Rule 2: the same known
+write the start-up already makes with the same value, bounded like before; whether 0x52 survives a power cycle was not
+read (store handler not read, R9), but no value goes out that the start-up does not send. Order: the start-up puts
+the cables before 0x52; the re-send puts 0x52 first, because with 0x52 = 0 the firmware forces the cables back to 1 on
+every pass, so cables sent before the link could be undone before it is on again (inferred from (2), not run). The raw handshake form `4E 73 52 01` of the broker (E524 (1)) is a different message and is not touched.
+
+- **Date:** 2026-11-26
+- **Pointer:** native/src/device/answerwatch.h (routing_messages); native/plugin/source/virusplugin.cpp (resend_routing, the probe miss); native/tests/test_answerwatch.cpp, native/tests/test_access.cpp; work/research-2026-11-26 R9 (R9-1), R1, R2, R10; E014, E039, E524, E591, E594
+- **Method:** the user's own GlobalInit read through the unit test (vtitests, Linux); research R9 (static, firmware listings); code
+- **Confidence:** HIGH (1) the start-up list / HIGH (2) firmware, static (research R9) / open: what clears 0x52 in a session, whether 0x52 is persistent, the order effect of (2) on a real Virus
+- **Hardware:** no
+
+### E602
+
+When the original sends Active Sensing (FE), and why TI Revive keeps sending it always (fix item T20, research R4-5
+and R6-6 of 2026-11-26; corrects E237's premise, qualifies E025). Original, static analysis of Virus Control.dll 5.1.7
+x64 (research R4, R6; every FE constant in the file grepped, two senders found): (1) a timer 0x1800a7770 sends FE,
+at most every 300 ms, only while the host has processed no audio block for more than 40 ms; 0x1800aa7c0 (the device
+audio) clears that timer mode when blocks come again; (2) the process path 0x180030ce0 sends FE while the host is
+offline or suspended, at most once per block and per 300 ms, and only in the branch where its F8 clock is off (flags
++0x429/+0x399, meaning not resolved). During real-time processing the original sends F8 and, as far as the code shows,
+no FE. So E025's FE every 0.31 s was captured with an idle host, and E237's "the original sends FE every 0.31 s, so
+the watchdog never fires with it" holds only for an idle host. Not seen, only inferred from E237: with the original, an
+FE from an idle phase arms the DSP watchdog, and it would fire once about 1.1 s after processing starts unless F8
+also feeds it (open). TI Revive (keepalive.h, since round 0.8.26, kept in T9) sends FE every 300 ms on the stamped
+timeline, clock on or off, after the first anchor: a superset of the original's FE while anchored, one 1-byte message
+per 300 ms (rule 2: far below every rate bound), and it keeps the watchdog fed while notes play. Changed in round
+0.8.44: the comments (keepalive.h, virusplugin.cpp, test_keepalive.cpp), native/docs/architecture.md and protocol.md,
+findings/spec.md, the README and the site text no longer say the original sends FE every 300 ms in general. No code
+change for FE.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 0x1800a7770, 0x180030ce0, 0x1800aa7c0 (research R4-5, R6-6); native/src/device/keepalive.h; native/plugin/source/virusplugin.cpp (fe_); work/research-2026-11-26 R4, R6; E025, E237
+- **Method:** static analysis (research R4 and R6, REA/Ghidra on the user's own file; not re-read for this entry); code reading
+- **Confidence:** MED (the two senders and their conditions, research R4: all FE constants grepped) / LOW (that the original sends no FE while its clock runs: flag meaning not resolved) / open (whether F8 feeds the DSP watchdog)
+- **Hardware:** no
+
+### E603
+
+Virus off and on while REAPER plays (LC4 by hand, the user's reconnect test; TI2 Desktop, Linux, local round-0.8.44 build with the clean sync, 2f74e96; broker protocol 6; REAPER at 48 kHz, block 256). Start: Virus ready after 1.0 s, start-up bank check fine (4 of 4 cached, 3.6 s). The user switched the Virus off 0.9 s later: kernel 'usb 1-8: USB disconnect' (19:51:17.86 local); the broker got LIBUSB_ERROR_NO_DEVICE on ep 85/86 and on its next writes (MIDI clock F8 on ep 06), closed the device and polled every 2 s. Switched on: back as device 18 at 19:51:33 (17 skipped: one failed enumeration try while the Virus booted), broker 'device open' at 19:51:34, flash info and audio at 19:51:37; the plug-in re-sent the state (249 messages), 'Virus ready after 4.0 s' and the bank check again (3.6 s, nothing fetched), then played on. The plug-in's audio drop counter rose from 5 (before the first connect, not audible) to 22 only across the gap; it stayed at 22 through the later Plays (the drop the user heard was the switch-off itself). The Plays after it show the known Play burst (#37: 'timeline back by ~12500 frames', safety net moving stamps, one Virus sync report per Play), not new in this build.
+
+- **Date:** 2026-11-26
+- **Pointer:** ~/.local/share/virus-ti-native/diag.log (lines from 1795719065), journalctl --user -u tirevive-broker and journalctl -k for 19:51:00-19:51:40 (local, not in the repo)
+- **Method:** log reading (plug-in diag log, broker journal, kernel log)
+- **Confidence:** HIGH (sequence, times; cause told by the user)
+- **Hardware:** yes (TI2 Desktop, Linux)
+
+### E604
+
+No stall: the silent hil-mac items of round 0.8.44 were the clean sync (E161 update) re-reading a bank that had changed elsewhere. In checklist item L5 (Linux) a sort of RAM D changed 80 of its slots (46-127 differ in the cache before and after); the Mac's cache still had the old RAM D. Every hil-mac item (20-60 s) started with that re-read, so the plug-in dropped all notes (H1, H2-1, H2-2, H3 silent) and was closed mid-read; it keeps what was read and the next start goes on (sync_banks, n == -2), so H6's second start read the last 4 slots in 7.8 s and the user's rerun passed (check 3.6 s, nothing to read). Reproduced on Linux (TI2 Desktop) with the pre-L5 RAM D put back in the cache: 46 slots in a 52 s run (about 1 s per slot, the normal pace), the rest in the next run, and the cache then byte-identical to the post-L5 copy; again with a local build: 12 in a 25 s run, 68 in the next (74.8 s), identical. The out queue was empty throughout (stats 'queued 0'). The log line said 'RAM D sync: -2 fetched' for a stopped read, which hid the count and looked like a stall; it now says 'stopped after N fetched (kept, the next start goes on)'. Consequence of the clean sync (maintainer decision): after banks changed on another computer or the front panel, the start can be silent for about 1 s per changed slot (up to ~2 min for a bank).
+
+- **Date:** 2026-11-26
+- **Pointer:** Mac ~/Downloads/TI-Revive-0.8.44-test-c561c9b/hil-mac/hil/results-20261126-210839 and -211945; work/hil/2026-11-26-ramd-repro (git-ignored); native/plugin/source/virusplugin.cpp sync_banks
+- **Method:** hardware runs (nativehost, C4 every second) and comparison of the cache files
+- **Confidence:** HIGH
+- **Hardware:** yes (TI2 Desktop, macOS 27.2.1 and Linux)

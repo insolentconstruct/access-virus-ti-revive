@@ -129,8 +129,16 @@ static void helper_start(void)
     posix_spawn_file_actions_adddup2(&fa, p[0], 0);
     posix_spawn_file_actions_addclose(&fa, p[0]);
     posix_spawn_file_actions_addclose(&fa, p[1]);
+    // only its standard input, output and error reach the helper: not the clients' sockets, the listener, USB or the
+    // trace file (a client's socket kept open in the helper would not see the broker close it)
+    posix_spawn_file_actions_addinherit_np(&fa, 1);
+    posix_spawn_file_actions_addinherit_np(&fa, 2);
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_CLOEXEC_DEFAULT);
     pid_t pid = -1;
-    const int err = posix_spawn(&pid, argv[0], &fa, NULL, (char *const *)argv, environ);
+    const int err = posix_spawn(&pid, argv[0], &fa, &at, (char *const *)argv, environ);
+    posix_spawnattr_destroy(&at);
     posix_spawn_file_actions_destroy(&fa);
     close(p[0]);
     if (err) {

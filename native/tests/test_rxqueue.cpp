@@ -141,3 +141,35 @@ TEST(rxqueue_after_a_stall_one_probe_then_the_rest_after_data)
     CHECK(vti_rx_unpark_after(0));   // data came: the endpoint works again
     CHECK(!vti_rx_unpark_after(-9)); // an error: keep them parked
 }
+
+TEST(rxqueue_an_endpoint_silent_after_an_error_is_reset_once)
+{
+    // E591 (4), #48 (Mac): one LIBUSB_ERROR_IO on EP 0x86, its transfer parked behind the 7 still out (S143's one
+    // probe), and those 7 never came back: nothing unparked, MIDI IN stayed dead until the Virus re-enumerated. The
+    // transfers have no timeout, so only data or an error is a record. Silence for the bound after an error with a
+    // parked transfer resets the endpoint's transfers, once per error.
+    CHECK(vti_rx_stuck(1, 0x01u, 0, VTI_RX_STUCK_MS));         // an error, parked, silent for the bound: reset
+    CHECK(vti_rx_stuck(1, 0x80u, 0, VTI_RX_STUCK_MS + 5000));
+    CHECK(!vti_rx_stuck(1, 0x01u, 0, VTI_RX_STUCK_MS - 1));    // not before the bound
+    CHECK(!vti_rx_stuck(0, 0x01u, 0, VTI_RX_STUCK_MS + 5000)); // a quiet endpoint without an error: nothing to do
+    CHECK(!vti_rx_stuck(1, 0x00u, 0, VTI_RX_STUCK_MS + 5000)); // the failed one went out as the probe: rules work
+    CHECK(!vti_rx_stuck(1, 0x01u, 1, VTI_RX_STUCK_MS + 5000)); // the close cancels everything anyway
+    CHECK(VTI_RX_STUCK_MS >= 1000 && VTI_RX_STUCK_MS <= 2000);
+
+    // once per error: the reader disarms at the reset (or at data), so an idle endpoint whose 8 transfers are parked
+    // after the reset is not reset every 2 s; only a new error arms it again
+    CHECK(!vti_rx_stuck(0, 0xffu, 0, 10 * VTI_RX_STUCK_MS));
+}
+
+// R3-6: each read asks exactly the endpoint's wMaxPacketSize, like the original (VirusUSB.sys 0xf10092e0): a full
+// packet then ends the read at once; with 64 bytes asked a full 16- or 32-byte packet left its events waiting for the
+// next packet. Unknown or larger than the record: the record size.
+TEST(rx_read_length_is_the_endpoints_packet_size)
+{
+    CHECK_EQ(vti_rx_len(16), 16); // EP 0x85 (TI, TI2, E388)
+    CHECK_EQ(vti_rx_len(32), 32); // EP 0x86
+    CHECK_EQ(vti_rx_len(64), 64);
+    CHECK_EQ(vti_rx_len(0), VTI_RX_MAX);   // not found in the descriptor
+    CHECK_EQ(vti_rx_len(512), VTI_RX_MAX); // more than a record holds
+    CHECK_EQ(vti_rx_len(-1), VTI_RX_MAX);
+}

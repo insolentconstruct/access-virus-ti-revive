@@ -1,9 +1,12 @@
 // keepalive.h - Active Sensing (FE) on the plug-in's stamped timeline.
 //
 // Why: the Virus' DSP arms a watchdog with the first FE it receives and, about one second after the last one,
-// releases every voice and clears its controller state (firmware, E237). The original Virus Control sends FE every
-// 0.31 s (E025). Sending it once (as the plug-in did at each anchor) is the worst of both worlds: a one-shot note cut
-// a second later. So FE goes out every 300 ms on the timeline, and never in a burst after a timeline jump.
+// releases every voice and clears its controller state (firmware, E237). Sending it once (as the plug-in did at each
+// anchor) is the worst of both worlds: a one-shot note cut a second later. So FE goes out every 300 ms on the
+// timeline, clock on or off, and never in a burst after a timeline jump. The original sends FE at most every 300 ms
+// too, but only while the host processes no audio (no block for 40 ms) or is offline/suspended, and apparently only
+// while its F8 clock is off (E602; E025's 0.31 s was an idle host). Ours always: one FE in 300 ms costs nothing and
+// keeps the watchdog fed while notes play.
 #pragma once
 #include <cstdint>
 

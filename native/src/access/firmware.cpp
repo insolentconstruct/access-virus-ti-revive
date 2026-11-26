@@ -83,7 +83,7 @@ std::vector<std::vector<std::vector<uint8_t>>> load_rom_banks(const std::string 
             sectors[c.tag] = std::move(s);
     }
     for (int b = 0; b < 26; b++) {
-        char t0[8], t1[8];
+        char t0[16], t1[16]; // room for any int: -Wformat-truncation
         snprintf(t0, sizeof t0, "P%03d", 64 + 2 * b);
         snprintf(t1, sizeof t1, "P%03d", 65 + 2 * b);
         if (!sectors.count(t0) || !sectors.count(t1))

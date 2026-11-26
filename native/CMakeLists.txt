@@ -1,6 +1,6 @@
 # virus-ti-native - native rewrite of the Access Virus TI plug-in (docs/plan.md)
 cmake_minimum_required(VERSION 3.25)
-project(virus-ti-native VERSION 0.8.43 LANGUAGES C CXX) # = the TI Revive release it ships with
+project(virus-ti-native VERSION 0.8.44 LANGUAGES C CXX) # = the TI Revive release it ships with
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Windows: static C/C++ runtime, so the plug-in and the ASIO driver run without the VC++ redistributable
@@ -184,18 +184,18 @@ enable_testing()
 add_executable(vtitests tests/main.cpp tests/test_usbmidi.cpp tests/test_state.cpp tests/test_model.cpp
                tests/test_access.cpp tests/test_automation.cpp tests/test_upgrade.cpp tests/test_resampler.cpp tests/test_sidechain.cpp tests/test_helptext.cpp tests/test_devicestatus.cpp $<$<PLATFORM_ID:Linux>:tests/test_resetguard.cpp> tests/test_giveback.cpp tests/test_stallfill.cpp tests/test_ccrestore.cpp
                tests/test_library.cpp tests/test_decode.cpp tests/test_ccskin.cpp tests/test_memsync.cpp
-               tests/test_cc.cpp tests/test_arpactions.cpp tests/test_broker.cpp tests/test_audioin.cpp tests/test_panelfollow.cpp tests/test_editor.cpp
+               tests/test_cc.cpp tests/test_arpactions.cpp tests/test_broker.cpp tests/test_audioin.cpp tests/test_asioclock.cpp tests/test_panelfollow.cpp tests/test_editor.cpp
                tests/test_accessfiles.cpp tests/test_firmware.cpp tests/test_diag.cpp tests/test_virusrate.cpp
                tests/test_protocol.cpp tests/test_upscale.cpp tests/test_ctrlguard.cpp tests/test_pktstat.cpp tests/test_owner.cpp tests/test_sysinfo.cpp tests/test_flashinfo.cpp tests/test_remotetemplates.cpp tests/test_popupmenu.cpp tests/test_workarea.cpp
                tests/test_offlinepace.cpp tests/test_syncalert.cpp tests/test_patchhistory.cpp tests/test_stallwatch.cpp tests/test_noteprobe.cpp tests/test_liverule.cpp tests/test_directmon.cpp tests/test_setuptips.cpp
                tests/test_presencewatch.cpp tests/test_keepalive.cpp tests/test_sendbudget.cpp tests/test_writeretry.cpp
                tests/test_stamprule.cpp tests/test_hostclock.cpp tests/test_midiin.cpp tests/test_sendguard.cpp tests/test_cablerule.cpp tests/test_dumppacer.cpp tests/test_startprogress.cpp tests/test_userrom.cpp tests/test_transport.cpp
-               tests/test_gapfill.cpp tests/test_audiogate.cpp tests/test_dragsend.cpp tests/test_hostmidi.cpp tests/test_textfield.cpp
+               tests/test_gapfill.cpp tests/test_crossfade.cpp tests/test_audiogate.cpp tests/test_dragsend.cpp tests/test_hostmidi.cpp tests/test_textfield.cpp
                tests/test_bankdrop.cpp tests/test_hostgestures.cpp tests/test_editgestures.cpp tests/test_ratesw.cpp tests/test_timelinefollow.cpp
                tests/test_blockevents.cpp tests/test_outputdelay.cpp tests/test_lcdhover.cpp
                tests/test_heldnotes.cpp tests/test_factoryorder.cpp tests/test_ratemeter.cpp tests/test_sectionlock.cpp tests/test_resync.cpp tests/test_slipwatch.cpp tests/test_freezewatch.cpp
                tests/test_editormenus.cpp tests/test_infopage.cpp tests/test_rambackup.cpp tests/test_undohistory.cpp
-               tests/test_comparestate.cpp tests/test_randomizer.cpp tests/test_trafficring.cpp tests/test_capture.cpp tests/test_keyport.cpp tests/test_closeseq.cpp tests/test_utf8.cpp tests/test_winusb_errors.cpp tests/test_markerscan.cpp tests/test_rxqueue.cpp tests/test_linkrule.cpp tests/test_optionslayout.cpp tests/test_owneruid.cpp tests/test_macgiveback.cpp tests/test_seqevent.cpp tests/test_updatecheck.cpp tests/test_midiports.cpp tests/test_nerdview.cpp tests/test_keyporthelper.cpp tests/test_latencywatch.cpp tests/test_idlepace.cpp tests/test_devslot.cpp tests/test_slotpick.cpp $<$<NOT:$<PLATFORM_ID:Windows>>:tests/test_sendtimeout.cpp>)
+               tests/test_comparestate.cpp tests/test_randomizer.cpp tests/test_trafficring.cpp tests/test_capture.cpp tests/test_keyport.cpp tests/test_closeseq.cpp tests/test_answerwatch.cpp tests/test_bankcheck.cpp tests/test_utf8.cpp tests/test_winusb_errors.cpp tests/test_markerscan.cpp tests/test_rxqueue.cpp tests/test_linkrule.cpp tests/test_optionslayout.cpp tests/test_owneruid.cpp tests/test_macgiveback.cpp tests/test_seqevent.cpp tests/test_updatecheck.cpp tests/test_midiports.cpp tests/test_nerdview.cpp tests/test_keyporthelper.cpp tests/test_latencywatch.cpp tests/test_idlepace.cpp tests/test_devslot.cpp tests/test_slotpick.cpp tests/test_awayqueue.cpp tests/test_ramqueue.cpp tests/test_statehold.cpp tests/test_idleedits.cpp $<$<NOT:$<PLATFORM_ID:Windows>>:tests/test_sendtimeout.cpp>)
 target_link_libraries(vtitests PRIVATE vticore)
 add_test(NAME vtitests COMMAND vtitests)
 # the libusb audio stream (src/broker/vtiusbaudio_libusb.c) against stub libusb functions: its own binary, built with
@@ -209,6 +209,14 @@ if(NOT WIN32)
         target_link_libraries(vlatests PRIVATE Threads::Threads)
         add_dependencies(vtitests vlatests)
         add_test(NAME vlatests COMMAND vlatests)
+        # the Linux broker's client message handling (tests/brokerharness.c: the broker with a stub device)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_executable(brokertests tests/main.cpp tests/test_brokermsg.cpp tests/brokerharness.c ../src/broker/vticore_midi.c)
+            target_include_directories(brokertests PRIVATE ${VTI_LIBUSB_INC} ../src/broker)
+            target_link_libraries(brokertests PRIVATE Threads::Threads)
+            add_dependencies(vtitests brokertests)
+            add_test(NAME brokertests COMMAND brokertests)
+        endif()
     endif()
 endif()
 

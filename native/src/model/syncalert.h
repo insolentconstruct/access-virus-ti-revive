@@ -36,7 +36,7 @@ public:
     void live_mode(bool on) { live_ = on; }
 
     int page() const { return page_; }
-    int level() const { return level_; }
+    int level() const { return level_; } // test hook: the tests follow the level
     int total() const { return total_; }
     int since_play() const { return since_play_; }
     bool take_change() // the page changed since the last call (the editor shows the new one)

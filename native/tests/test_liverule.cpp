@@ -200,6 +200,16 @@ TEST(live_guard_no_window_no_wait)
     CHECK(g.note_on(0, 60, true, 1000, 0));
 }
 
+// a new timeline (re-anchor, new stream) starts below an off of the old one: that off is no pending one
+TEST(live_guard_off_of_an_earlier_timeline_does_not_wait)
+{
+    LiveNoteGuard g;
+    CHECK(!g.note_off(0, 60, false, 900000));
+    CHECK(g.note_on(0, 60, true, 1000, 4096));
+    CHECK(!g.note_off(0, 61, false, 900000));
+    CHECK(g.note_on(0, 61, true, -1, 4096)); // no valid timeline (-1)
+}
+
 // The right to go at once belongs to one played note-on and is used up by its note-off: a further flagged note-off of
 // that key (here after the clip's own note-off) has no played note-on of its own and goes with the lead
 TEST(live_guard_note_off_uses_up_the_live_note_on)

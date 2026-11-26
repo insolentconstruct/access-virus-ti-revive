@@ -22,6 +22,7 @@ Dump single(int n)
     char name[11];
     snprintf(name, sizeof name, "Test %-5d", n);
     memcpy(m.data() + 249, name, 10);
+    m[9] = 12; // format version 12, what the Virus reads back
     m[523] = 0xF7;
     return m;
 }
@@ -144,6 +145,29 @@ TEST(library_edge_cases)
     out.path = (dir / "x.mid").string();
     PatchLibrary back;
     CHECK(save_library(out, err) && load_library_file(out.path, back) && back.dumps.size() == 1);
+    fs::remove_all(dir);
+}
+
+// #41: a library change stays in memory only when its file was written - a failed save (folder not writable) left the
+// patch in the browser until the project was reopened, with no message
+TEST(library_commit_keeps_memory_and_file_alike)
+{
+    fs::path dir = fs::temp_directory_path() / "vti_libcommit_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::vector<Dump> cur = {single(1)}, after = {single(1), single(2)};
+    std::string err;
+    PatchLibrary lib;
+    lib.name = "Mine";
+    lib.path = (dir / "no-such-folder" / "Mine.mid").string();
+    CHECK(!commit_library(lib, cur, after, err) && !err.empty());
+    CHECK(cur.size() == 1 && same_patch(cur[0], single(1))); // unchanged: the browser shows what the file holds
+    lib.path = (dir / "Mine.mid").string();
+    err.clear();
+    CHECK(commit_library(lib, cur, after, err) && err.empty());
+    CHECK(cur.size() == 2 && same_patch(cur[1], single(2)));
+    PatchLibrary back;
+    CHECK(load_library_file(lib.path, back) && back.dumps.size() == 2 && same_patch(back.dumps[1], single(2)));
     fs::remove_all(dir);
 }
 
@@ -418,5 +442,130 @@ TEST(library_skips_a_dump_with_a_status_byte_inside)
     CHECK(std::count_if(lib.dumps.begin(), lib.dumps.end(), [](const Dump &d) { return !d.empty(); }) == 1);
     CHECK(lib.skipped == 2);
     CHECK(lib.skip_why.count("a byte above 0x7F") == 1);
+    fs::remove_all(dir);
+}
+
+namespace {
+void write_file(const fs::path &p, const Dump &d)
+{
+    std::ofstream o(p, std::ios::binary);
+    o.write((const char *)d.data(), (std::streamsize)d.size());
+}
+Dump read_file(const fs::path &p)
+{
+    std::ifstream f(p, std::ios::binary);
+    return Dump((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+} // namespace
+
+// review 2026-11-25 M1: a library of more than 128 patches (a .syx of several banks) lost every patch after the 128th
+// on any edit, and a .syx library was rewritten as a MIDI file under its .syx name
+TEST(library_save_keeps_large_and_syx_libraries)
+{
+    fs::path dir = fs::temp_directory_path() / "vtitests-library-large";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::vector<Dump> big;
+    for (int i = 0; i < 130; i++)
+        big.push_back(single(i));
+    std::string err;
+    CHECK(cc::write_syx(big, (dir / "Big.syx").string(), err));
+    const Dump before = read_file(dir / "Big.syx");
+    PatchLibrary lib;
+    CHECK(load_library_file((dir / "Big.syx").string(), lib) && lib.dumps.size() == 130);
+    CHECK(!save_library(lib, err) && !err.empty()); // refused: positions past 128 cannot be written
+    CHECK(read_file(dir / "Big.syx") == before);
+    CHECK(!fs::exists(dir / "Big.syx.tmp"));
+
+    PatchLibrary small;
+    small.path = (dir / "Small.syx").string();
+    small.dumps = {single(1), {}, single(3)};
+    err.clear();
+    CHECK(save_library(small, err) && err.empty());
+    const Dump raw = read_file(small.path);
+    CHECK(raw.size() == 2 * 524 && raw[0] == 0xF0); // still a .syx: the dumps, no MIDI file
+    PatchLibrary back;
+    CHECK(load_library_file(small.path, back) && back.dumps.size() == 3 && back.dumps[1].empty());
+    CHECK(back.dumps[2].size() == 524 && back.dumps[2][8] == 2 && same_patch(back.dumps[2], single(3)));
+    fs::remove_all(dir);
+}
+
+// review 2026-11-25 M2 (rule 2): a 267-byte dump of version 8 or later got no page B (the upgrade fills it only below
+// 8) and went out with zeros and a stray F7 inside; 524-byte dumps of versions the Virus does not use (13..127) were
+// listed. Both stay out now, like the unknown version 127 (E356)
+TEST(library_skips_dumps_of_unknown_versions)
+{
+    fs::path dir = fs::temp_directory_path() / "vtitests-library-versions";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto dump = [](size_t size, uint8_t version) {
+        Dump d(size, 0);
+        const uint8_t head[] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x10, 0x01, 0x03, version};
+        memcpy(d.data(), head, sizeof head);
+        d.back() = 0xF7;
+        return d;
+    };
+    Dump file;
+    for (const Dump &d : {dump(267, 7), dump(267, 8), dump(524, 12), dump(524, 13), dump(524, 127)})
+        file.insert(file.end(), d.begin(), d.end());
+    write_file(dir / "Versions.syx", file);
+    PatchLibrary lib;
+    CHECK(load_library_file((dir / "Versions.syx").string(), lib, std::vector<uint8_t>(256, 0)));
+    CHECK(lib.dumps.size() == 2); // the version 7 Virus C dump (upgraded) and the version 12 one
+    CHECK_EQ(lib.skipped, 3);
+    CHECK(skip_summary(lib) == std::string("1 x version 127, 1 x version 13, 1 x version 8"));
+    for (auto &d : lib.dumps)
+        CHECK(d.size() == 524 && std::count(d.begin(), d.end(), 0xF7) == 1);
+    fs::remove_all(dir);
+}
+
+// review 2026-11-25 M5: a dump cut off before its F7 ran on to the next dump's F7, so the intact dump after it was
+// lost with it
+TEST(library_cut_dump_keeps_the_next_one)
+{
+    fs::path dir = fs::temp_directory_path() / "vtitests-library-cut";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    Dump cut = single(1);
+    cut.resize(300);
+    Dump file = cut;
+    const Dump next = single(2);
+    file.push_back(0x78); // an SMF delta before the next SysEx event
+    file.insert(file.end(), next.begin(), next.end());
+    write_file(dir / "Cut.syx", file);
+    PatchLibrary lib;
+    CHECK(load_library_file((dir / "Cut.syx").string(), lib));
+    CHECK(std::count_if(lib.dumps.begin(), lib.dumps.end(), [](const Dump &d) { return !d.empty(); }) == 1);
+    CHECK(lib.skipped == 1 && !lib.dumps.empty() && same_patch(lib.dumps.back(), next));
+    fs::remove_all(dir);
+}
+
+// review 2026-11-25 M3: the temporary file was checked before it was closed, so a failed flush (disk full) still
+// replaced the library with a cut file; a failed rename left the .tmp behind
+TEST(library_save_failure_keeps_the_file)
+{
+    fs::path dir = fs::temp_directory_path() / "vtitests-library-flush";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "Folder.mid");
+    PatchLibrary lib;
+    lib.dumps = {single(1)};
+    std::string err;
+    lib.path = (dir / "Folder.mid").string(); // a folder of that name: the rename fails
+    CHECK(!save_library(lib, err) && !err.empty());
+    CHECK(!fs::exists(dir / "Folder.mid.tmp"));
+#ifndef _WIN32
+    std::error_code ec;
+    if (fs::exists("/dev/full", ec)) { // writes to it fail when flushed (ENOSPC)
+        const Dump old = single(9);
+        write_file(dir / "Full.mid", old);
+        fs::create_symlink("/dev/full", dir / "Full.mid.tmp");
+        lib.path = (dir / "Full.mid").string();
+        err.clear();
+        CHECK(!save_library(lib, err) && !err.empty());
+        // not a symlink first: reading /dev/full never ends
+        CHECK(!fs::is_symlink(dir / "Full.mid") && read_file(dir / "Full.mid") == old);
+        CHECK(!fs::exists(fs::symlink_status(dir / "Full.mid.tmp")));
+    }
+#endif
     fs::remove_all(dir);
 }

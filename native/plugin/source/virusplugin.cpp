@@ -20,6 +20,7 @@ extern "C" {
 }
 #include "model/state.h"
 #include "ratesw.h"
+#include "vtiaudioshm.h" // VTI_AUDIO_RING: how far back a crossfade may read (crossfade.h)
 #include "pluginterfaces/base/ibstream.h"
 #include "public.sdk/source/main/moduleinit.h"
 #include "public.sdk/source/main/pluginfactory.h"
@@ -78,7 +79,7 @@ static bool env_no_ping() // R5 test: the old stamping without sync ping / marke
 
 static const char *const USB_IO_PATH = "Global USB/Virus Control USB IO Configuration";
 static const std::string DM_PATH = "VirusControl/Direct Monitoring"; // the D button (directmon.h)
-static const std::string LIVE_MODE_PATH = "VirusControl/Live Mode", PLUGIN_LATENCY_PATH = "VirusControl/Plugin Latency";
+static const std::string LIVE_MODE_PATH = "VirusControl/Live Mode";
 static const char *const SYNC_INFO_PATH = "Global USB/Sync Information Event"; // global 0x54 from the Virus (E205)
 
 // the USB IO configuration of this computer: VTI_IO_CONFIG (tests), else <plug-in folder>/usb-io, else 0
@@ -137,25 +138,53 @@ void DeviceOut::stop_worker()
 // waiting instance sends nothing. A waiting instance that takes over sends its own start-up (Mode back to REMOTE).
 void DeviceOut::leave_virus()
 {
+    // the RAM writes that will not go out now: named in the log (research T11), dropped with the rest of the queue
+    // in the same step, so none starts in between
+    auto cut_rest = [this](const char *why) {
+        std::vector<int> slots;
+        std::string backup;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            slots = ram_unsent();
+            backup = ram_backup_;
+            dump_ram_ = -1; // logged here, not again when the worker drops it
+            queued_ -= (int)queue_.size();
+            queue_.clear();
+        }
+        ram_cut(slots, backup, why);
+    };
     if (!owner_ || !open_ || !broker_.device_present()) {
         log("Virus TI native: closing without the close sequence (owner %d, open %d, present %d)\n", (int)owner_.load(),
             (int)open_.load(), (int)broker_.device_present());
+        cut_rest("the plug-in closed without a Virus");
         return;
     }
     log("Virus TI native: close sequence (cables 1, Mode SINGLE)\n");
-    abandon_dump_ = true; // a dump on its way must not hold up the close, and it is not wanted any more
+    // a dump on its way must not hold up the close, and it is not wanted any more - unless it is a RAM write
+    abandon_dump_ = ABANDON_OTHER;
+    size_t ram;
     {
         // nor what is still queued (the state of a session closed right after it started): behind it the close would
-        // never go out
+        // never go out. RAM writes stay: a drop, swap or sort cut short leaves the bank half written (T11)
         std::lock_guard<std::mutex> lk(mu_);
-        queued_ -= (int)queue_.size();
-        queue_.clear();
+        queued_ -= vti::keep_ram_writes(queue_);
+        ram = ram_unsent().size();
     }
     cv_.notify_all();
     auto sent = [this](int ms) {
         for (int i = 0; i < ms && queued_.load() > 0; i += 5)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
     };
+    if (ram) {
+        log("Virus TI native: %zu RAM write(s) still on their way - they go out first (at most %d s)\n", ram,
+            vti::RAM_CLOSE_WAIT_MS / 1000);
+        int ms = 0;
+        for (; ms < vti::RAM_CLOSE_WAIT_MS && queued_.load() > 0 && open_ && broker_.device_present(); ms += 5)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        cut_rest(ms >= vti::RAM_CLOSE_WAIT_MS ? "the close's wait ran out" : "the Virus or the broker went away");
+        abandon_dump_ = ABANDON_ALL; // the close goes now
+        cv_.notify_all();
+    }
     for (auto &m : close_messages_first())
         send(m);
     sent(1000); // right after a multi dump the Virus is given time first (queue_hold_until_); usually at once
@@ -175,6 +204,30 @@ bool DeviceOut::other_owner() const
         if (o && o != this)
             return true;
     return false;
+}
+
+// #51: the newest block the DAW processed in an instance of this process that has no Virus (steady ms, -1 = none)
+static std::atomic<int64_t> g_waiting_played_ms{-1};
+
+static int64_t steady_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void DeviceOut::note_processed(int64_t ms)
+{
+    processed_ms_.store(ms, std::memory_order_relaxed);
+    if (!owner_.load(std::memory_order_relaxed) || !broker_.device_present())
+        g_waiting_played_ms.store(ms, std::memory_order_relaxed);
+}
+
+bool DeviceOut::yield_due() const
+{
+    const int64_t now = steady_ms(), mine = processed_ms_.load(std::memory_order_relaxed),
+                  other = g_waiting_played_ms.load(std::memory_order_relaxed);
+    auto ago = [now](int64_t t) { return t < 0 ? -1 : (int)std::min<int64_t>(now - t, 1 << 30); };
+    return vti::slot_yield(ago(mine), ago(other));
 }
 
 bool DeviceOut::claim_owner()
@@ -208,7 +261,7 @@ void DeviceOut::send(std::vector<uint8_t> msg)
     send(std::move(msg), CABLE_PLUGIN);
 }
 
-void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable)
+void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable, bool keep, bool ram)
 {
     if (msg.empty()) // nothing to write, and the worker's write accounting (pending_send_) expects bytes
         return;
@@ -217,9 +270,49 @@ void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable)
         return;
     }
     std::lock_guard<std::mutex> lk(mu_);
-    queue_.push_back({std::move(msg), false, cable});
+    part_dump_queued(msg);
+    queue_.push_back({std::move(msg), false, cable, keep, false, ram});
     queued_++;
     cv_.notify_one();
+}
+
+void DeviceOut::send_ram(std::vector<uint8_t> dump, const std::string &backup)
+{
+    {
+        // the backups of every RAM operation still queued (a second one can queue behind the first)
+        std::lock_guard<std::mutex> lk(mu_);
+        if (ram_unsent().empty())
+            ram_backup_ = backup;
+        else if (!backup.empty() && ram_backup_.find(backup) == std::string::npos)
+            ram_backup_ += (ram_backup_.empty() ? "" : " and ") + backup;
+    }
+    send(std::move(dump), CABLE_PLUGIN, false, true);
+}
+
+std::vector<int> DeviceOut::ram_unsent()
+{
+    std::vector<int> s = vti::ram_writes(queue_);
+    if (dump_.active() && dump_ram_ >= 0)
+        s.insert(s.begin(), dump_ram_);
+    return s;
+}
+
+// research T11: RAM writes dropped before they reached the Virus (closed, broker or Virus gone): which slots, and where
+// the backup of what the sequence overwrites is; the bank's cache counts as not confirmed until the next check
+void DeviceOut::ram_cut(const std::vector<int> &slots, const std::string &backup, const char *why)
+{
+    if (slots.empty())
+        return;
+    log("Virus TI native: RAM write cut short (%s), not written: %s\n", why, vti::ram_slot_list(slots).c_str());
+    log("Virus TI native: %s; the bank check at the next connection corrects the browser\n",
+        backup.empty() ? "no RAM backup was made for it (it overwrote no patch the cache knew)"
+                       : ("the earlier patches of the slots it writes are in " + backup).c_str());
+    std::set<int> banks;
+    for (int s : slots)
+        banks.insert(s / 128);
+    if (ram_cut_)
+        for (int b : banks)
+            ram_cut_(b);
 }
 
 int DeviceOut::send_state(std::vector<std::vector<uint8_t>> records)
@@ -233,11 +326,28 @@ int DeviceOut::send_state(std::vector<std::vector<uint8_t>> records)
     queue_.erase(std::remove_if(queue_.begin(), queue_.end(), [](const Queued &q) { return q.state; }), queue_.end());
     int dropped = (int)(before - queue_.size());
     queued_ -= dropped;
-    for (auto &r : records)
+    for (auto &r : records) {
+        part_dump_queued(r);
         queue_.push_back({std::move(r), true});
+    }
     queued_ += (int)records.size();
     cv_.notify_one();
     return dropped;
+}
+
+// R7-3: a part's single dump is queued (a patch load, a state): its edits from before, still held for a running dump
+// or waiting in process(), would go out after the new patch and overwrite it. The original clears the part's waiting
+// slots at its dump (0x18007aa50). Edits from now on survive (requeue_held puts them behind the dump).
+void DeviceOut::part_dump_queued(const std::vector<uint8_t> &m)
+{
+    const int p = dump_part(m);
+    if (p < 0)
+        return;
+    held_.drop_part(p);
+    if (p < 16) {
+        loaded_parts_.fetch_or(1u << p, std::memory_order_acq_rel);
+        loaded_idle_.fetch_or(1u << p, std::memory_order_acq_rel);
+    }
 }
 
 // The broker connection is lost (a failed write, or the broker went away; review 2026-10-19 H3: the second case was
@@ -247,20 +357,51 @@ int DeviceOut::send_state(std::vector<std::vector<uint8_t>> records)
 void DeviceOut::lose_broker()
 {
     drop_dump();
+    queued_ -= ack_n_; // their reports never come (T7)
+    ack_n_ = 0;
     close_audio();
     broker_.close();
     open_ = false;
+}
+
+// Like the original, which clears its start-up queue while no Virus is connected and builds it again at the
+// connection (R6-3): what is queued for a Virus this instance had goes, and at its return resend_to_virus queues the
+// start-up and the state (the editor's edits are in it). Else an unfinished start-up block and stale edits went out
+// in front of the new start-up. Returns how many went.
+int DeviceOut::drop_while_away()
+{
+    if (!had_virus_) // never there: the start-up and the state wait for it (E591 (2))
+        return 0;
+    std::vector<int> ram;
+    std::string backup;
+    int n;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        ram = vti::ram_writes(queue_); // not kept: the Virus that comes back may hold other patches by then
+        backup = ram_backup_;
+        n = vti::drop_while_away(queue_);
+        queued_ -= n;
+    }
+    ram_cut(ram, backup, "the Virus went away");
+    return n;
 }
 
 // A dump in pieces and the automation held for it, when the Virus or the broker went away: the state goes out again
 // when it is back, and the remaining pieces would go out without their header (review 2026-10-19 M2).
 void DeviceOut::drop_dump()
 {
+    std::vector<int> ram;
+    std::string backup;
     {
         std::lock_guard<std::mutex> lk(mu_);
+        if (dump_.active() && dump_ram_ >= 0)
+            ram.push_back(dump_ram_);
+        backup = ram_backup_;
+        dump_ram_ = -1;
         dump_ = DumpPacer();
         held_.take();
     }
+    ram_cut(ram, backup, "the Virus or the broker went away");
     if (dump_pending_) {
         dump_pending_ = false;
         queued_--;
@@ -318,6 +459,18 @@ int DeviceOut::start_audio()
             log("Virus TI native: audio input: %s\n", audio_note_.c_str());
     }
     return r;
+}
+
+
+void DeviceOut::note_timeline(const TimelineNote &n)
+{
+    const size_t w = tl_w_.load(std::memory_order_relaxed);
+    if (w - tl_r_.load(std::memory_order_acquire) >= TL_NOTES) { // the worker is behind: counted, logged by it
+        tl_lost_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    tl_notes_[w % TL_NOTES] = n;
+    tl_w_.store(w + 1, std::memory_order_release);
 }
 
 bool DeviceOut::send_rt(const uint8_t *msg, size_t n, int64_t stamp, bool live)
@@ -426,7 +579,7 @@ void DeviceOut::scan_audio()
         for (int i = 0; i < n; i++) {
             int64_t f = scanned_ + i;
             bool usb1 = l1[i] != 0 || r1[i] != 0, usb2 = l2[i] != 0 || r2[i] != 0;
-            if (markers_.candidate(f, usb1, usb2)) {
+            if (markers_.candidate(f, usb2)) {
                 // the marker: one sample per channel, the rest of USB 2 silent around it
                 float ll[64], rr[64], a2[64], b2[64];
                 audio_.read_at(ll, rr, a2, b2, 64, f + 2);
@@ -490,6 +643,8 @@ void DeviceOut::check_presence()
     }
     auto lost = [this] {
         drop_dump();
+        if (int n = drop_while_away())
+            log("Virus TI native: %d queued message(s) dropped, sent again from the state at the return (R6-3)\n", n);
         close_audio();
         std::lock_guard<std::mutex> g(info_mu_); // the next Virus may be another unit, or have new banks burned
         flash_.clear();
@@ -529,6 +684,7 @@ void DeviceOut::check_presence()
     }
     case vti::Presence::back:
         present_seen_ = 1;
+        had_virus_ = true;
         arrived();
         if (device_)
             device_(true);
@@ -593,8 +749,17 @@ void DeviceOut::run()
                 continue;
             }
         }
-        if (abandon_dump_.exchange(false))
-            drop_dump();
+        if (const int a = abandon_dump_.exchange(ABANDON_NONE)) { // leave_virus
+            bool ram;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                ram = a == ABANDON_OTHER && dump_.active() && dump_ram_ >= 0;
+                if (ram)
+                    held_.take(); // the automation held for it goes, as with any dump at the close
+            }
+            if (!ram) // a RAM write in pieces goes on (T11)
+                drop_dump();
+        }
         if (!open_) {
             std::string err;
             if (!rx_set_) {
@@ -613,9 +778,14 @@ void DeviceOut::run()
                         reply_(m);
                 });
                 broker_.on_rx([parser](uint8_t ep, const uint8_t *d, size_t len) { parser->feed(ep, d, len); });
+                broker_.on_written([this] { // room below us again (T7): wake the worker, never between its check and wait
+                    { std::lock_guard<std::mutex> lk(mu_); }
+                    cv_.notify_one();
+                });
                 rx_set_ = true;
             }
-            if (!owner_ && !claim_owner()) {
+            // #51: not played while another instance of this process is: no claim, that one gets the Virus
+            if (!owner_ && (yield_due() || !claim_owner())) {
                 // every free slot given up (one Virus, this a second instance): wait, try them again after a while
                 const auto now = std::chrono::steady_clock::now();
                 if (tried_wait_since_ == std::chrono::steady_clock::time_point{})
@@ -680,7 +850,7 @@ void DeviceOut::run()
         }
         // no Virus (switched off, or another program has it): keep the queued messages (start-up, state) until it is
         // there - written into the void, a Virus switched on later never got them; events from process() (notes)
-        // are dropped, they would play late
+        // are dropped, they would play late. A Virus this instance had: the queue goes, the return sends it again (R6-3)
         if (!broker_.device_present()) {
             if (!broker_.connected()) { // the broker itself went away (crash, update, restart): open it again above
                 log("Virus TI native: the connection to the TI Revive broker ended - reconnecting\n");
@@ -691,6 +861,8 @@ void DeviceOut::run()
             if (idle_)
                 idle_();
             check_presence();
+            if (present_seen_ != 1) // still away (a return just now queued the start-up): what the editor queued
+                drop_while_away();  // meanwhile is in the state (R6-3)
             // Virus 2+ is not there, or another program's plug-in has this one (#45, audit 2026-11-18 #4): after 3 s
             // try another slot (slotpick.h); the one given up is skipped once, the log says it once per wait
             const bool elsewhere = broker_.in_use_elsewhere();
@@ -740,6 +912,13 @@ void DeviceOut::run()
                 on_waiting_(false);
             report_status();
         }
+        if (yield_due()) { // #51: the DAW plays another instance of this process, not this one: it takes the Virus
+            log("Virus TI native: the DAW plays another instance, not this one - handing Virus %d over (#51)\n",
+                slot_.load());
+            lose_broker();
+            release_owner();
+            continue;
+        }
         skip_slot_ = 0;
         tried_ = 0;
         tried_wait_since_ = std::chrono::steady_clock::time_point{};
@@ -755,11 +934,16 @@ void DeviceOut::run()
             std::unique_lock<std::mutex> lk(mu_);
             // process() wakes it once per block with events (wake_rt); the timeout is only a backstop and runs the idle
             // work (parameter drain) - before: a 1 ms poll, 1000 wake-ups/s even without anything to send
+            // T7: with the window below us full nothing can go; the broker's report wakes it (on_written)
             cv_.wait_for(lk, std::chrono::milliseconds(5), [this] {
-                return stop_ || !queue_.empty() || rt_r_.load() != rt_w_.load(std::memory_order_acquire);
+                return stop_ || (broker_.room(TX_WINDOW) &&
+                                 (!queue_.empty() || rt_r_.load() != rt_w_.load(std::memory_order_acquire)));
             });
             if (stop_)
                 break;
+            count_written();
+            // the window below us (T7): while it is full everything stays in its own queue, where events go first
+            const bool room = broker_.room(TX_WINDOW) > 0;
             size_t r = rt_r_.load(std::memory_order_relaxed);
             // events from process() first, but after 8 in a row one queued message (state, dumps, sync requests),
             // else dense MIDI starves the queue (stress test: queue stuck, bank sync timed out)
@@ -772,11 +956,23 @@ void DeviceOut::run()
             const bool budget_ok = budget_.available(now_ns) >= 8;
             // after 8 events the queue side's turn, only when it can go now (a due piece, a queued message not held)
             const bool q_ready = queue_ready(dump_, now_ns, queue_.empty(), held);
-            const bool rt = r != rt_w_.load(std::memory_order_acquire) && rt_run_.events_first(q_ready) && budget_ok;
+            const bool rt =
+                room && r != rt_w_.load(std::memory_order_acquire) && rt_run_.events_first(q_ready) && budget_ok;
             // a dump in pieces (dumppacer.h): the DAW's events go between the pieces, queued messages wait for its end
-            // the piece is written below, after the regular work of each round (idle work, audio scan, stall watch,
-            // presence): skipping that for a whole state's dumps (~2 s) made the stall watch see a sleep (E272)
-            if (dump_.active() && !rt) {
+            // (queued notes excepted, R12-8); the piece is written below, after the regular work of each round (idle
+            // work, audio scan, stall watch, presence): skipping that for a whole state's dumps (~2 s) made the stall
+            // watch see a sleep (E272)
+            const auto note = !room || !dump_.active() || rt ? queue_.end() : std::find_if(queue_.begin(), queue_.end(),
+                [](const Queued &q) { return between_pieces(q.msg.data(), q.msg.size()); });
+            if (!room) {
+                // nothing this round; the broker's report (or the 5 ms) brings the next one
+            } else if (note != queue_.end()) { // before the next piece, like the original's short messages (R12-8)
+                rt_run_.turn();
+                msg = std::move(note->msg);
+                cable = dump_.event_cable(CABLE_PLUGIN); // cable 5, as the DAW's notes
+                queue_.erase(note);
+                pending_send_ = true;
+            } else if (dump_.active() && !rt) {
                 if (dump_.next(now_ns, piece)) {
                     piece_last = !dump_.active();
                     rt_run_.turn(); // the queue's turn while it waits for the dump (EventRun, dumppacer.h)
@@ -805,11 +1001,13 @@ void DeviceOut::run()
                         held_.add(msg);
                         msg.clear();
                         stamp = -1;
-                    }
+                    } else
+                        queued_ -= drop_superseded(queue_, msg); // a held older value must not follow it
                 } else if (!queue_.empty()) {
                     rt_run_.turn();
                     msg = std::move(queue_.front().msg);
                     cable = queued_cable(msg.data(), msg.size(), queue_.front().cable); // dumps: cable 3 (cablerule.h)
+                    dump_ram_ = queue_.front().ram ? vti::ram_slot(msg) : -1; // read only while dump_ runs
                     queue_.pop_front();
                     if (cable == 3 && msg.size() > 3 * (DumpPacer::PIECE / 4)) { // a dump: in pieces from the next round
                         auto pk = usbmidi_pack(msg, cable);
@@ -950,13 +1148,14 @@ void DeviceOut::run()
             stats_next_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             int64_t newest = audio_ok() ? audio_.newest_frame() : -1, pos = audio_ok() ? audio_.position() : -1;
             log("stats: audio %d drops %lld filled %lld distance %lld queued %d | marker %lld aligned blocks %lld, read "
-                "margin min %lld, timeline steps %lld, last sound %lld frames ago | host frames %lld / virus frames "
-                "%lld, anchors %lld, err %lld..%lld | Virus %d\n", // which instance: its Virus (#45, 0 = none yet)
+                "margin min %lld, timeline steps %lld, fades %lld (%lld cut), last sound %lld frames ago | host frames "
+                "%lld / virus frames %lld, anchors %lld, err %lld..%lld | Virus %d\n", // which instance: its Virus (#45, 0 = none yet)
                 (int)audio_ok(), (long long)(audio_ok() ? audio_.drops() : -1),
                 (long long)(audio_ok() ? audio_.filled() : -1),
                 (long long)(newest >= 0 && pos >= 0 ? newest - pos : -1), queued_.load(), (long long)marker.load(),
                 (long long)aligned_blocks.exchange(0), (long long)read_margin_min.exchange(INT64_MAX),
-                (long long)tl_steps.exchange(0), (long long)(newest - last_sound.load()), (long long)host_frames.exchange(0),
+                (long long)tl_steps.exchange(0), (long long)tl_fades.exchange(0), (long long)tl_fades_cut.exchange(0),
+                (long long)(newest - last_sound.load()), (long long)host_frames.exchange(0),
                 (long long)(stats_newest_ >= 0 ? newest - stats_newest_ : -1), (long long)anchors.exchange(0),
                 (long long)err_min.exchange(INT64_MAX), (long long)err_max.exchange(INT64_MIN), slot_.load());
             stats_newest_ = newest;
@@ -990,6 +1189,27 @@ void DeviceOut::run()
                 b - blocked_logged_);
             blocked_logged_ = b;
         }
+        for (size_t r = tl_r_.load(std::memory_order_relaxed); r != tl_w_.load(std::memory_order_acquire); r++) {
+            const TimelineNote &n = tl_notes_[r % TL_NOTES];
+            if (n.what[0] == 'j')
+                log("timeline jump: err %lld by %lld block %d\n", (long long)n.err, (long long)n.value, n.block);
+            else if (n.what[0] == 'f')
+                log("timeline caught up by %lld frames (crossfaded), err %lld block %d\n", (long long)n.value,
+                    (long long)n.err, n.block);
+            else if (n.what[0] == 'k')
+                log("timeline: %lld frames behind kept, inside the stamp lead (#37), err %lld block %d\n",
+                    (long long)n.value, (long long)n.err, n.block);
+            else if (n.what[0] == 'p')
+                log("Virus TI native: Play: timeline back by %lld frames for the DAW's burst (#37), err %lld block %d\n",
+                    (long long)-n.value, (long long)n.err, n.block);
+            else
+                log("timeline %s: err %lld newest %lld block %d\n", n.what, (long long)n.err, (long long)n.value, n.block);
+            tl_r_.store(r + 1, std::memory_order_release);
+        }
+        if (int lost = tl_lost_.load(std::memory_order_relaxed); lost != tl_lost_logged_) {
+            log("timeline: %d anchor/jump line(s) not logged, the worker was behind\n", lost - tl_lost_logged_);
+            tl_lost_logged_ = lost;
+        }
         if (int lost = rt_lost_.load(std::memory_order_relaxed); lost != rt_lost_logged_) {
             log("Virus TI native: %d event(s) lost, the queue from process() was full\n", lost - rt_lost_logged_);
             rt_lost_logged_ = lost;
@@ -1006,18 +1226,19 @@ void DeviceOut::run()
             pedals_up.store(true, std::memory_order_relaxed);
         }
         if (!piece.empty()) { // a piece of a dump (dumppacer.h)
-            bool wok = broker_.write(EP_PLUGIN_OUT, piece.data(), piece.size());
-            if (piece_last && dump_pending_) {
+            uint32_t end = 0;
+            bool wok = broker_.write(EP_PLUGIN_OUT, piece.data(), piece.size(), &end);
+            if (piece_last && dump_pending_) { // queued until the broker reports it written (T7)
                 dump_pending_ = false;
-                queued_--;
+                ack_n_++;
+                ack_end_ = end;
+                count_written();
             }
-            if (piece_last && !held_.empty()) { // automation held during the dump goes first now (cable 2)
-                auto held = held_.take();
+            if (piece_last) { // automation held during the dump goes first now (cable 2), behind its part's next dump
                 std::lock_guard<std::mutex> lk(mu_);
-                for (auto it = held.rbegin(); it != held.rend(); ++it) {
-                    queue_.push_front({std::move(*it), false, CABLE_PLUGIN});
-                    queued_++;
-                }
+                queued_ += requeue_held(queue_, held_.take(), [](std::vector<uint8_t> &&m) {
+                    return Queued{std::move(m), false, CABLE_PLUGIN, false, true};
+                });
             }
             if (!wok)
                 lose_broker();
@@ -1089,7 +1310,9 @@ void DeviceOut::run()
             // one write holds at most the budget's balance (sendbudget.h): the rest of a flood goes in later rounds
             const auto now = std::chrono::steady_clock::now();
             const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-            const size_t cap = std::min<size_t>(3072, (size_t)std::max(0, budget_.available(now_ns)));
+            // and at most the window's room below us (T7): the rest waits in the ring, where it is still first
+            const size_t cap = std::min<size_t>(std::min<size_t>(3072, (size_t)std::max(0, budget_.available(now_ns))),
+                                                broker_.room(TX_WINDOW));
             const bool q_ready = queue_ready(dump_, now_ns, queue_.empty(), now < queue_hold_until_);
             for (size_t r = rt_r_.load(std::memory_order_relaxed);
                  r != rt_w_.load(std::memory_order_acquire) && pk_.size() < cap && rt_run_.events_first(q_ready);
@@ -1104,10 +1327,12 @@ void DeviceOut::run()
                     held_.add(msg);
                     continue;
                 }
+                queued_ -= drop_superseded(queue_, msg); // a held older value must not follow it
                 pack(msg, st, sl_live);
             }
         }
-        bool ok = broker_.write(EP_PLUGIN_OUT, pk_.data(), pk_.size());
+        uint32_t end = 0;
+        bool ok = broker_.write(EP_PLUGIN_OUT, pk_.data(), pk_.size(), &end);
         if (stamp >= 0) // stamped traffic counts against the budget; queued SysEx does not (sendbudget.h, E266)
             budget_.take((int)pk_.size());
         if (msg.size() > 7 && msg[0] == 0xF0 && msg[6] == 0x11) { // a multi dump (11 00 00 ...)
@@ -1122,9 +1347,11 @@ void DeviceOut::run()
             floor_logged_ = floor_.moved;
             floor_log_at_ = std::chrono::steady_clock::now();
         }
-        if (pending_send_) {
+        if (pending_send_) { // queued until the broker reports it written (T7; at once from an older broker)
             pending_send_ = false;
-            queued_--;
+            ack_n_++;
+            ack_end_ = end;
+            count_written();
         }
         if (!ok)
             lose_broker();
@@ -1156,8 +1383,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     // the host's UI thread (initialize runs there): knob moves -> host edits, window open or not (gesture_timer_)
     auto tick = [this] {
         gesture_timer_ran_.store(true, std::memory_order_relaxed);
-        tick_gestures();
-        check_latency();
+        tick_timer();
     };
 #if SMTG_OS_LINUX
     // no run loop on the host context: no timer, the editor's timer ticks as in 0.8.41 (editor_closed flushes then)
@@ -1209,6 +1435,8 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         return kResultOk;
     }
     single_template_ = dev_.message("VirusTI_Singledump");
+    multi_template_ = dev_.message("VirusTI_MultiDump");
+    parts_ = std::max(1, std::min(16, df.parts));
     ui_state_["VirusControl/InitialSyncProgress"] = 127; // exist before the sync thread updates them
     ui_state_["VirusControl/RecallProgress"] = 127;
     load_banks();
@@ -1220,7 +1448,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     else
         fprintf(stderr, "Virus TI native: no editor (%s)\n", err.c_str());
     // a new instance's state like the original's: empty record, the fixed multi, 16 parts = the init patch,
-    // Output Control 2/3 globals, 14 controllers x 16 channels (formats.md)
+    // Output Control 2/3 globals, 14 controllers x 16 channels (formats.md); a Snow 4 parts and 4 channels (R8-3)
     auto multi = files->init_multi();
     auto init = files->init_single();
     if (single_template_ && init.size() == 524) { // which parameters a part's single dump carries
@@ -1242,7 +1470,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         std::fill(smulti.begin() + 25, smulti.begin() + 41, 0);
         smulti[265] = 0;
         default_.push_back(smulti);
-        for (int p = 0; p < 16; p++) {
+        for (int p = 0; p < parts_; p++) {
             auto d = init;
             d[7] = 0, d[8] = (uint8_t)p;
             BankDrop::checksums(d);
@@ -1253,7 +1481,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         static const uint8_t ccs[14][2] = {{1, 0},  {2, 0},   {3, 0},  {4, 0},  {6, 0},  {7, 100}, {8, 64},
                                            {9, 0},  {11, 127}, {12, 0}, {13, 0}, {14, 0}, {15, 0},   {16, 0}};
         for (auto &cc : ccs)
-            for (int ch = 0; ch < 16; ch++)
+            for (int ch = 0; ch < parts_; ch++)
                 default_.push_back({(uint8_t)(0xB0 | ch), cc[0], cc[1]});
     }
     // the part dumps in the current format (E174: the Virus would convert old ones and reset the newer fields)
@@ -1264,6 +1492,9 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         snprintf(units, sizeof units, "Part %02d/", e.part);
         parameters.addParameter(UString128(title), UString128(units), 0, 0.0, ParameterInfo::kCanAutomate, e.id);
         params_[(ParamID)e.id] = {e.path, e.part - 1};
+        uint8_t m[16]; // its transport: a standard controller survives a patch load (R7-3)
+        const size_t n = dev_.encode_into(e.path, 0, e.part - 1, m, sizeof m);
+        params_[(ParamID)e.id].standard = n == 3 && (m[0] & 0xF0) == 0xB0 && standard_controller(m[1]);
         ids_[{e.path, e.part - 1}] = (ParamID)e.id;
     }
     for (int ch = 0; ch < 16; ch++) {
@@ -1304,6 +1535,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     out_->stamp_floor = !timing_classic_;
     out_->live_notes = live_notes_;
     out_->live_later = vti::cc::plugin_option("live-later") ? LIVE_LATER_FRAMES : 0; // E519
+    keep_rest_ = vti::cc::plugin_option("keep-rest"); // E589, #37: keep-rest.off = the rest corrected as in rc7
     if (diag_enabled()) {
         // the folder first: on a fresh install it came only with the bank cache, ~7 s in, and every line before
         // (library scan, ready probe, marker) was lost (win10 VM, rc1, 2026-11-11)
@@ -1312,7 +1544,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         vti::cc::rotate_log(own_cache_dir() + "/../diag.log", vti::cc::kPluginLogLimit); // on for everyone: kept small
         out_->set_diag_path(own_cache_dir() + "/../diag.log");
     }
-    out_->log("Virus TI native: TI Revive %s (%s)\n", TIREVIVE_VERSION, VTI_GIT_REV); // which build (E563)
+    out_->log("Virus TI native: TI Revive %s (%s)\n", VTI_NATIVE_VERSION, VTI_GIT_REV); // which build (E563)
     if (live_notes_) { // after set_diag_path, or the line never reaches diag.log
         char later[64] = "";
         if (out_->live_later.load())
@@ -1322,6 +1554,8 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     }
     out_->log("Virus TI native: timing: lead %d frames, safety net %s%s\n", timing_a_, timing_classic_ ? "off" : "on",
               timing_classic_ ? " (timing-classic.on)" : "");
+    if (!keep_rest_)
+        out_->log("Virus TI native: keep-rest off (keep-rest.off): the rest after a Play is corrected, not kept (E589)\n");
     if (od_changes_only_)
         out_->log("Virus TI native: output delays only on change (outdelay-changes.on)\n");
 #ifdef __APPLE__
@@ -1342,6 +1576,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
                       bus, n_in, ch, lay / 2 % 2, lay % 2);
         }
         drain_param_updates();
+        send_idle_edits();
         load_reported_presets();
         send_output_delays();
         report_offline();
@@ -1353,6 +1588,21 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         return true;
     });
     sync_->log = [this](const std::string &line) { out_->log("Virus TI native: %s\n", line.c_str()); }; // #34
+    // E591: every request (probe, bank sync, downloads) goes out only when the queue is empty, like the original, and
+    // its timeout starts once it is written; an instance without a Virus (handed over, waiting) asks nothing. The
+    // real-time ring too (research T9, R4-2: the original asks only when all its rings are nearly empty); the worker
+    // writes it within ms, and transact bounds the wait (queue_wait_ms), so constant playing cannot block a request
+    sync_->sending = [this] { return out_->busy() || out_->events_waiting(); };
+    // and the Virus itself (R6-2): one lost during the bank sync stops it like a cancel, not "failed" for good, and
+    // the check runs again when it is back (every return comes with on_device(true), also a bounce)
+    sync_->present = [this] { return out_->connected() && out_->has_virus(); };
+    // a bank info without an answer: the cable messages again before its last asks, like the original (E594). Only
+    // the user's own known start-up messages, 4 per ask (cables and link, E601), at most twice per bank info (rule 2)
+    sync_->resend_routing = [this] {
+        out_->log("Virus TI native: bank info not answered - routing settings sent again (E594)\n");
+        for (auto &m : AnswerWatch::routing_messages(startup_messages()))
+            out_->send(m);
+    };
     out_->on_reply([this](const std::vector<uint8_t> &m) { sync_->feed(m); });
     out_->on_waiting([this](bool waiting) { // worker thread
         // the original's page for a Virus that another program holds (SystemStatus/Error 2 = "VDM not Master":
@@ -1372,12 +1622,22 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         if (changed)
             ui_dirty_ = true;
     });
+    out_->on_ram_cut([this](int bank) { // worker or terminate's thread (T11)
+        if (bank >= 0 && bank < 4)
+            ram_confirmed_[bank] = false; // the cache shows writes that did not reach the Virus: the next check corrects
+        ui_dirty_ = true;
+    });
     out_->on_device([this](bool present) { // worker thread
         out_->log("Virus TI native: device %s\n", present ? (device_seen_ ? "reconnected" : "connected") : "disconnected");
         if (!present) {
             // not ready until the return's probe: a new audio stream can start before the state goes out again (a
             // broker reconnect: 3 s of flash read in between), and an anchor and sync ping on it would go unanswered
             ready_ = false;
+            for (auto &c : ram_confirmed_) // its RAM may change while it is away; the check at the return confirms it
+                c = false;
+            held_notes_.away(); // released at the return: a note-off in the gap never reaches it (R6-4)
+            if (sync_)
+                sync_->drop_late(); // another Virus may come back on this slot (T18)
             set_lcd("Virus disconnected", std::string(), std::string(), std::string());
             return;
         }
@@ -1391,6 +1651,16 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         }
         set_lcd("Virus reconnected", std::string(), std::string(), std::string());
         resend_to_virus();
+        // a Virus that stayed powered (a short USB drop) still sounds what was held when it went: the setActive(0)
+        // release, behind the start-up and the state (R6-4; neither the original nor 0.8.43 sent anything here)
+        uint8_t rel[32][3];
+        const int n = held_notes_.returned(rel);
+        for (int i = 0; i < n; i++)
+            out_->send({rel[i][0], rel[i][1], rel[i][2]});
+        if (n > 0) {
+            out_->pedals_up.store(true, std::memory_order_relaxed);
+            out_->log("Virus TI native: %d note release(s) of the time before the drop sent (R6-4)\n", n);
+        }
     });
     out_->on_resume([this] { resend_to_virus(); }); // worker thread
     usb_io_ = load_usb_io();
@@ -1485,19 +1755,28 @@ bool VirusPlugin::panic()
     return true;
 }
 
+// pedal up and all notes off on the channels with a held key or pedal only (heldnotes.h, E373 - REAPER deactivates
+// at every Play); out_ connected
+int VirusPlugin::release_held_notes()
+{
+    uint8_t rel[32][3];
+    const int n = held_notes_.release(rel);
+    for (int i = 0; i < n; i++)
+        out_->send({rel[i][0], rel[i][1], rel[i][2]});
+    out_->pedals_up.store(true, std::memory_order_relaxed);
+    return n;
+}
+
 tresult PLUGIN_API VirusPlugin::setActive(TBool state)
 {
     if (state && out_)
         out_->start(); // the first activation connects to the Virus (a plug-in scan never gets here)
+    if (state)
+        reactivated_.store(true, std::memory_order_relaxed); // REAPER: before every Play, then its burst (E351)
     if (out_)
         out_->log("Virus TI native: setActive(%d), state loaded %d\n", (int)state, (int)state_loaded_);
-    if (!state && out_ && out_->connected()) { // nothing keeps sounding after the plug-in stops (removed, closed):
-        // only what is still held (heldnotes.h, E373 - REAPER deactivates at every Play)
-        uint8_t rel[32][3];
-        const int n = held_notes_.release(rel);
-        for (int i = 0; i < n; i++)
-            out_->send({rel[i][0], rel[i][1], rel[i][2]});
-        out_->pedals_up.store(true, std::memory_order_relaxed);
+    if (!state && out_ && out_->connected()) { // nothing keeps sounding after the plug-in stops (removed, closed)
+        const int n = release_held_notes();
         for (int i = 0; n > 0 && i < 50 && out_->busy(); i++) // at most 32 messages, a few ms; at most 250 ms
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -1510,6 +1789,15 @@ tresult PLUGIN_API VirusPlugin::setActive(TBool state)
         sync_thread_ = std::thread([this] {
             sync_banks();
             warm_categories();
+            // every later connection (reconnect, resume, a Virus switched on after the start, an answer after a missed
+            // sync): the bank check again, cache first like at start (R6-1, R2-3); ends with terminate()
+            while (!stop_warm_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (!stop_warm_ && start_bank_check())
+                    sync_banks(false);
+                if (!stop_warm_)
+                    file_late_dumps();
+            }
         });
     }
     if (state && !state_loaded_ && !default_.empty()) { // new instance: the original's default project
@@ -1556,6 +1844,11 @@ void VirusPlugin::check_latency()
             out_->log("Virus TI native: latency now %lld samples, the host last read %lld - announced again\n",
                       (long long)now, (long long)read);
         componentHandler->restartComponent(kLatencyChanged);
+    } else if (latency_watch_.nudge(active_.load(), out_ && out_->audio_ready(), read, now) && componentHandler) {
+        if (out_)
+            out_->log("Virus TI native: latency %lld samples announced once more after the latency settled (host read %lld)\n",
+                      (long long)now, (long long)read);
+        componentHandler->restartComponent(kLatencyChanged);
     }
 }
 
@@ -1586,7 +1879,7 @@ tresult PLUGIN_API VirusPlugin::setupProcessing(ProcessSetup &setup)
 {
     block_ = setup.maxSamplesPerBlock;
     rate_ = setup.sampleRate;
-    apply_timing_mode(false); // Plugin Latency 1/2 follow the block (3 blocks at least, E477)
+    apply_timing_mode(false); // the low-latency option's lead follows the block (E496)
     if (out_) // the audio start and setActive ask for it (rate following, design-rate.md step 5)
         out_->want_rate = virus_rate_for(rate_);
     // the Virus runs at 44.1 or 48 kHz (E323); other host rates get its audio resampled. Converters for both Virus
@@ -1629,18 +1922,16 @@ int VirusPlugin::state_part(const std::string &path, int part) const
     return part > 15 || (p && p->part == "none") ? -1 : part;
 }
 
-// Live Mode / Plugin Latency in force (stamprule.h timing_mode): the lead and the F5s change, the host gets the new
+// Live Mode in force (stamprule.h timing_mode): the lead and the F5s change, the host gets the new
 // latency, and the Virus gets B0 78 00 as from the original at every switch (E449). Only while the transport is
 // stopped by the editor's condition, as in the original; a latency change moves the read position, so it clicks once
 void VirusPlugin::apply_timing_mode(bool notify)
 {
     const bool live = ui_value(LIVE_MODE_PATH, -1) == 1;
-    int n = ui_value(PLUGIN_LATENCY_PATH, -1);
-    if (n < 0 || n > 3)
-        n = 3;
+    const int n = 3; // Plugin Latency: no control sets it, the original keeps it at Normal (E452, E468)
     // the base lead: the original's 3072, or with the low-latency option the lead measured for this block (E496)
     const int base = low_latency_ ? experimental_lead(block_, virus_rate_for(rate_)) : timing_a_;
-    const TimingMode m = timing_mode(live, n, base, block_); // Plugin Latency 1/2: 3 blocks at least (E477)
+    const TimingMode m = timing_mode(live, n, base, block_);
     if (m.a == a_now_.load() && m.stamps == stamps_now_)
         return;
     a_now_ = m.a;
@@ -1839,10 +2130,8 @@ bool VirusPlugin::has_history() const
 
 bool VirusPlugin::diag_enabled()
 {
-    static int on = -1;
-    if (on < 0)
-        on = vti::cc::plugin_log_enabled() ? 1 : 0; // on unless diag.off (since 0.8.41, the Options page switch)
-    return on == 1;
+    static const bool on = vti::cc::plugin_log_enabled(); // on unless diag.off (since 0.8.41, the Options page switch)
+    return on;
 }
 
 void VirusPlugin::note_probe_flush()
@@ -1907,6 +2196,10 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             }
         }
     } process_timer{this, data.numSamples};
+    const int64_t prev_block = out_ ? out_->processed_ms() : -1; // before this one: the echo window of idle_edits_ (T13)
+    if (out_ && data.numSamples > 0) // #51: which instance the DAW plays (a flush with no samples does not count)
+        out_->note_processed(
+            std::chrono::duration_cast<std::chrono::milliseconds>(process_timer.t0.time_since_epoch()).count());
     host_playing_.store(data.processContext && (data.processContext->state & ProcessContext::kPlaying),
                         std::memory_order_relaxed); // the sync error page: shown while playing, cleared by Play
     if ((data.processContext && (data.processContext->state & ProcessContext::kPlaying)) ||
@@ -1922,7 +2215,12 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         sc_[vidx(vrate)].reset();
         fe_.set_rate(vrate);
         tl_follow_.set_window(vrate / 2);
+        tl_follow_.set_margin(timing_m()); // the pull-back guard of #51 knows the read margin (VTI_NATIVE_MARGIN)
     }
+    // #37 (E589): the stamp lead above the safety net's floor is room for the timeline to sit behind the ring (a
+    // Play burst's rest stays instead of being faded on the first notes). Every block: Live Mode / the block size
+    // change the lead from another thread (apply_timing_mode, a_now_), and the follower is this thread's
+    tl_follow_.set_room(keep_rest_ ? timing_a() - DeviceOut::floor_min : 0); // 0: off (Control Center option)
     int64_t newest = ring_newest();
     if (out_ && out_->generation.load() != generation_seen_) { // the Virus came back: a new audio stream
         generation_seen_ = out_->generation.load();
@@ -1955,7 +2253,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         // found (at most 6 s later; without a marker the stamps stay relative to the ring)
         bool quiet = out_->last_sound.load() < newest - vrate;
         bool anchor_now = !tl_valid_ ? newest - stream_start_ > vrate / 2 && (quiet || newest - stream_start_ > 6 * vrate)
-                                     : std::llabs(err) > 8192;
+                                     : std::llabs(err) > 8192 && !tl_follow_.expects(err); // not a pre-shift (#37)
         // no marker (the Virus was not silent): ping again once it is quiet and the host is not playing (3 tries)
         if (tl_valid_ && !anchor_now && out_->marker.load() == -2 && !out_->calibrating() && marker_retries_ < 3 && quiet &&
             now_ms() - last_play_ms_.load(std::memory_order_relaxed) > 2000 && !env_no_ping()) {
@@ -1967,17 +2265,19 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         bool resync = tl_valid_ && !anchor_now && !out_->calibrating() && !env_no_ping() && resync_.due(newest, quiet);
         if (resync)
             anchor_now = true;
+        // setActive(1) counts from this block on, whichever way it goes: REAPER's Play block can be an anchor block (E351)
+        if (reactivated_.exchange(false, std::memory_order_relaxed))
+            tl_follow_.activated();
         if (anchor_now) {
             if (env_stats() || resync)
-                fprintf(stderr, "timeline %s: err %lld newest %lld block %d\n",
-                        resync ? "resync" : tl_valid_ ? "re-anchor" : "anchor", (long long)err, (long long)newest,
-                        data.numSamples);
+                out_->note_timeline({resync ? "resync" : tl_valid_ ? "re-anchor" : "anchor", err, newest, data.numSamples});
             resync_.start(newest);
             tl_ = target;
             next_tick_ = (double)tl_;
             transport_.reset(); // the new F8 grid is off the beat: the next playing block restarts on a tick (E505)
             restart_.clear();
-            tl_follow_.reset();
+            tl_follow_.anchor();
+            xfade_.stop();
             bool new_stream = !tl_valid_;
             if (new_stream)
                 marker_retries_ = 0; // a new stream (start, the Virus came back)
@@ -1996,13 +2296,32 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             tl_ += mv.delta;
             next_tick_ += (double)mv.delta;
             restart_.shift(mv.delta);
-            if (mv.jump) {
+            if (mv.jump && mv.fade) { // a move forward (a host xrun's catch-up, E579; every one since E589): the
+                xfade_.start(mv.delta); // reads below fade from the old position
+                out_->tl_fades.fetch_add(1, std::memory_order_relaxed);
+                out_->note_timeline({"fade", err, mv.delta, data.numSamples});
+                rs_valid_ = false; // the resampled read jumps to the new position too, and fades the same way
+            } else if (mv.jump) {
+                xfade_.stop();
+                if (env_stats())
+                    out_->note_timeline({"jump", err, mv.delta, data.numSamples});
                 out_->anchors.fetch_add(1, std::memory_order_relaxed);
                 // the resampled output (host rate != 44.1 kHz) jumps too: steering at 0.2 % took >10 s for the
                 // ~1000 frames after a render in REAPER - notes late, then catching up (user, L3; E279)
                 rs_valid_ = false;
-            } else if (mv.delta != 0)
+            } else if (mv.delta != 0) {
                 out_->tl_steps.fetch_add(1, std::memory_order_relaxed);
+                // a one-frame step read hard skips or repeats a frame: a click per block, the metallic sound of #37
+                // and E579. The direct read fades it like a catch-up (delta 1); the resampled read steers its
+                // position smoothly already (read_resampled), a fade there would start one frame off
+                if (mv.fade && !resampling())
+                    xfade_.start(mv.delta);
+            }
+            if (const int64_t rest = tl_follow_.rest(); rest != rest_seen_) { // what stays behind now, for the log
+                if (rest != 0)
+                    out_->note_timeline({"kept", err, rest, data.numSamples});
+                rest_seen_ = rest;
+            }
         }
     }
     // automation takes at most 96 slots and clock/bend/aftertouch a few dozen, so notes always keep 100+; what does
@@ -2036,6 +2355,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             add(3072, ping, 11);
         }
     }
+    // one of our dump requests is out (MemorySync, research T9): clock and automation wait
+    const bool request_open = sync_ && sync_->request_open();
     // MIDI clock at the host tempo (120 BPM without a process context), 24 ticks per quarter
     const double tempo = clock_tempo(data.processContext && (data.processContext->state & ProcessContext::kTempoValid)
                                          ? data.processContext->tempo
@@ -2051,6 +2372,15 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         const auto ev = transport_.update(playing, ppq, (double)block_frames / vrate * tempo / 60.0,
                                           (int64_t)data.processContext->projectTimeSamples, data.numSamples);
         if (ev == TransportWatch::Start) {
+            // a Play from a stop: back by the last Play's burst before this one comes, so its reads hit frames that
+            // are there and nothing jumps after it (#37, E573; TimelineFollow::play_started)
+            if (const int64_t pre = tl_follow_.play_started(transport_.from_stop()); pre != 0) {
+                tl_ += pre;
+                restart_.shift(pre);
+                rs_valid_ = false;
+                xfade_.stop(); // a hard move: the old position of a fade is no longer pos - delta
+                out_->note_timeline({"preshift", tl_valid_ ? ring_newest() - S - tl_ : 0, pre, data.numSamples});
+            }
             const TransportStart st = transport_start(ppq, per_tick);
             const int64_t at_tick = tl_ + (int64_t)std::lround(st.offset);
             restart_.arm(st, at_tick); // goes out with the block that holds its tick (PendingRestart)
@@ -2066,18 +2396,32 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             add(restart_.stamp(), restart_.f2(), 3);
             add(restart_.stamp(), restart_.tick(), 11);
         }
+        // no F8 while a dump request is open (research T9, R9-3): each one can make the DSP queue a sync report
+        // behind the answer in its one send FIFO (E251), the original sends none while busy. Their F5 stamps go with
+        // them; the stamp clock is the DSP's own (E245-E247), so notes keep their timing
         static const uint8_t f8 = 0xF8;
-        while (next_tick_ < (double)(tl_ + block_frames)) {
-            add((int64_t)std::lround(next_tick_), &f8, 1);
-            next_tick_ += per_tick;
-        }
-        static const uint8_t fe = 0xFE; // Active Sensing every 300 ms, like the original (E025); see keepalive.h
+        // and none for a whole bank sync, like the original while busy (E161)
+        next_tick_ = clock_ticks(next_tick_, (double)(tl_ + block_frames), per_tick,
+                                 request_open || syncing_.load(std::memory_order_relaxed),
+                                 [&](int64_t t) { add(t, &f8, 1); });
+        // FE stays: notes play during a request outside a sync, and the DSP releases every voice ~1.1 s after the last FE (E237);
+        // an answer can take up to 10 s. FE triggers no sync report (only F8 does, E251)
+        static const uint8_t fe = 0xFE; // Active Sensing every 300 ms, always (the original: idle host only, E602)
         fe_.run(tl_ + block_frames, [&](int64_t t) { add(t, &fe, 1); });
     }
     auto at = [&](int32 offset) { return tl_valid_ ? tl_ + (int64_t)std::lround(offset * ratio) : -1; };
     if (live_notes_ && out_) { // both under the test: without the Access files out_ is null (no_access_files)
         out_->live_ratio.store(ratio, std::memory_order_relaxed);
-        out_->live_s.store(S, std::memory_order_relaxed);
+        // a live stamp counts from the newest frame: the timeline is S and the kept rest (E589) behind it
+        out_->live_s.store(S + (int)tl_follow_.rest(), std::memory_order_relaxed);
+    }
+    // R7-3: a part's single dump was queued (patch load, state): what still waits of it from before goes, else it would
+    // overwrite the new patch; before this block's changes, which came after the load and stay
+    if (const uint32_t loaded = out_ ? out_->take_loaded_parts() : 0) {
+        drop_pending(params_, loaded);
+        for (int ch = 0; ch < 16; ch++)
+            if (loaded >> ch & 1)
+                mapped_.drop_loaded(ch);
     }
     if (data.inputParameterChanges && out_) {
         for (int32 i = 0; i < data.inputParameterChanges->getParameterCount(); i++) {
@@ -2096,7 +2440,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                     if (PedalSwitch::pedal(ctl)) { // a switch: at once, on a flip only (hostmidi.h)
                         if (pedals_.flips(ch, ctl, m[2]))
                             add(at(offset), m, n);
-                    } else if (mapped_.set(ch, ctl, m, n, offset, block_no_) && !automation_.push(id)) {
+                    } else if (mapped_.set(ch, ctl, m, n, offset, block_no_) && // CCs get the 20 ms floor of the
+                               !automation_.push(id, ctl < 0x80)) { // original's gate (T20), bend and aftertouch not
                         mapped_.take(ch, ctl, gone); // queue full: not waiting, or it would never go out
                     }
                     if ((m[0] & 0xF0) == 0xB0 && m[1] == 64)
@@ -2117,7 +2462,9 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             int value = (int)std::lround(v * 127); // the original's automation scale (docs/formats.md)
             if (const Parameter *p = dev_.find(it->second.path))
                 value = std::min(std::max(value, p->min), p->max);
-            // coalesce: only the latest value per parameter waits for the budget below
+            if (idle_edits_.from_host(id, value, prev_block)) // an editor edit the worker sent while we were idle (T13)
+                continue;
+            // coalesce: only the latest value per parameter waits for the budget below (and its 20 ms, T20)
             if (it->second.pending >= 0 || automation_.push(id))
                 it->second.pending = value;
             size_t w = pu_w_.load(std::memory_order_relaxed); // part dump update: off the audio thread
@@ -2127,10 +2474,12 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             }
         }
     }
-    // send waiting automation within the budget, oldest first (at the block start)
+    // send waiting automation within the budget, oldest first (at the block start). Not while a dump request is open
+    // (research T9, R4-2: the original sends automation only after its queued SysEx): it keeps coalescing, the latest
+    // value per parameter goes after the answer, at most the burst at once. Pedals above go at once (notes play)
     automation_.refill(data.numSamples, rate_);
     if (out_)
-        automation_.drain(96 - evs.n, [&](uint32_t id) {
+        automation_.drain(request_open ? 0 : 96 - evs.n, [&](uint32_t id) {
             if (id >= MIDI_MAP_BASE) { // a mapped controller: at its own offset if it came in this block
                 MappedPending::Slot sl;
                 if (!mapped_.take((int)((id - MIDI_MAP_BASE) >> 12) & 15, (int)(id & 0xFFF), sl))
@@ -2150,6 +2499,11 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             return true;
         });
     if (data.inputEvents && out_) {
+        // the Virus is still busy with the start-up messages and the state, or with a project loaded while running
+        // (R8-1): note-ons would be late and land under patches that change. During a bank sync or check they are
+        // dropped like the original's (E161): a clean sync, no request delays notes (E144) and none waits for them
+        const bool hold_ons = starting_.load(std::memory_order_relaxed) || syncing_.load(std::memory_order_relaxed) ||
+                              state_hold_.holding(out_->busy(), now_ms());
         for (int32 i = 0; i < data.inputEvents->getEventCount(); i++) {
             Event e;
             if (data.inputEvents->getEvent(i, e) != kResultOk)
@@ -2166,10 +2520,9 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                 r.playing = host_playing_.load(std::memory_order_relaxed);
                 note_probe_.push(r);
             }
-            if (e.type == Event::kNoteOnEvent && starting_.load(std::memory_order_relaxed))
-                continue; // the Virus is still busy with the start-up messages and the state (notes would be late)
+            if (e.type == Event::kNoteOnEvent && hold_ons)
+                continue;
             if (e.type == Event::kNoteOnEvent) {
-                last_note_ms_.store(now_ms(), std::memory_order_relaxed);
                 uint8_t m[3] = {(uint8_t)(0x90 | (e.noteOn.channel & 15)), note7(e.noteOn.pitch),
                                 std::max<uint8_t>(1, data7(e.noteOn.velocity))};
                 evs.add(at(e.sampleOffset), m, 3,
@@ -2254,6 +2607,22 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                     out_->generation.fetch_add(1, std::memory_order_relaxed);
                 }
                 out_->audio().read_at(o1[0], o1[1], o2[0], o2[1], data.numSamples, pos, l3, r3);
+                if (const int k = xfade_.frames(data.numSamples)) { // a catch-up: fade in from the old position
+                    const int64_t old = pos - xfade_.delta();
+                    if (pulled_back || !Crossfade::readable(old, k, avail, VTI_AUDIO_RING)) {
+                        if (std::llabs(xfade_.delta()) > 1) // a one-frame step is no catch-up: not in "fades (cut)"
+                            out_->tl_fades_cut.fetch_add(1, std::memory_order_relaxed);
+                        xfade_.stop(); // the old audio is not in the ring (or this read is not the timeline's): hard
+                    }
+                    else {
+                        float(*b)[Crossfade::LEN] = xfade_buf_;
+                        out_->audio().read_at(b[0], b[1], b[2], b[3], k, old, l3 ? b[4] : nullptr, l3 ? b[5] : nullptr);
+                        float *dst[6] = {o1[0], o1[1], o2[0], o2[1], l3, r3};
+                        for (int c = 0; c < (l3 ? 6 : 4); c++)
+                            xfade_.mix(dst[c], b[c], k);
+                        xfade_.advance(k);
+                    }
+                }
                 int64_t margin = avail - (pos + data.numSamples); // < 0: frames not there yet (silence)
                 if (margin < out_->read_margin_min.load(std::memory_order_relaxed))
                     out_->read_margin_min.store(margin, std::memory_order_relaxed);
@@ -2492,6 +2861,25 @@ void VirusPlugin::read_resampled(float **o1, float **o2, float **o3, int n, doub
     float *dst[6] = {o1[0], o1[1], o2[0], o2[1], o3 ? o3[0] : nullptr, o3 ? o3[1] : nullptr};
     for (int c = 0; c < (o3 ? 6 : 4); c++)
         resampler_[vidx(vrate_seen_)].process(rs_src_[c].data(), first, rs_pos_, step, dst[c], n);
+    if (const int k = xfade_.frames(n)) { // a catch-up (E579): fade in from the old position, resampled the same way
+        const double old = rs_pos_ - (double)xfade_.delta();
+        int64_t f;
+        int c2;
+        Resampler::frames_needed(old, step, k, f, c2);
+        if (c2 > (int)rs_src_[0].size() || !Crossfade::readable(f, c2, newest, VTI_AUDIO_RING)) {
+            xfade_.stop(); // the old audio is not in the ring: a hard jump
+            out_->tl_fades_cut.fetch_add(1, std::memory_order_relaxed);
+        }
+        else {
+            out_->audio().read_at(rs_src_[0].data(), rs_src_[1].data(), rs_src_[2].data(), rs_src_[3].data(), c2, f,
+                                  o3 ? rs_src_[4].data() : nullptr, o3 ? rs_src_[5].data() : nullptr);
+            for (int c = 0; c < (o3 ? 6 : 4); c++) {
+                resampler_[vidx(vrate_seen_)].process(rs_src_[c].data(), f, old, step, xfade_buf_[c], k);
+                xfade_.mix(dst[c], xfade_buf_[c], k);
+            }
+            xfade_.advance(k);
+        }
+    }
     int64_t margin = newest - (int64_t)std::ceil(rs_pos_ + (n - 1) * step + Resampler::HALF);
     if (margin < out_->read_margin_min.load(std::memory_order_relaxed))
         out_->read_margin_min.store(margin, std::memory_order_relaxed);
@@ -2527,6 +2915,24 @@ void VirusPlugin::drain_param_updates()
         if (it != params_.end())
             set_part_value(it->second.part, it->second.path, kv.second);
     }
+}
+
+// T13 (R7-4): the editor's edits of automatable parameters while the host calls no process(): the same message as
+// process() builds, as an unstamped queued message (no timeline without blocks), held while a dump request is open (T9)
+// and dropped for a part loaded meanwhile (R7-3); queued messages wait for a dump in pieces (T10)
+void VirusPlugin::send_idle_edits()
+{
+    idle_edits_.drop_parts(out_->take_loaded_idle());
+    idle_edits_.pump(now_ms(), out_->processed_ms(), sync_ && sync_->request_open(), [this](uint32_t id, int value) {
+        auto it = params_.find(id);
+        if (it == params_.end())
+            return false;
+        auto msg = dev_.encode(it->second.path, value, it->second.part);
+        if (msg.empty())
+            return false;
+        out_->send(msg);
+        return true;
+    });
 }
 
 IPlugView *PLUGIN_API VirusPlugin::createView(FIDString name)
@@ -2805,6 +3211,23 @@ void VirusPlugin::end_compare(int part)
     ui_dirty_ = true;
 }
 
+// R7-2: while comparing, state_ holds the compared patch but the project keeps the edit; a SAVE, copy or rename must
+// act on the edit, so the part goes back to it first (as Compare off does), and the Virus plays what was stored
+void VirusPlugin::back_to_edit(int part)
+{
+    std::vector<uint8_t> edited;
+    {
+        std::lock_guard<std::mutex> lk(compare_mu_);
+        if (!compare_.stop(part, edited))
+            return;
+    }
+    NoUndo g; // the edit was the part's sound before Compare: no new step
+    t_keep_reference++;
+    load_dump(edited, part);
+    t_keep_reference--;
+    ui_dirty_ = true;
+}
+
 bool VirusPlugin::arp_action(int part, int action)
 {
     if (action < 0 || action >= ARP_ACTION_COUNT || part < 0 || part > 15)
@@ -2873,9 +3296,9 @@ void VirusPlugin::ui_set(const std::string &path, int part, int value)
                 arp_action(part, b.second);
             return;
         }
-    if (path == LIVE_MODE_PATH || path == PLUGIN_LATENCY_PATH) { // the original's timing switches (stamprule.h)
-        // Live Mode only while stopped, as the original's editor allows it: enforced here too, not only by greying
-        if (path == LIVE_MODE_PATH && host_playing_.load(std::memory_order_relaxed)) {
+    if (path == LIVE_MODE_PATH) { // the original's timing switch (stamprule.h)
+        // only while stopped, as the original's editor allows it: enforced here too, not only by greying
+        if (host_playing_.load(std::memory_order_relaxed)) {
             ui_dirty_ = true;
             return;
         }
@@ -2961,6 +3384,9 @@ void VirusPlugin::ui_set(const std::string &path, int part, int value)
         }
     auto id = ids_.find({path, part});
     if (id != ids_.end()) { // automatable: through the host, which hands it to process()
+        // and from the worker if the host does not call process() (T13); a standard controller survives a load (R7-3)
+        if (auto pm = params_.find(id->second); pm != params_.end())
+            idle_edits_.edit(id->second, value, pm->second.standard ? -1 : pm->second.part, now_ms());
         setParamNormalized(id->second, value / 127.0);
         edit_gestures_.edit( // one gesture per drag, else begin + perform + end (editgestures.h)
             id->second, value / 127.0, [this](uint32_t i) { beginEdit(i); },
@@ -3202,7 +3628,8 @@ void VirusPlugin::send_remote(const std::vector<std::vector<uint8_t>> &records)
         return;
     for (auto &r : records)
         if (!r.empty())
-            out_->send(r, 3); // the original's cable for template records (E199)
+            out_->send(r, 3, true); // the original's cable for template records (E199); kept while away (R6-3):
+                                    // the template file holds them, not the state
 }
 
 void VirusPlugin::choose_remote_template(int t)
@@ -3226,7 +3653,7 @@ void VirusPlugin::choose_remote_template(int t)
     // "Global Patch Select/Remote Patch" = t first (Bank F global, 73 00 6C t), then the template (E199)
     if (out_)
         if (auto msg = dev_.encode("Global Patch Select/Remote Patch", t, 0); !msg.empty())
-            out_->send(msg);
+            out_->send(msg, CABLE_PLUGIN, true); // not in the state either: kept while away like the records (R6-3)
     send_remote(records);
 }
 
@@ -3464,32 +3891,10 @@ void VirusPlugin::set_recall_progress(int v)
 
 bool VirusPlugin::wait_until_quiet()
 {
-    // playing has priority: no dump request while notes arrive (the Virus delays notes behind requests, E144). After
-    // 30 s of pauses in total a short gap is enough for the next request, so constant playing cannot block the sync.
-    bool shown = false;
-    const int64_t t0 = now_ms();
-    auto gap = [&] { return sync_paused_ms_ + (now_ms() - t0) >= 30000 ? 300 : 1500; };
-    while (!stop_warm_ && now_ms() - last_note_ms_.load(std::memory_order_relaxed) < gap()) {
-        if (!shown) {
-            if (ui_value("VirusControl/InitialSyncProgress", -1) < 127) // only during a real sync, not a bank check
-                set_lcd("Bank sync paused (playing)", std::string(), std::string(), std::string());
-            sync_paused_ = true;
-            ui_dirty_ = true; // the note on the sync page
-            shown = true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    // a dump in pieces (dumppacer.h): a request between its pieces would land in the host CPU's dump parse
+    // a dump in pieces (dumppacer.h): a request between its pieces would land in the host CPU's dump parse. Notes do
+    // not pause the sync any more: like the original (E161) the sync drops them (process(), syncing_)
     while (!stop_warm_ && out_ && out_->dumping())
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    if (shown) {
-        sync_paused_ = false;
-        ui_dirty_ = true;
-        sync_paused_ms_ += now_ms() - t0;
-        if (out_)
-            out_->log("Virus TI native: bank sync paused %.1f s for notes (%.0f s in total)\n", (now_ms() - t0) / 1000.0,
-                      sync_paused_ms_ / 1000.0);
-    }
     return !stop_warm_;
 }
 
@@ -3527,7 +3932,12 @@ void VirusPlugin::wait_virus_ready()
         set_recall_progress(meter.update(out_->queued()));
     }
     set_recall_progress(RecallMeter::SENT);
-    probe_virus_ready();
+    if (!probe_virus_ready() && !out_->has_virus()) { // handed over meanwhile (#51, E591 (2)): as if no Virus at start
+        absent_at_start_ = !stop_warm_;
+        ready_ = true;
+        set_recall_progress(127);
+        return;
+    }
     ready_ = true;
     // process() anchors now and sends the ping (0.5 s of stream, 1 s of silence); notes stay held until its marker
     // is found, so the first notes are stamped on the Virus' clock (at most 3 s, else stamps stay ring-relative)
@@ -3541,12 +3951,58 @@ void VirusPlugin::wait_virus_ready()
 
 bool VirusPlugin::probe_virus_ready()
 {
+    // no Virus here (handed over to the played instance, #51, or waiting): nothing to probe, and no false "no reply"
+    // (E591 (2)); when this instance gets the Virus, its start-up (on_device -> after_reconnect) probes then
+    if (!out_->has_virus())
+        return false;
     const int64_t tp = now_ms();
-    // one try: a second request behind a slow first one would only lengthen the Virus' backlog
+    // one try: a second request behind a slow first one would only lengthen the Virus' backlog. It goes out when the
+    // queue (start-up messages, state) is empty, the 10 s count from then (MemorySync::sending, E591)
     Dump r = sync_->transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 1);
+    // handed over or gone while it waited (R6-2): ended at once, not a Virus that did not answer
+    if (r.empty() && (!out_->has_virus() || !out_->connected())) {
+        out_->log("Virus TI native: readiness probe stopped after %.1f s, the Virus went %s\n", (now_ms() - tp) / 1000.0,
+                  out_->has_virus() ? "away" : "to another instance");
+        return false;
+    }
     out_->log("Virus TI native: Virus ready after %.1f s%s\n", (now_ms() - tp) / 1000.0,
               r.empty() ? " (no reply to the probe)" : "");
+    if (!r.empty()) // the Virus is there and ready: check its RAM banks (again), like the original at every connection
+        bank_check_.request();
+    if (!r.empty() || sync_->missed()) // not a stop (closing): the plug-in's terminate() cancels the wait
+        note_answer(!r.empty());
     return !r.empty();
+}
+
+static const char *const NO_ANSWER_LCD = "The Virus does not answer";
+
+// Like the original (E591, listener 0x180086bf0 / 0x180080ba0): the first unanswered request of a connection re-sends
+// the start-up messages that set the cables the Virus answers on, then probes once more; one unanswered after that
+// shows a message. Bounded: 3 known messages once per connection (rule 2). An answer takes the message back.
+void VirusPlugin::note_answer(bool answered)
+{
+    if (answered) {
+        answers_.answered();
+        std::lock_guard<std::mutex> lk(values_mu_);
+        if (lcd_param_ == NO_ANSWER_LCD) {
+            lcd_param_.clear(), lcd_value_.clear();
+            lcd_dirty_ = true;
+        }
+        return;
+    }
+    const AnswerWatch::Action a = answers_.missed();
+    if (a == AnswerWatch::RESEND) {
+        out_->log("Virus TI native: the Virus did not answer - routing settings sent again (E591)\n");
+        for (auto &m : AnswerWatch::routing_messages(startup_messages()))
+            out_->send(m);
+        probe_virus_ready(); // goes out once the queue is empty (MemorySync::sending); a miss comes back here
+        return;
+    }
+    if (a == AnswerWatch::WARN)
+        out_->log("Virus TI native: the Virus does not answer TI Revive - switch it off and on; the RAM banks in the "
+                  "browser may be out of date (E591)\n");
+    if (answers_.warned()) // also again after a later miss: the sync's end may have cleared the display meanwhile
+        lcd_message(NO_ANSWER_LCD, "switch it off and on");
 }
 
 // The Virus is back (sender thread, after the start-up messages and the state were queued): until it has worked
@@ -3564,6 +4020,9 @@ void VirusPlugin::resend_to_virus()
 
 void VirusPlugin::after_reconnect()
 {
+    answers_.reset(); // a new connection: its own re-send of the cables if it does not answer (E591)
+    for (auto &c : ram_confirmed_) // a resume, a late first arrival: its RAM unchecked until the probe's bank check
+        c = false;
     if (!sync_)
         return;
     std::lock_guard<std::mutex> g(reconnect_mu_); // terminate() joins under it
@@ -3593,20 +4052,76 @@ void VirusPlugin::after_reconnect()
     });
 }
 
-void VirusPlugin::sync_banks()
+// the sync thread's poll (R6-1): a bank check asked for by a probe, and no RAM job runs. syncing_ is set under
+// download_mu_, where download_bank and send_ram_writes look at it, so none of them starts alongside the check
+bool VirusPlugin::start_bank_check()
+{
+    if (!bank_check_.due(ready_, starting_, downloading_))
+        return false;
+    std::lock_guard<std::mutex> g(download_mu_);
+    if (downloading_.load())
+        return false;
+    syncing_ = true;
+    return true;
+}
+
+// like the original files any single dump at any time (research R1-5/R10-6): the late answer to a given-up slot, a
+// second answer, one nobody asked for (MemorySync::has_late). Here, not on the reader thread: the cache file is
+// written. After a sync (this thread runs it, and owns sync_->unconfirmed), under download_mu_ so no RAM write or
+// download starts meanwhile; while one runs MemorySync keeps nothing (hold_late)
+void VirusPlugin::file_late_dumps()
+{
+    if (!sync_)
+        return;
+    std::lock_guard<std::mutex> g(download_mu_);
+    if (downloading_.load())
+        return;
+    for (int b = 0; b < 4; b++) {
+        if (!sync_->has_late(b + 1))
+            continue;
+        Bank bank;
+        std::string dir;
+        int n;
+        {
+            std::lock_guard<std::mutex> lk(banks_mu_);
+            auto &v = banks_[b];
+            n = sync_->file_late(b + 1, v);
+            if (n == 0) // the cache had it already (a second answer)
+                continue;
+            std::copy(v.begin(), v.begin() + 128, bank.begin());
+            dir = ram_cache_from_;
+            drop_.forget(); // the Virus' RAM is not what an undo would assume
+        }
+        if (!dir.empty() && !save_bank_file(dir + "/RAM " + (char)('A' + b), bank) && out_)
+            out_->log("Virus TI native: RAM %c: saving the bank cache failed\n", 'A' + b);
+        if (out_)
+            out_->log("Virus TI native: RAM %c: %d single dump(s) no request waited for filed into the cache (T18)\n",
+                      'A' + b, n);
+        ui_dirty_ = true;
+    }
+}
+
+void VirusPlugin::sync_banks(bool at_start)
 {
     // until the Virus is ready it works through the start-up messages and the state and plays notes up to 1.6 s late
-    // (E144), so note-ons are held back; from then on notes play, and the sync pauses while they arrive (dump requests
-    // delay the Virus' notes by ~130 ms and the sync stalls - measured 2026-10-14)
+    // (E144); then the sync runs clean like the original's (E161): note-ons and F8 are dropped until it ends
+    // (process(), syncing_), so no request delays notes by ~130 ms (measured 2026-10-14) and none waits for them
     // a RAM bank without a cache file is read in full: its "Syncing memory" page follows "Starting up" directly,
     // without the editor in between (user, L4)
-    wait_virus_ready();
-    starting_ = false;
-    if (stop_warm_ || !out_ || !out_->connected()) { // no Virus: no sync, the editor as usual
+    if (at_start) {
+        wait_virus_ready();
+        starting_ = false;
+    }
+    bank_check_.begin(); // this check covers the probes before it; one after it (a reconnect meanwhile) runs it again
+    // no Virus (also one handed over to the played instance, E591 (2)): no sync, the editor as usual
+    if (stop_warm_ || !out_ || !out_->connected() || !out_->has_virus()) {
         syncing_ = false;
         set_start_pages(127, 127);
         return;
     }
+    // what still sounds stops before the first request, like the original's All Notes Off when it turns busy (E161)
+    if (release_held_notes() > 0)
+        out_->log("Virus TI native: held notes released for the bank sync\n");
     std::string dir = bank_cache_dir();
     if (!dir.empty()) {
         std::error_code ec;
@@ -3649,6 +4164,7 @@ void VirusPlugin::sync_banks()
     // "Starting up" ends here: straight to "Syncing memory" when a read is certain (as the original), else the editor
     set_start_pages(127, sync_page_at_start(sync_expected, rom_missing) ? 0 : 127);
     sync_->before_request = [this] { return wait_until_quiet(); };
+    sync_->given_up = 0; // the original stops at the 3rd given-up slot of a sync (E594)
     const int64_t sync_t0 = now_ms();
     // like the original: its page "Syncing memory with Virus" (VirusControl/InitialSyncProgress 0..126) covers the
     // editor while banks are fetched; notes still play. Only when a patch is really fetched (startprogress.h): the
@@ -3681,6 +4197,7 @@ void VirusPlugin::sync_banks()
                 for (size_t p = 0; p < 128 && p < it->second.size(); p++)
                     bank[p] = it->second[p];
         }
+        const int fetched_before = fetched_total; // this bank's count for a stopped sync's log line
         int n = sync_->sync_bank(b + 1, bank, [this, b, &bank, sync_t0, &page, rom_missing, &empty, &fetched_total](
                                                   int p, bool fetched) {
             set_sync_progress(page.progress(b * 128 + p + 1, fetched));
@@ -3688,7 +4205,7 @@ void VirusPlugin::sync_banks()
             // "a couple of seconds", but a first sync takes 8-9 minutes (issue #5); only what is sure to be fetched
             // counts, not all 512 (one missing bank said "about 9 min" for 2, 2026-11-11)
             fetched_total += fetched;
-            sync_eta_s_ = sync_eta_s(sync_remaining(empty, b, p, rom_missing), now_ms() - sync_t0 - sync_paused_ms_,
+            sync_eta_s_ = sync_eta_s(sync_remaining(empty, b, p, rom_missing), now_ms() - sync_t0,
                                      fetched_total);
 
             if (page.shown()) {
@@ -3710,20 +4227,30 @@ void VirusPlugin::sync_banks()
             } else
                 lcd_dirty_ = true; // only the progress on the LCD (a full repaint costs ~77 ms in REAPER)
         }, &stop_warm_);
-        out_->log("Virus TI native: RAM %c sync: %d fetched\n", 'A' + b, n); // also diag.log: the sync's duration
-        if (n == -2) // closed while syncing: keep what was fetched, the next start continues
-            save_ram(b, bank);
+        if (n == -2) // "-2 fetched" hid that a stopped sync had read 46 of 82 changed slots (hil-mac 2026-11-26)
+            out_->log("Virus TI native: RAM %c sync: stopped after %d fetched (kept, the next start goes on)\n", 'A' + b,
+                      fetched_total - fetched_before);
+        else
+            out_->log("Virus TI native: RAM %c sync: %d fetched\n", 'A' + b, n); // also diag.log: the sync's duration
         result = n;
-        if (n < 0)
+        if (n == -2) { // closed while syncing: keep what was fetched, the next start continues
+            save_ram(b, bank);
+            break;
+        }
+        if (n == -1 && sync_->unconfirmed[b + 1].empty()) // no bank info: nothing read, the bank stays as loaded
             break;
         {
+            // also at -1: what was fetched, and given-up slots emptied (E594), so the next start asks for them again
             std::lock_guard<std::mutex> lk(banks_mu_);
             banks_[b].assign(bank.begin(), bank.end());
-            if (n > 0)
+            if (n != 0)
                 drop_.forget(); // the Virus' RAM changed elsewhere: an undo could write over it
+            ram_confirmed_[b] = n >= 0; // the browser's mark and the backup's reads go by it (research T2)
         }
         save_ram(b, bank);
         ui_dirty_ = true;
+        if (n < 0) // no bank info, or the 3rd given-up slot: the original stops there too (0x18008e0d0)
+            break;
     }
     // user ROM banks (E381/E382): their programs not cached yet, read like the original - no bank info, each request
     // after its own display message 74 01 7E 04 (read_missing; the capture has only 7E 04 while ROM A is read)
@@ -3783,6 +4310,17 @@ void VirusPlugin::sync_banks()
         lcd_value_.clear();
         lcd_orig_.clear();
     }
+    // the original's one message at a given-up slot ("the RAM banks ... will not correspond", 0x180080ba0, E594);
+    // before note_answer, so "The Virus does not answer" wins when both apply
+    if (sync_->given_up > 0) {
+        size_t n = 0; // with the stale slots a stop at the 3rd left unread
+        for (auto &[b, s] : sync_->unconfirmed)
+            n += s.size();
+        lcd_message("RAM banks may be out of date", std::to_string(n) + (n == 1 ? " patch" : " patches") + " not read");
+    }
+    // after the display above: a sync that ended because the Virus did not answer (not a stop or a wrong size, E591)
+    if (result >= 0 || sync_->missed())
+        note_answer(result >= 0);
     ui_dirty_ = true;
 }
 
@@ -3940,6 +4478,7 @@ bool VirusPlugin::copy_part(int from, int to)
 {
     if (from == to || from < 0 || from > 15 || to < 0 || to > 15)
         return false;
+    back_to_edit(from);
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -3999,6 +4538,7 @@ bool VirusPlugin::load_dump(std::vector<uint8_t> d, int part)
 
 bool VirusPlugin::rename_part(int part, const std::string &name)
 {
+    back_to_edit(part);
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -4023,6 +4563,20 @@ bool VirusPlugin::store_patch(int part, int bank, int program)
 {
     if (bank < 0 || bank > 3 || program < 0 || program > 127)
         return false;
+    if (ram_busy("store onto", bank, "Not saved")) // the editor ignores the result
+        return false;
+    {
+        // the slot's patch must be in the cache, else backup_ram has nothing to back up (write policy)
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        auto b = banks_.find(bank);
+        if (b == banks_.end() || program >= (int)b->second.size() || !BankDrop::is_single(b->second[program])) {
+            if (out_)
+                out_->log("Virus TI native: store onto RAM %c %d refused (RAM bank not synced?)\n", 'A' + bank, program + 1);
+            set_lcd("Not saved", std::string("RAM ") + (char)('A' + bank) + " not synced yet", std::string(), std::string());
+            return false;
+        }
+    }
+    back_to_edit(part); // after the refusals: a refused SAVE leaves the compare on
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -4035,37 +4589,17 @@ bool VirusPlugin::store_patch(int part, int bank, int program)
     if (d.empty())
         return false;
     BankDrop::address(d, bank, program); // a dump into RAM bank 1..4 = store
-    if (!backup_ram({{bank, program, d}}))
-        return false;
-    if (out_)
-        out_->send(d);
-    Bank cache;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
-        auto &b = banks_[bank];
-        b.resize(128);
-        b[program] = d;
-        for (int p = 0; p < 128; p++)
-            cache[p] = b[p];
         drop_.forget(); // an undo of an earlier drop must not write over this store
     }
-    std::string dir = bank_cache_dir();
-    if (!dir.empty()) {
-        std::error_code ec;
-        std::filesystem::create_directories(vti::u8path(dir), ec);
-        save_bank_file(dir + "/RAM " + (char)('A' + bank), cache);
-    }
-    ui_dirty_ = true;
-    return true;
+    return send_ram_writes({{bank, program, std::move(d)}});
 }
 
 bool VirusPlugin::drop_to_ram(int src_bank, const std::vector<int> &programs, int bank, int slot)
 {
-    if (syncing_.load() || downloading_.load()) { // a sync/download writes its read of the bank back: it would undo the drop's cache
-        if (out_)
-            out_->log("Virus TI native: drop onto RAM %c refused, bank sync running\n", 'A' + std::max(0, bank));
+    if (ram_busy("drop onto", bank)) // a sync/download writes its read of the bank back: it would undo the drop's cache
         return false;
-    }
     std::vector<BankDrop::Write> w;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
@@ -4088,16 +4622,16 @@ bool VirusPlugin::drop_to_ram(int src_bank, const std::vector<int> &programs, in
     }
     if (out_)
         out_->log("Virus TI native: %d patch(es) dropped onto RAM %c from %d\n", (int)w.size(), 'A' + bank, slot + 1);
-    return send_ram_writes(w);
+    return send_ram_writes(std::move(w), std::string(), [this] { // not written: its undo would write what was not there
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        drop_.forget();
+    });
 }
 
 bool VirusPlugin::swap_in_ram(int bank, const std::vector<int> &programs, int slot)
 {
-    if (syncing_.load() || downloading_.load()) { // see drop_to_ram
-        if (out_)
-            out_->log("Virus TI native: swap in RAM %c refused, bank sync running\n", 'A' + std::max(0, bank));
+    if (ram_busy("swap in", bank))
         return false;
-    }
     std::vector<BankDrop::Write> w;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
@@ -4114,14 +4648,17 @@ bool VirusPlugin::swap_in_ram(int bank, const std::vector<int> &programs, int sl
     }
     if (out_)
         out_->log("Virus TI native: %d slot(s) swapped in RAM %c with %d..\n", (int)programs.size(), 'A' + bank, slot + 1);
-    return send_ram_writes(w);
+    return send_ram_writes(std::move(w), std::string(), [this] { // see drop_to_ram
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        drop_.forget();
+    });
 }
 
 // one dump to the slot with the new name, like the original (E297 (D)); its undo is not known: an earlier drop's
 // undo is forgotten as after a SAVE
 bool VirusPlugin::rename_in_ram(int bank, int program, const std::string &name)
 {
-    if (bank < 0 || bank > 3 || program < 0 || program > 127 || syncing_.load() || downloading_.load())
+    if (bank < 0 || bank > 3 || program < 0 || program > 127 || ram_busy("rename in", bank))
         return false;
     BankDrop::Patch d;
     {
@@ -4137,7 +4674,7 @@ bool VirusPlugin::rename_in_ram(int bank, int program, const std::string &name)
     }
     if (out_)
         out_->log("Virus TI native: RAM %c %d renamed\n", 'A' + bank, program + 1);
-    return send_ram_writes({{bank, program, std::move(d)}});
+    return send_ram_writes({{bank, program, std::move(d)}}, name); // renames what the Virus holds (research T2)
 }
 
 bool VirusPlugin::save_library_file(int library)
@@ -4159,6 +4696,9 @@ bool VirusPlugin::save_library_file(int library)
 bool VirusPlugin::edit_library(int library, const char *what,
                                const std::function<LibraryEdit::Lib(const LibraryEdit::Lib &)> &op)
 {
+    PatchLibrary lib;
+    std::string err;
+    bool ok;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
         if (library < 0 || library >= (int)lib_paths_.size())
@@ -4170,12 +4710,13 @@ bool VirusPlugin::edit_library(int library, const char *what,
                 out_->log("Virus TI native: %s in library %d refused\n", what, library + 1);
             return false;
         }
-        drop_.remember_library(library, cur, after);
-        cur = std::move(after);
+        lib.name = lib_names_[library], lib.path = lib_paths_[library];
+        const LibraryEdit::Lib before = cur;
+        ok = commit_library(lib, cur, after, err); // #41: kept only when the file was written
+        if (ok)
+            drop_.remember_library(library, before, after);
     }
-    if (out_)
-        out_->log("Virus TI native: %s in library %d\n", what, library + 1);
-    bool ok = save_library_file(library);
+    library_saved(ok, lib.name, err, what); // outside banks_mu_: it takes values_mu_
     ui_dirty_ = true;
     return ok;
 }
@@ -4221,7 +4762,7 @@ bool VirusPlugin::rename_in_library(int library, int program, const std::string 
 
 bool VirusPlugin::sort_ram_bank(int bank)
 {
-    if (syncing_.load() || downloading_.load())
+    if (ram_busy("sort of", bank))
         return false;
     std::vector<BankDrop::Write> w;
     {
@@ -4233,7 +4774,7 @@ bool VirusPlugin::sort_ram_bank(int bank)
     }
     if (out_)
         out_->log("Virus TI native: RAM %c sorted, %d slot(s) written\n", 'A' + std::max(0, std::min(3, bank)), (int)w.size());
-    return w.empty() || send_ram_writes(w);
+    return w.empty() || send_ram_writes(std::move(w));
 }
 
 // the original (E301): the bank's entries are emptied, then filled one by one as the Virus answers (~1 s each); the
@@ -4241,13 +4782,18 @@ bool VirusPlugin::sort_ram_bank(int bank)
 // again keep their cached patches
 bool VirusPlugin::download_bank(int bank)
 {
-    if (bank < 0 || bank > 3 || !sync_ || !out_ || !out_->connected() || syncing_.load())
+    if (bank < 0 || bank > 3 || !sync_ || !out_ || !out_->connected())
         return false;
     std::lock_guard<std::mutex> g(download_mu_);
-    if (downloading_.exchange(true))
+    if (syncing_.load()) // under the lock: a bank check starts under it too (start_bank_check)
         return false;
+    if (downloading_.exchange(true)) { // a download or a RAM write runs (one at a time)
+        lcd_message("Not downloaded:", "the last RAM operation still runs");
+        return false;
+    }
     if (download_thread_.joinable())
         download_thread_.join(); // the previous one has ended (downloading_ was false)
+    sync_->hold_late(true); // a dump kept from before could be older than what it reads (T18)
     download_thread_ = std::thread([this, bank] {
         Bank old, cache;
         {
@@ -4288,6 +4834,8 @@ bool VirusPlugin::download_bank(int bank)
                     b[p] = old[p];
                 else
                     old[p] = cache[p];
+            if (n == 128) // every slot read from the Virus just now
+                ram_confirmed_[bank] = true;
         }
         std::string dir = bank_cache_dir();
         if (!dir.empty())
@@ -4295,9 +4843,39 @@ bool VirusPlugin::download_bank(int bank)
         if (out_)
             out_->log("Virus TI native: download of RAM %c %s\n", 'A' + bank, n == 128 ? "done" : "stopped");
         ui_dirty_ = true;
+        sync_->hold_late(false);
         downloading_ = false;
     });
     return true;
+}
+
+void VirusPlugin::check_ram_files()
+{
+    const int64_t now = now_ms();
+    if (now - ram_files_checked_ms_ < 2000 || syncing_.load() || downloading_.load())
+        return;
+    ram_files_checked_ms_ = now;
+    std::string dir;
+    {
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        dir = ram_cache_from_;
+    }
+    for (int b = 0; b < 4 && !dir.empty(); b++) {
+        const std::string path = dir + "/RAM " + (char)('A' + b);
+        Bank bank;
+        if (!ram_files_.changed(path) || !load_bank_file(path, bank))
+            continue;
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        auto &v = banks_[b];
+        if (v.size() == 128 && std::equal(v.begin(), v.end(), bank.begin()))
+            continue; // our own save (a write or download saves before downloading_ goes false)
+        v.assign(bank.begin(), bank.end());
+        ram_confirmed_[b] = false; // until the next sync: written by another program, not compared with the Virus
+        drop_.forget();            // an undo would write over what the other program wrote
+        ui_dirty_ = true;
+        if (out_)
+            out_->log("Virus TI native: RAM %c: the cache file was written by another program - reloaded\n", 'A' + b);
+    }
 }
 
 void VirusPlugin::editor_opened()
@@ -4355,26 +4933,83 @@ bool VirusPlugin::undo_drop()
     }
     if (w.empty())
         return false;
+    // nothing written (busy, or the read or the backup failed): the undo stays possible (take_undo toggles: a second
+    // call puts the state back)
+    const auto keep = [this] {
+        std::lock_guard<std::mutex> lk(banks_mu_);
+        drop_.take_undo();
+    };
+    const int bank = w[0].bank;
+    if (ram_busy("undo onto", bank)) {
+        keep();
+        return false;
+    }
     if (out_)
-        out_->log("Virus TI native: undo of the last operation, %d slot(s) of RAM %c\n", (int)w.size(), 'A' + w[0].bank);
-    if (send_ram_writes(w))
+        out_->log("Virus TI native: undo of the last operation, %d slot(s) of RAM %c\n", (int)w.size(), 'A' + bank);
+    if (send_ram_writes(std::move(w), std::string(), keep))
         return true;
-    std::lock_guard<std::mutex> lk(banks_mu_); // nothing written (the backup failed): the undo stays possible
-    drop_.take_undo();                         // (take_undo toggles: a second call puts the state back)
+    keep();
     return false;
 }
 
-bool VirusPlugin::backup_ram(const std::vector<BankDrop::Write> &w)
+// a RAM operation while the bank sync or another one (a download, a write) runs: refused, their reads and the cache
+// they write back would overlap
+bool VirusPlugin::ram_busy(const char *what, int bank, const char *lcd)
 {
-    std::vector<RamBackup::Patch> lost;
+    const bool sync = syncing_.load();
+    if (!sync && !downloading_.load())
+        return false;
+    if (out_)
+        out_->log("Virus TI native: %s RAM %c refused, %s running\n", what, 'A' + std::max(0, std::min(3, bank)),
+                  sync ? "bank sync" : "another RAM operation");
+    lcd_message(lcd, sync ? "bank sync running" : "the last RAM operation still runs");
+    return true;
+}
+
+bool VirusPlugin::backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename, std::string &where)
+{
+    where.clear();
+    std::map<int, std::vector<RamBackup::Patch>> before;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
-        std::map<int, std::vector<RamBackup::Patch>> before;
         for (auto &x : w)
             if (auto it = banks_.find(x.bank); it != banks_.end() && !before.count(x.bank))
                 before.emplace(x.bank, it->second);
-        lost = RamBackup::lost(w, before);
     }
+    // where the cache may be older than the slot, the backup comes from the Virus (research T2, which slots:
+    // RamBackup::refresh): the bank sync's own read-only request 30 bb pp (memsync.h), ~1 s per slot, one ask (the
+    // original's 10 s wait, at most 11.5 s without an answer) - on send_ram_writes' thread, outside banks_mu_. Not
+    // readable: nothing is written, as when the backup itself fails
+    BankDrop::Write failed{-1, -1, {}};
+    RamBackup::Patch cached; // what a rename was made from
+    if (w.size() == 1 && before.count(w[0].bank) && w[0].slot >= 0 && w[0].slot < (int)before[w[0].bank].size())
+        cached = before[w[0].bank][w[0].slot];
+    const auto confirmed = [this](int b) { return b >= 0 && b < 4 && ram_confirmed_[b].load(); };
+    bool shown = false;
+    const auto from_virus = [this, &shown](int b, int s) {
+        if (stop_warm_ || !sync_ || !out_ || !out_->connected() || b < 0 || b > 3)
+            return RamBackup::Patch();
+        lcd_message("Reading " + bank_name(b) + " " + std::to_string(s + 1) + "...", "for the RAM backup");
+        shown = true;
+        return sync_->single(b + 1, s, 1);
+    };
+    const bool read_ok = RamBackup::refresh(w, before, confirmed, from_virus, &failed);
+    if (read_ok && shown) // the LCD said "Reading": it says the write too
+        lcd_message(w.size() == 1 ? bank_name(w[0].bank) + " " + std::to_string(w[0].slot + 1) + " written"
+                                  : std::to_string(w.size()) + " RAM slots written",
+                    "");
+    if (read_ok && !rename.empty() && w.size() == 1)
+        RamBackup::rename_fresh(w[0], cached, before[w[0].bank][w[0].slot], rename);
+    if (!read_ok) {
+        if (out_)
+            out_->log("Virus TI native: RAM %c %d could not be read for the backup, nothing written to RAM\n",
+                      'A' + std::max(0, std::min(3, failed.bank)), failed.slot + 1);
+        lcd_message("RAM not written:", bank_name(std::max(0, std::min(3, failed.bank))) + " " +
+                                            std::to_string(failed.slot + 1) + " not readable");
+        return false;
+    }
+    // several writes: every slot they overwrite, a cut sequence must not lose a moved patch (T11)
+    const std::vector<RamBackup::Patch> lost = RamBackup::to_back_up(w, before);
     if (lost.empty())
         return true;
     char date[16] = "undated";
@@ -4439,22 +5074,52 @@ bool VirusPlugin::backup_ram(const std::vector<BankDrop::Write> &w)
             lib_roots_.push_back("Personal Libraries");
         }
         banks_[LIB_BASE + i] = lib.dumps;
+        // by name, not path: users post their logs (no home folders, AGENTS.md rule 5)
+        where += (where.empty() ? "\"" : "\" and \"") + lib.name;
         if (out_)
             out_->log("Virus TI native: RAM backup, %d patch(es) into \"%s\"\n", t.count, lib.name.c_str());
     }
+    if (!where.empty())
+        where += "\" in Personal Libraries";
     ui_dirty_ = true;
+    return true;
+}
+
+// A RAM write (SAVE, rename, drop, swap, sort, undo) runs on download_bank's thread, one RAM operation at a time
+// (downloading_): its backup may read slots from the Virus first, up to 11.5 s each when it does not answer, and the
+// DAW's UI must not wait for that (research T2). false: refused, a RAM operation runs; `on_fail` when it then writes
+// nothing (a slot not readable, the backup failed, the plug-in closing).
+bool VirusPlugin::send_ram_writes(std::vector<BankDrop::Write> w, const std::string &rename,
+                                  std::function<void()> on_fail)
+{
+    std::lock_guard<std::mutex> g(download_mu_);
+    if (stop_warm_ || ram_busy("write to", w.empty() ? 0 : w[0].bank) || downloading_.exchange(true))
+        return false;
+    if (download_thread_.joinable())
+        download_thread_.join(); // the previous one has ended (downloading_ was false)
+    if (sync_)
+        sync_->hold_late(true); // a dump kept from before could be older than what it writes (T18)
+    download_thread_ = std::thread([this, w = std::move(w), rename, on_fail]() mutable {
+        if (!write_ram(w, rename) && on_fail)
+            on_fail();
+        ui_dirty_ = true;
+        if (sync_)
+            sync_->hold_late(false);
+        downloading_ = false;
+    });
     return true;
 }
 
 // one single dump per slot, in order (the original: one after the other, no reply, E294); the dump pacer spaces
 // them on cable 3 like any dump. Then the cache and its file, like a SAVE.
-bool VirusPlugin::send_ram_writes(const std::vector<BankDrop::Write> &w)
+bool VirusPlugin::write_ram(std::vector<BankDrop::Write> &w, const std::string &rename)
 {
-    if (!backup_ram(w))
+    std::string where;
+    if (stop_warm_ || !backup_ram(w, rename, where) || stop_warm_)
         return false;
     if (out_)
         for (auto &x : w)
-            out_->send(x.dump);
+            out_->send_ram(x.dump, where); // a close lets them go out first (T11)
     std::set<int> touched;
     std::map<int, Bank> caches;
     {
@@ -4484,10 +5149,17 @@ bool VirusPlugin::create_library(const std::string &chosen)
 {
     const std::string path = library_file_name(chosen);
     std::string err;
-    if (!write_empty_library(path, err)) {
-        fprintf(stderr, "Virus TI native: %s\n", err.c_str());
+    std::error_code ec;
+    // ".mid" added here: the dialog asked about overwriting "Pads", not "Pads.mid" (zenity), so an existing one stays
+    if (path != chosen && std::filesystem::exists(vti::u8path(path), ec)) {
+        library_saved(false, vti::u8str(vti::u8path(path).stem()), "file exists", "");
         return false;
     }
+    if (!write_empty_library(path, err)) {
+        library_saved(false, vti::u8str(vti::u8path(path).stem()), err, "");
+        return false;
+    }
+    library_saved(true, vti::u8str(vti::u8path(path).stem()), err, "created (" + path + ")");
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
         auto it = std::find(lib_paths_.begin(), lib_paths_.end(), path);
@@ -4579,6 +5251,7 @@ void VirusPlugin::lcd_hint(bool on, const std::string &line1, const std::string 
 
 bool VirusPlugin::store_to_library(int part, int library, int slot)
 {
+    back_to_edit(part);
     std::vector<uint8_t> d;
     {
         std::lock_guard<std::mutex> lk(state_mu_);
@@ -4591,6 +5264,8 @@ bool VirusPlugin::store_to_library(int part, int library, int slot)
     if (d.empty())
         return false;
     PatchLibrary lib;
+    std::string err;
+    bool ok;
     {
         std::lock_guard<std::mutex> lk(banks_mu_);
         if (library < 0 || library >= (int)lib_paths_.size())
@@ -4598,19 +5273,29 @@ bool VirusPlugin::store_to_library(int part, int library, int slot)
         auto &b = banks_[LIB_BASE + library];
         if (slot < 0 || slot > (int)b.size() || slot >= 128)
             return false;
-        if (slot == (int)b.size())
-            b.push_back(d);
+        std::vector<std::vector<uint8_t>> after = b;
+        if (slot == (int)after.size())
+            after.push_back(d);
         else
-            b[slot] = d;
-        drop_.forget(); // an undo of an earlier operation must not write over this SAVE
-        lib.name = lib_names_[library], lib.path = lib_paths_[library], lib.dumps = b;
+            after[slot] = d;
+        lib.name = lib_names_[library], lib.path = lib_paths_[library];
+        ok = commit_library(lib, b, after, err); // #41: kept only when the file was written
+        if (ok)
+            drop_.forget(); // an undo of an earlier operation must not write over this SAVE
     }
-    std::string err;
-    bool ok = save_library(lib, err);
-    if (!ok)
-        fprintf(stderr, "Virus TI native: %s\n", err.c_str());
+    library_saved(ok, lib.name, err, "patch saved to slot " + std::to_string(slot + 1));
     ui_dirty_ = true;
     return ok;
+}
+
+// one log line per library write, and a failed one on the Virus display too (#41: failures went to stderr only)
+void VirusPlugin::library_saved(bool ok, const std::string &name, const std::string &err, const std::string &what)
+{
+    if (out_)
+        out_->log(ok ? "Virus TI native: library %s: %s\n" : "Virus TI native: library %s NOT saved: %s\n",
+                  name.c_str(), ok ? what.c_str() : err.c_str());
+    if (!ok)
+        lcd_message("Library not saved:", name);
 }
 
 int VirusPlugin::tick_meters(int step)
@@ -5067,6 +5752,8 @@ void VirusPlugin::apply_state_to_params(int stored)
     {
         std::lock_guard<std::mutex> lk(state_mu_);
         for (auto &r : state_) {
+            if (multi_template_) // the stored multi's Detune/Output Select; later page-0x72 records win (R8-2)
+                multi_routing_values(*multi_template_, r, parts);
             bool dump = false;
             for (int p = 0; p < 16; p++)
                 if (is_part_dump(r, p)) {
@@ -5126,15 +5813,23 @@ void VirusPlugin::send_state()
         return;
     std::lock_guard<std::mutex> lk(state_mu_);
     std::vector<std::vector<uint8_t>> recs;
-    for (auto &r : state_)
-        if (!r.empty() && !(r.size() > 2 && r[0] == 0xF0 && r[1] == 0x7D) && // not our editor-only records
-            !(!init_multi_.empty() && r.size() > 6 && r[0] == 0xF0 && r[6] == 0x11)) { // nor the stored multi: the
-            // start-up messages send the fixed table unchanged, like the original (E321)
+    for (auto &r : state_) {
+        // R8-2: the stored multi is not sent; like the original at connect (0x180070520) the fixed start-up table
+        // goes out with the project's per-part Detune and Output Select, again here only when they differ from it
+        // (the start-up messages sent the table unchanged, E321), so a default project sends what it did before
+        if (!init_multi_.empty() && r.size() > 6 && r[0] == 0xF0 && r[6] == 0x11) {
+            if (auto m = startup_multi(init_multi_, r); m != init_multi_)
+                recs.push_back(std::move(m));
+            continue;
+        }
+        if (!r.empty() && r[0] != 0xFF && // not the original's Parameter Mapping record (R8-6), no MIDI
+            !(r.size() > 2 && r[0] == 0xF0 && r[1] == 0x7D)) { // nor our editor-only records
             recs.push_back(r);
             auto &m = recs.back(); // a project's USB IO configuration: this computer's setting wins
             if (m.size() == 11 && m[0] == 0xF0 && m[6] == 0x73 && m[7] == 0x00 && m[8] == 0x09)
                 m[9] = (uint8_t)usb_io_.load();
         }
+    }
     const int n = (int)recs.size();
     const int dropped = out_->send_state(std::move(recs));
     out_->log("Virus TI native: state sent (%d messages, part 1 \"%s\", device %s)%s\n", n, part1_name(state_).c_str(),
@@ -5153,8 +5848,28 @@ tresult PLUGIN_API VirusPlugin::setState(IBStream *state)
     if (out_)
         out_->log("Virus TI native: setState %zu bytes, %zu records, part 1 \"%s\"\n", d.size(), recs.size(),
                   part1_name(recs).c_str());
-    if (recs.empty())
+    if (recs.empty()) {
+        // R8-5: unreadable (truncated, damaged): the next save writes it back as it came instead of our state, until
+        // something is edited
+        std::lock_guard<std::mutex> lk(state_mu_);
+        unread_.keep(d, state_.empty() ? default_ : state_);
+        if (out_ && !d.empty())
+            out_->log("Virus TI native: the project's state could not be read: nothing loaded, saved back unchanged "
+                      "until something is edited\n");
         return kResultFalse;
+    }
+    if (std::any_of(recs.begin(), recs.end(), [](const std::vector<uint8_t> &r) { return !r.empty() && r[0] == 0xFF; }) &&
+        out_) // R8-6: kept in the project, never sent; our automation follows automation.xml's fixed ids
+        out_->log("Virus TI native: the project holds the original's Parameter Mapping record: not used, its "
+                  "automation may move other parameters here\n");
+    // R8-6: Input/Atomizer records, removed at load like the original
+    if (int atom = drop_input_atomizer(recs); atom && out_)
+        out_->log("Virus TI native: %d Input/Atomizer record(s) in the project ignored, like the original\n", atom);
+    // R8-3: a Snow has 4 parts: no dumps or controllers for parts it does not have
+    if (int other = parts_ < 16 ? keep_parts(recs, parts_) : 0; other && out_)
+        out_->log("Virus TI native: %d record(s) for parts above %d ignored\n", other, parts_);
+    // R8-4: a project's patches are marked as not from a bank of the Virus, with fresh checksums, like the original
+    mark_project_dumps(recs);
     // a project saved by 0.8.38 or older may hold the Virus' report of its rate: sent back it switched the Virus' clock
     // at every load (E445). Gone here, so the next save is clean too
     if (int clock = drop_system_clock_globals(recs); clock && out_)
@@ -5188,11 +5903,20 @@ tresult PLUGIN_API VirusPlugin::setState(IBStream *state)
         std::lock_guard<std::mutex> lk(state_mu_);
         state_ = std::move(recs);
         state_index_data_ = nullptr; // a new list can reuse the old address with the same size (audit #21)
+        unread_.clear();
     }
     state_loaded_ = true;
     unlock_all_parts(); // a project brings no locks: the original clears them at every project load (E378)
     apply_state_to_params();
+    // loaded while running (REAPER undo, preset swaps; R8-1): what sounds stops in front of the new patches, and
+    // note-ons wait until they are out, like the original (E161). Not connected: the start-up's hold covers it
+    const bool running = out_ && out_->connected() && active_;
+    if (running && release_held_notes() > 0)
+        out_->log("Virus TI native: held notes released for the loaded project (R8-1)\n");
     send_state();
+    if (state_hold_.start(running, now_ms()))
+        out_->log("Virus TI native: note-ons held until the project is sent (at most %lld ms)\n",
+                  (long long)StateHold::LIMIT_MS);
     return kResultOk;
 }
 
@@ -5209,6 +5933,10 @@ tresult PLUGIN_API VirusPlugin::getState(IBStream *state)
     {
         std::lock_guard<std::mutex> lk(state_mu_);
         auto recs = state_.empty() ? default_ : state_;
+        if (const std::vector<uint8_t> *raw = edited.empty() ? unread_.saved(recs) : nullptr)
+            recs.clear(), d = *raw; // R8-5: the unreadable project as it came
+        else if (parts_ < 16)
+            keep_parts(recs, parts_); // R8-3: also what a Snow got from the host since
         for (auto &r : recs)
             for (auto &e : edited)
                 if (is_part_dump(r, e.first))
@@ -5223,7 +5951,8 @@ tresult PLUGIN_API VirusPlugin::getState(IBStream *state)
                    recs.end());
         if (const int s = out_ ? vti::slot_to_save(out_->found_slot(), out_->preferred_slot()) : 0) // audit 2026-11-18 #2
             recs.push_back(editor_record(VIRUS_SLOT_RECORD, 0, s));
-        d = build_container(recs);
+        if (d.empty())
+            d = build_container(recs);
     }
     int32 done = 0;
     return state->write(d.data(), (int32)d.size(), &done);

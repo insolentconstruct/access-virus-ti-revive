@@ -4,6 +4,7 @@
 #include "../access/library.h"
 #include "../device/usbmidi.h"
 #include "../model/bankdrop.h"
+#include "../model/remotedevice.h"
 #include <cctype>
 #include <chrono>
 #include <thread>
@@ -41,6 +42,17 @@ bool read_device_info(Broker &broker, DeviceInfo &info, std::string &error)
     return true;
 }
 
+bool virus_free(Broker &broker, std::string &error)
+{
+    const int o = broker.plugin_owner();
+    if (o == 0)
+        return true;
+    error = o > 0 ? "The Virus is in use by the TI Revive plug-in. Close the plug-in (or the DAW) and try again."
+                  : "The TI Revive service did not say whether the plug-in uses the Virus (it is older than this "
+                    "Control Center). Install TI Revive again, then try again.";
+    return false;
+}
+
 std::string patch_name(const Dump &d)
 {
     if (d.size() < 259)
@@ -66,21 +78,48 @@ std::string cache_dir()
 #endif
 }
 
+static std::string now_stamp()
+{
+    char stamp[32];
+    time_t t = time(nullptr);
+    strftime(stamp, sizeof stamp, "%Y-%m-%d %H%M", localtime(&t));
+    return stamp;
+}
+
 std::string default_backup_dir()
 {
     // next to the "Patches" folder, not inside it: the plug-in lists everything below Patches as libraries
     std::string lib = library_dir();
     fs::path base = lib.empty() ? fs::path("Virus TI Backups") : u8path(lib).parent_path() / "Backups";
-    char stamp[32];
-    time_t t = time(nullptr);
-    strftime(stamp, sizeof stamp, "%Y-%m-%d %H%M", localtime(&t));
-    return u8str(base / stamp);
+    return u8str(base / now_stamp());
+}
+
+static std::string slot_list(const std::vector<int> &slots)
+{
+    std::string s;
+    for (int p : slots)
+        s += (s.empty() ? "" : ", ") + std::to_string(p);
+    return s;
+}
+
+// R11-4: the programs of `b` whose fingerprint in a new bank info differs (stored since they were read or taken from
+// the cache); false when the bank info gets no answer
+static bool changed_meanwhile(MemorySync &sync, int bank, const Bank &b, std::vector<int> &changed)
+{
+    const auto info = sync.bank_info(bank);
+    changed.clear();
+    for (size_t p = 0; p < info.size() && p < 128; p++)
+        if (b[p].size() == 524 && RemoteDevice::single_fingerprint(b[p]) != info[p])
+            changed.push_back((int)p);
+    return info.size() == 128;
 }
 
 bool backup_ram(Broker &broker, const std::string &banks, const std::string &out_dir,
                 const std::function<void(int, int, bool, const Dump &)> &progress, std::string &error,
-                const std::atomic<bool> *stop)
+                const std::atomic<bool> *stop, std::string *warning)
 {
+    if (warning)
+        warning->clear();
     std::error_code ec;
     fs::create_directories(u8path(out_dir), ec);
     if (ec) {
@@ -99,6 +138,8 @@ bool backup_ram(Broker &broker, const std::string &banks, const std::string &out
         if (bank < 1 || bank > 4)
             continue;
         std::string name = std::string("RAM ") + (char)('A' + bank - 1);
+        if (!virus_free(broker, error)) // also a plug-in that started during the backup
+            return false;
         Bank b;
         if (!cache.empty())
             load_bank_file(cache + "/" + name, b);
@@ -116,6 +157,29 @@ bool backup_ram(Broker &broker, const std::string &banks, const std::string &out
             error = name + ": the Virus did not answer";
             return false;
         }
+        // not a snapshot (R11-4): what was stored during the minutes of this bank is read again, once
+        std::vector<int> changed;
+        bool asked = changed_meanwhile(sync, bank, b, changed);
+        if (asked && !changed.empty()) {
+            for (int p : changed) {
+                if (stop && *stop) {
+                    error = "cancelled";
+                    return false;
+                }
+                Dump d = sync.single(bank, p);
+                if (d.size() == 524)
+                    b[(size_t)p] = std::move(d);
+            }
+            if (!cache.empty())
+                save_bank_file(cache + "/" + name, b);
+            asked = changed_meanwhile(sync, bank, b, changed);
+        }
+        if (warning && (!asked || !changed.empty()))
+            *warning += (warning->empty() ? "" : " ") + name +
+                        (asked ? " changed during the backup (programs " + slot_list(changed) + ")"
+                               : ": the Virus did not answer whether it changed during the backup") +
+                        ", so its library may mix patches from before and after. Back it up again while nothing "
+                        "stores to the Virus.";
         PatchLibrary lib;
         lib.name = name;
         lib.path = u8str(u8path(out_dir) / u8path(name + ".mid"));
@@ -187,16 +251,54 @@ std::vector<std::vector<uint8_t>> dump_pieces(const Dump &d)
     return out;
 }
 
+// R11-3 (rule 2: a feature that overwrites stored data backs it up first): the bank as the Virus has it, as the
+// library "RAM X before restore <date time>" in the Backups folder, never over an older one; `saved` = its name
+static bool save_before(const std::string &name, const Bank &b, std::string &saved, std::string &error)
+{
+    PatchLibrary lib;
+    lib.dumps.assign(b.begin(), b.end());
+    for (auto &d : lib.dumps)
+        if (d.size() != 524) {
+            error = "the bank is not complete";
+            return false;
+        }
+    const fs::path dir = u8path(default_backup_dir()).parent_path();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec || !fs::is_directory(dir, ec)) {
+        error = ec ? ec.message() : "it is not a folder";
+        return false;
+    }
+    const std::string base = name + " before restore " + now_stamp();
+    lib.name = base;
+    for (int i = 2; fs::exists(dir / u8path(lib.name + ".mid"), ec); i++)
+        lib.name = base + " (" + std::to_string(i) + ")";
+    lib.path = u8str(dir / u8path(lib.name + ".mid"));
+    std::string detail; // names the folder: not for the message, which may go into a log (rule 5)
+    if (!save_library(lib, detail)) {
+        error = "the file could not be written";
+        return false;
+    }
+    saved = lib.name;
+    return true;
+}
+
 bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
                  const std::function<void(int, int)> &progress, int &written, std::string &error,
-                 const std::atomic<bool> *stop)
+                 const std::atomic<bool> *stop, RestoreReport *report)
 {
+    RestoreReport own;
+    RestoreReport &rep = report ? *report : own;
+    rep = RestoreReport();
     written = 0;
+    error.clear(); // the result is "no error": a caller's earlier message must not fail this run
     if (bank < 1 || bank > 4) {
         error = "only RAM banks A-D can be restored";
         return false;
     }
     const std::string name = std::string("RAM ") + (char)('A' + bank - 1);
+    if (!virus_free(broker, error))
+        return false;
     std::string cache = cache_dir();
     std::error_code ec;
     if (!cache.empty())
@@ -213,24 +315,49 @@ bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
         error = "cancelled";
         return false;
     }
-    if (n < 0) {
+    if (n < 0 || !sync.unconfirmed[bank].empty()) { // a slot given up (E594): what the Virus has there is unknown
         error = name + ": the Virus did not answer";
         return false;
     }
     auto plan = restore_plan(bank, backup, b);
+    if (plan.empty())
+        return true;
+    std::string why;
+    if (!save_before(name, b, rep.backup, why)) {
+        error = name + ": nothing written, the bank could not be saved to the Backups folder first (" + why + ")";
+        return false;
+    }
+    rep.confirmed = broker.reports_writes(); // the sync above wrote requests: a protocol-6 broker has reported them
     for (size_t i = 0; i < plan.size(); i++) {
         if (stop && stop->load()) {
             error = "cancelled";
             break;
         }
+        if (!virus_free(broker, error)) // a plug-in that started during the restore: its notes would end a dump
+            break;
+        const std::string where = name + " " + std::to_string(plan[i].slot);
+        const uint32_t unsent = broker.unsent();
+        uint32_t end = 0;
         bool ok = true;
         for (auto &piece : dump_pieces(plan[i].dump)) {
-            ok = ok && broker.write(0x06, piece.data(), piece.size());
+            ok = ok && broker.write(0x06, piece.data(), piece.size(), &end);
             std::this_thread::sleep_for(std::chrono::milliseconds(10)); // the plug-in's pace (dumppacer.h)
         }
         if (!ok) {
             error = name + ": writing to the Virus failed";
             break;
+        }
+        if (rep.confirmed) { // R11-7: counted only once the broker says the whole dump went out, bounded
+            for (int t = 0; t < 2500 && !broker.written(end); t++)
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            if (!broker.written(end)) {
+                error = where + ": the TI Revive service did not report the write within 5 s";
+                break;
+            }
+            if (broker.unsent() != unsent) {
+                error = where + ": the TI Revive service did not send it to the Virus (refused, see its log)";
+                break;
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         // read back: the Virus has the patch, the cache gets what it says
@@ -247,31 +374,36 @@ bool restore_ram(Broker &broker, int bank, const std::vector<Dump> &backup,
         }
         b[(size_t)plan[i].slot] = r;
         written++;
+        rep.slots.push_back(plan[i].slot);
         if (progress)
             progress((int)i + 1, (int)plan.size());
     }
     if (!cache.empty())
         save_bank_file(cache + "/" + name, b);
+    if (!error.empty()) // the bank may be part restored: say what and where its old content is
+        error += ". Written and read back: " + (rep.slots.empty() ? std::string("none") : name + " " +
+                 slot_list(rep.slots)) + ". The bank as it was before the restore is the library \"" + rep.backup +
+                 "\" in the Backups folder.";
     return written == (int)plan.size() && error.empty();
 }
 
 bool write_syx(const std::vector<Dump> &dumps, const std::string &path, std::string &error)
 {
-    std::string tmp = path + ".tmp";
-    {
-        std::ofstream o(u8path(tmp), std::ios::binary);
-        for (auto &d : dumps)
-            o.write((const char *)d.data(), (std::streamsize)d.size());
-        if (!o) {
-            error = "cannot write " + tmp;
-            return false;
-        }
-    }
+    const fs::path tmp = u8path(path + ".tmp");
+    std::ofstream o(tmp, std::ios::binary);
+    for (auto &d : dumps)
+        o.write((const char *)d.data(), (std::streamsize)d.size());
+    o.close(); // checked after the flush: a full disk fails only here
     std::error_code ec;
-    fs::rename(u8path(tmp), u8path(path), ec);
-    if (ec)
-        error = ec.message();
-    return !ec;
+    if (o)
+        fs::rename(tmp, u8path(path), ec);
+    if (!o || ec) {
+        error = !o ? "cannot write " + path + ".tmp" : ec.message();
+        std::error_code rm;
+        fs::remove(tmp, rm);
+        return false;
+    }
+    return true;
 }
 
 } // namespace vti::cc

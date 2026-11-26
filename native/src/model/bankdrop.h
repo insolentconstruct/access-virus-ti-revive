@@ -235,7 +235,7 @@ struct LibraryEdit {
     static Lib swap(const Lib &lib, const std::vector<int> &programs, int slot)
     {
         const int n = (int)programs.size();
-        if (n == 0 || slot < 0 || slot + n > SLOTS)
+        if (n == 0 || slot < 0 || slot + n > SLOTS || (int)lib.size() > SLOTS) // program bytes end at 127
             return {};
         std::set<int> from(programs.begin(), programs.end());
         if ((int)from.size() != n)
@@ -271,6 +271,8 @@ struct LibraryEdit {
         for (auto &d : lib)
             if (BankDrop::is_single(d))
                 r.push_back(d);
+        if ((int)r.size() > SLOTS) // program bytes end at 127
+            return {};
         std::stable_sort(r.begin(), r.end(), BankDrop::name_less);
         for (int p = 0; p < (int)r.size(); p++)
             BankDrop::address(r[p], 0, p);

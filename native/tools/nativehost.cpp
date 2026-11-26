@@ -18,8 +18,14 @@
 // the same notes; at T s the first is removed and the second takes over the Virus. --editor2 with it: the
 // duplicate's editor too (its "Virus unavailable" page while it waits); with --editor both editors are open at once,
 // as in REAPER at a duplicated track (E183: the second one replaced the process-wide VSTGUI run loop).
+// --idle-first with --duplicate: the first instance is activated but never processed, the second one is (#51,
+// Studio Pro 8 opening a song): the played one has to get the Virus.
 // --state loads a state (a raw component state, or vtihost's VTISTATE file: the original's state), checks that
 // getState returns it unchanged, --param applies parameter changes through process(), --save writes getState.
+// --play A:B (repeatable, instead of --transport/--stop-at): the transport plays from A s to B s, each Play from bar 1;
+// --reactivate: setActive(false)/(true) right before each Play, as REAPER does (E351).
+// --ppm N: the host's clock N ppm fast against its nominal rate (block period / (1 + N * 1e-6)): two clocks against the
+// Virus (#51). N > 0: the host takes more frames than the Virus sends, the err falls (the side the read margin guards).
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/eventlist.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
@@ -250,8 +256,12 @@ int main(int argc, char **argv)
     double transport_at = -1, loop_bars = 0; // --transport / --loop: a playing DAW transport for process()
     double count_in_bars = 0; // --count-in: with --transport, play from -4 x N quarters through 0 (Logic, #30)
     bool list_params = false;
-    double stop_at = 1e9;
+    double stop_at = 1e9, play_again = -1;
+    std::vector<std::pair<double, double>> plays; // --play A:B (repeatable): playing from A s to B s, each from bar 1
+    bool reactivate = false;                      // --reactivate: setActive(0)/(1) right before each --play (REAPER, E351)
+    double ppm = 0; // --ppm N: the block period divided by 1 + N * 1e-6 (a second clock against the Virus, #51)
     double duplicate = 0; // --duplicate T: remove the first of two instances after T s
+    bool idle_first = false; // --idle-first: with --duplicate the first instance is active but never processed (#51)
     double sc_sine = 0; // --sidechain-sine HZ: a sine (-6 dBFS) on the Sidechain bus (input bus 1)
     std::vector<std::pair<double, double>> aheads; // (at s, ms)
     int block = 512; // --block N: host block size
@@ -302,6 +312,18 @@ int main(int argc, char **argv)
             count_in_bars = atof(argv[++i]);
         else if (!strcmp(argv[i], "--stop-at") && i + 1 < argc) // with --transport: stop playing at T s (FC, E505)
             stop_at = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--play") && i + 1 < argc) {
+            double a = 0, e = 1e9;
+            sscanf(argv[++i], "%lf:%lf", &a, &e);
+            plays.push_back({a, e});
+            if (transport_at < 0 || a < transport_at)
+                transport_at = a;
+        } else if (!strcmp(argv[i], "--reactivate"))
+            reactivate = true;
+        else if (!strcmp(argv[i], "--ppm") && i + 1 < argc)
+            ppm = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--play-again") && i + 1 < argc) // with --stop-at: Play again from bar 1 at T s (#37)
+            play_again = atof(argv[++i]);
         else if (!strcmp(argv[i], "--list-params")) // id, title and part of every parameter, then exit (no activation)
             list_params = true;
         else if (!strcmp(argv[i], "--notes"))
@@ -341,7 +363,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--stress-params")) // only the automation of --stress
             stress = true, stress_notes = false;
         else if (!strcmp(argv[i], "--ahead") && i + 1 < argc) { // --ahead MS@T: from T s on process MS ms ahead of
-            // real time in a burst, like REAPER's anticipative FX processing after a playback start
+            // real time in a burst, like REAPER's anticipative FX processing after a playback start; MS < 0: that much
+            // behind for good, like a host xrun (cycles lost, the plug-in's timeline behind the ring, E579)
             double ms = 0, t = 0;
             sscanf(argv[++i], "%lf@%lf", &ms, &t);
             aheads.push_back({t, ms});
@@ -391,7 +414,9 @@ int main(int argc, char **argv)
             Action a{};                                           // one in the same window (a DAW's FX window)
             a.kind = 'o', a.t = atof(argv[++i]);
             actions.push_back(a);
-        } else if (!strcmp(argv[i], "--duplicate") && i + 1 < argc)
+        } else if (!strcmp(argv[i], "--idle-first")) // #51 Studio Pro: the DAW plays the second, not the first
+            idle_first = true;
+        else if (!strcmp(argv[i], "--duplicate") && i + 1 < argc)
             duplicate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--sidechain-sine") && i + 1 < argc)
             sc_sine = atof(argv[++i]);
@@ -669,13 +694,27 @@ int main(int argc, char **argv)
             pctx.sampleRate = clk.rate;
             pctx.tempo = 120.0;
             pctx.state = ProcessContext::kTempoValid | ProcessContext::kProjectTimeMusicValid;
-            double qn = t >= transport_at ? (t - transport_at) * 2.0 : 0.0;
+            double from = play_again >= 0 && t >= play_again ? play_again : transport_at;
+            bool in_play = false;
+            for (auto &pl : plays)
+                if (t >= pl.first) {
+                    from = pl.first, in_play = t < pl.second;
+                    if (reactivate && clk.seconds(b > 0 ? b - 1 : 0) < pl.first && b > 0 && proc) {
+                        proc->setProcessing(false); // REAPER: deactivate + activate right before every Play (E351)
+                        comp->setActive(false);
+                        comp->setActive(true);
+                        proc->setProcessing(true);
+                        printf("reactivated at %.3f s\n", t);
+                        fflush(stdout);
+                    }
+                }
+            double qn = t >= from ? (t - from) * 2.0 : 0.0;
             if (loop_bars > 0)
                 qn = std::fmod(qn, loop_bars * 4.0);
             qn -= 4.0 * count_in_bars; // a count-in runs on through 0, as a DAW's playing pre-roll
             pctx.projectTimeMusic = qn;
             pctx.projectTimeSamples = (TSamples)std::llround(qn / 2.0 * clk.rate); // 120 BPM: 2 quarters a second
-            if (t >= transport_at && t < stop_at)
+            if (plays.empty() ? (t >= transport_at && t < stop_at) || (play_again >= 0 && t >= play_again) : in_play)
                 pctx.state |= ProcessContext::kPlaying;
             data.processContext = &pctx;
         }
@@ -796,7 +835,7 @@ int main(int argc, char **argv)
                 if (float *s = data.inputs[1].channelBuffers32 ? data.inputs[1].channelBuffers32[c] : nullptr)
                     for (int i = 0; i < block; i++)
                         s[i] = 0.5f * (float)std::sin(2 * 3.14159265358979323846 * sc_sine * ((double)clk.frame(b) + i) / clk.rate);
-        if (proc)
+        if (proc && !(idle_first && proc2))
             proc->process(data);
         if (proc2) { // the duplicate plays the same notes (same clip on the duplicated track)
             data2.inputEvents = &ev;
@@ -863,9 +902,9 @@ int main(int argc, char **argv)
         }
         // real time at the host rate, in nanoseconds: whole microseconds rounded the period down, 0.1 % fast at 32
         // frames / 48 kHz (666 instead of 666.667 us), which the plug-in then steered out in lumps (simulator S082)
-        t_next += std::chrono::nanoseconds(std::llround(block * 1e9 / clk.rate));
+        t_next += std::chrono::nanoseconds(std::llround(block * 1e9 / clk.rate / (1 + ppm * 1e-6)));
         for (auto &ah : aheads)
-            if (ah.second > 0 && clk.seconds(b) >= ah.first) {
+            if (ah.second != 0 && clk.seconds(b) >= ah.first) {
                 t_next -= std::chrono::microseconds((long long)(ah.second * 1000));
                 printf("ahead %.0f ms at %.1f s\n", ah.second, ah.first);
                 ah.second = 0;

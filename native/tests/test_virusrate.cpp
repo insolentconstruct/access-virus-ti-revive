@@ -3,6 +3,7 @@
 // lower at 44.1 kHz; the plug-in converts the rest.
 #include "check.h"
 #include "device/virusrate.h"
+#include <limits>
 
 using namespace vti;
 
@@ -28,13 +29,6 @@ TEST(virusrate_no_host_rate_keeps_44k1)
 {
     CHECK_EQ(virus_rate_for(0), 44100);
     CHECK_EQ(virus_rate_for(-1), 44100);
-}
-
-TEST(virusrate_time_in_virus_frames)
-{
-    CHECK_EQ(frames_for_ms(44100, 300), 13230); // the keepalive period
-    CHECK_EQ(frames_for_ms(48000, 300), 14400);
-    CHECK_EQ(frames_for_ms(44100, 500), 22050);
-    CHECK_EQ(frames_for_ms(48000, 1000), 48000);
-    CHECK_EQ(frames_for_ms(44100, 1), 44); // rounded
+    CHECK_EQ(virus_rate_for(std::numeric_limits<double>::infinity()), 44100); // halving infinity never ends
+    CHECK_EQ(virus_rate_for(std::nan("")), 44100);
 }

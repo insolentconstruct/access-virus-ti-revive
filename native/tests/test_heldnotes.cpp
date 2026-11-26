@@ -63,3 +63,43 @@ TEST(heldnotes_panic_all_channels)
     h.forget();
     CHECK(h.release(m) == 0); // nothing left to release after a panic
 }
+
+// A short USB drop (research R6-4): a Virus that stays powered keeps a note whose note-off fell in the gap, as
+// process() drops its events while the Virus is away. What was held when it went is released at its return, with
+// the same messages as release() (pedal up, all notes off), once per absence.
+TEST(heldnotes_released_at_the_return_after_a_gap)
+{
+    HeldNotes h;
+    uint8_t m[32][3];
+    h.note_on(4, 60);
+    h.sustain(7, 127);
+    h.away();          // the Virus is gone
+    h.note_off(4, 60); // the host lets go during the gap: this note-off never reaches the Virus
+    h.sustain(7, 0);
+    int n = h.returned(m);
+    CHECK(n == 2);
+    CHECK(m[0][0] == 0xB4 && m[0][1] == 123 && m[0][2] == 0);
+    CHECK(m[1][0] == 0xB7 && m[1][1] == 64 && m[1][2] == 0);
+    CHECK(h.returned(m) == 0); // once: a second return without a new absence sends nothing
+}
+
+TEST(heldnotes_return_without_held_notes_sends_nothing)
+{
+    HeldNotes h;
+    uint8_t m[32][3];
+    h.away();
+    h.note_on(1, 50); // played during the gap: never reached the Virus, its note-off later is harmless
+    CHECK(h.returned(m) == 0);
+    CHECK(h.release(m) == 1); // still tracked for a later deactivation
+}
+
+TEST(heldnotes_bounce_releases_at_once)
+{
+    // gone and back between two polls (E212): away() and returned() in one go
+    HeldNotes h;
+    uint8_t m[32][3];
+    h.note_on(0, 60);
+    h.away();
+    CHECK(h.returned(m) == 1);
+    CHECK(m[0][0] == 0xB0 && m[0][1] == 123);
+}

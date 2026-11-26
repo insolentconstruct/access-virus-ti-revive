@@ -26,6 +26,24 @@ public:
         announced_ = now;
         return true;
     }
+    // #41 (E546): Logic sometimes kept an old latency although the value it read looked right. Once per instance,
+    // about 1 s after the latency settled, announce it anyway; only once, so a host that re-activates on the
+    // announcement cannot loop. Settled = `now` unchanged while active, read by the host and the Virus ready: a
+    // nudge before the Virus connects is wasted on a value that changes (Mac field log: 3085, then 2816).
+    // One call per UI timer tick
+    static constexpr int kNudgeTicks = 20; // the 50 ms UI timer: about 1 s
+    bool nudge(bool active, bool device_ready, int64_t host_read, int64_t now)
+    {
+        if (nudged_)
+            return false;
+        if (!active || !device_ready || host_read < 0 || now != nudge_value_) {
+            nudge_value_ = now;
+            nudge_ticks_ = active && device_ready && host_read >= 0; // a change counts as the new value's first tick
+            return false;
+        }
+        nudged_ = ++nudge_ticks_ >= kNudgeTicks;
+        return nudged_;
+    }
     // for the log: has the host read a value it had not read before?
     bool read_changed(int64_t host_read)
     {
@@ -36,7 +54,9 @@ public:
     }
 
 private:
-    int64_t announced_ = -1, logged_ = -1;
+    int64_t announced_ = -1, logged_ = -1, nudge_value_ = -1;
+    int nudge_ticks_ = 0;
+    bool nudged_ = false;
 };
 
 } // namespace vti

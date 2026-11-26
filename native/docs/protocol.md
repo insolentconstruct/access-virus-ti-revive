@@ -137,8 +137,10 @@ On close the original resets globals (73 00 3B/3A/3C/7A).
   stamp is behind its clock, after ticks where stamps were ahead, it sends one event - "the lead is used up", one
   per transition, not one per late note. Late stamps still play; the event asks for more lead, not for a resync.
 - Active Sensing (2026-10-18, firmware E237): the DSP arms a watchdog with the first FE it sees and releases every
-  voice about a second after the last one. The original sends FE every 0.31 s (E025); the plug-in now sends one
-  every 300 ms on the timeline (keepalive.h), the first with the anchor's FE/F2 as before.
+  voice about a second after the last one. The original sends FE at most every 300 ms, but only while the host
+  processes no audio (no block for 40 ms) or is offline/suspended, apparently only while its F8 clock is off (E602;
+  E025's 0.31 s was an idle host); the plug-in sends one every 300 ms on the timeline always (keepalive.h), the first
+  with the anchor's FE/F2 as before.
 - The stamp threshold and what the DSP parks (2026-10-19, E261/E262, corrects the first reading E238): a stamp at
   most 1023 frames ahead of the DSP's clock is parsed at once and the voice starts at the stamp (the threshold is
   the maximum per-voice scheduling delay); during a patch change the window shrinks for a moment. Only what is
@@ -178,6 +180,6 @@ On close the original resets globals (73 00 3B/3A/3C/7A).
   Core Audio nominal rate itself and follows changes by other programs.
 - The shared ring (`vtiaudioshm.h`) carries `rate` and `rate_gen` (+1 per switch, written before the first frame at
   the new rate); readers re-anchor and send a new sync ping on a new generation. Stamps are in Virus frames at the
-  current rate; the frame constants (lead, ring margins) are not scaled, time constants are (`frames_for_ms`).
+  current rate; the frame constants (lead, ring margins) are not scaled, time constants are (each where it is used, e.g. `keepalive.h` set_rate).
 - Packet sizes are judged against the wanted rate (`pktstat.h`): 43-46 frames at 44.1 kHz, 47-49 at 48 kHz; a long
   run of the other rate's sizes is the lost rate (E241: SET_CUR again, plus the global 73 00 10 with the wanted value).

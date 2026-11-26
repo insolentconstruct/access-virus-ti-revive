@@ -458,3 +458,14 @@ TEST(browserkeyload_quiet_time)
     k.cancel(); // dropped: nothing loads
     CHECK(!k.due(4000, bank, prog));
 }
+
+// review 2026-11-25 M1: a library of more than 128 patches (file order, E298) is not renumbered past 127 - program
+// bytes of 0x80 and more are no MIDI data; sort and swap refuse it (the file could not be written either)
+TEST(libraryedit_refuses_more_than_128)
+{
+    std::vector<std::vector<uint8_t>> big;
+    for (int i = 0; i < 130; i++)
+        big.push_back(patch("Big", i & 0x7F));
+    CHECK(LibraryEdit::sort(big).empty());
+    CHECK(LibraryEdit::swap(big, {0}, 1).empty());
+}

@@ -24,9 +24,10 @@ public:
 			CFDictionaryRef dict = static_cast<CFDictionaryRef> (inData);
 			CFStringRef processor = CFSTR ("Processor State");
 			CFTypeRef old = CFDictionaryGetValue (dict, CFSTR (kAUPresetDataKey));
-			if (!CFDictionaryContainsKey (dict, processor) && old && CFGetTypeID (old) == CFDataGetTypeID ())
+			CFMutableDictionaryRef m = nullptr;
+			if (!CFDictionaryContainsKey (dict, processor) && old && CFGetTypeID (old) == CFDataGetTypeID () &&
+			    (m = CFDictionaryCreateMutableCopy (nullptr, 0, dict)))
 			{
-				CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy (nullptr, 0, dict);
 				CFDictionarySetValue (m, processor, old); // no "Controller State": single component plug-in
 				ComponentResult r = AUWrapper::RestoreState (m);
 				CFRelease (m);

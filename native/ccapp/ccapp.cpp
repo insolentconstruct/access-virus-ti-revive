@@ -1,11 +1,11 @@
-// ccapp.cpp - "TI Revive Control Center": the window around src/cc/controlcenter.h (phase 1, read-only), built with
-// VSTGUI's standalone library like the plug-in's editor. One window: the connected Virus and its RAM banks, backup
-// of the RAM banks as patch libraries, export of a library (.mid <-> .syx).
+// ccapp.cpp - "TI Revive Control Center": the window around src/cc/controlcenter.h, built with VSTGUI's standalone
+// library like the plug-in's editor. One window: the connected Virus and its RAM banks, backup of the RAM banks as
+// patch libraries, restore of a RAM bank (since 0.8.30), export of a library (.mid <-> .syx).
 //
 // The work (broker requests, ~1 s per program) runs on a worker thread; a timer copies its state into the labels.
-// The broker serves one program at a time, so the app connects only while an action runs and never keeps the Virus
-// from the plug-in. Firmware/OS update, Burn To Flash, factory reset and renaming are not offered, on purpose: they
-// write the Virus' flash (AGENTS.md rule 2).
+// The app connects only while an action runs, so it never keeps the Virus from the plug-in (bank list, backup and
+// restore refuse while a plug-in owns it, virus_free). Firmware/OS update, Burn To Flash, factory reset and renaming
+// are not offered, on purpose: they write the Virus' flash (AGENTS.md rule 2).
 #include "access/accessfiles.h"
 #include "model/utf8.h"
 #include "access/library.h"
@@ -291,8 +291,8 @@ private:
         buttons_[6] = button(W - M - 230, 14, 110, kSkin, "Access look");
         button(W - M - 320, 14, 80, kOptionsBtn, "Options");
         auto *note = new CMultiLineTextLabel(CRect(M, 372, W - M, H - 10));
-        note->setText("Only Restore writes to the Virus: programs into a RAM bank, never its flash. It works next to "
-                      "your DAW (the plug-in and the Control Center share the Virus). Firmware/OS updates, Burn To "
+        note->setText("Only Restore writes to the Virus: programs into a RAM bank, never its flash. Close the plug-in "
+                      "(or the DAW) before a backup or restore. Firmware/OS updates, Burn To "
                       "Flash and factory reset are not supported, on purpose (they write the Virus' flash). Backups "
                       "open in the plug-in once their .mid files are copied into the Patches folder.");
         note->setFontColor(kDim);
@@ -418,6 +418,8 @@ private:
             snprintf(line, sizeof line, "%s %s  (USB %04x:%04x, bcdDevice %x.%02x)", di.manufacturer.c_str(),
                      di.product_name.c_str(), di.vendor, di.product, di.bcd >> 8, di.bcd & 0xFF);
             set(&Shared::device, line);
+            if (!vti::cc::virus_free(broker, err)) // the bank list is 4 requests: not next to a playing plug-in
+                return set(&Shared::status, err);
             vti::MemorySync sync(broker);
             std::string cache = vti::cc::cache_dir();
             for (int bank = 1; bank <= 4 && !stop_; bank++) {
@@ -453,7 +455,7 @@ private:
             vti::Broker broker;
             if (!connect(broker))
                 return set(&Shared::status, "Connect the Virus, switch it on and try again.");
-            std::string err;
+            std::string err, warning;
             int fetched = 0;
             bool ok = vti::cc::backup_ram(broker, "1234", out, [&](int bank, int p, bool f, const vti::Dump &d) {
                 fetched += f;
@@ -461,10 +463,10 @@ private:
                 snprintf(s, sizeof s, "Backing up RAM %c: %d / 128%s%s", 'A' + bank - 1, p + 1, f ? "  read: " : "",
                          f ? vti::cc::patch_name(d).c_str() : "");
                 set(&Shared::status, s);
-            }, err, &stop_);
+            }, err, &stop_, &warning);
             if (ok)
                 set(&Shared::status, "Backup done (" + std::to_string(fetched) + " programs read from the Virus): " +
-                                         out);
+                                         out + (warning.empty() ? "" : ". " + warning));
             else
                 set(&Shared::status, "Backup not finished: " + err);
             if (ok) // the next backup gets its own folder
@@ -546,14 +548,18 @@ private:
             status(std::string("RAM ") + b + ": checking which programs differ...");
             std::string err;
             int written = 0;
+            vti::cc::RestoreReport rep;
             bool ok = vti::cc::restore_ram(broker, bank, lib->dumps, [&](int done, int total) {
                 status(std::string("Restoring RAM ") + b + ": " + std::to_string(done) + " / " +
                                          std::to_string(total) + " written and read back");
-            }, written, err, &stop_);
+            }, written, err, &stop_, &rep);
             if (ok)
                 status(std::string("RAM ") + b + " restored from " + name + ": " +
                                          std::to_string(written) + " programs written" +
-                                         (written ? "." : " (all were the same already)."));
+                                         (written ? "." : " (all were the same already).") +
+                                         (rep.backup.empty() ? "" : " Before: \"" + rep.backup + "\" in the Backups folder.") +
+                                         (rep.confirmed ? "" : " Writes not confirmed (the TI Revive service is older "
+                                                               "than this Control Center); each one was read back."));
             else
                 status(std::string("RAM ") + b + " not restored completely (" + std::to_string(written) +
                                          " written): " + err);

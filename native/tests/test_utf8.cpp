@@ -53,6 +53,7 @@ std::vector<uint8_t> single(int n)
         m[i] = (uint8_t)((i * 7 + n * 13) & 0x7F);
     const uint8_t head[] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x10, 0x02, 0x55};
     memcpy(m.data(), head, sizeof head);
+    m[9] = 12; // a format version the Virus uses (unknown ones are not loaded)
     m[523] = 0xF7;
     return m;
 }

@@ -148,31 +148,28 @@ bool AccessFiles::load_dir(const std::string &dir, std::string &error, const cha
     return true;
 }
 
-std::vector<uint8_t> AccessFiles::find_dump(uint8_t cmd, size_t size, size_t name_at, const char *name,
-                                            std::vector<uint8_t> *binary, size_t *offset) const
+// the plug-in binary: the DLL itself (Windows) or the bundle's Mac binary; only one of them exists
+std::vector<uint8_t> AccessFiles::binary() const
 {
-    std::vector<std::string> bins = {source_};                                       // Windows: the DLL itself
-    bins.push_back(u8str(u8path(source_) / ".." / "MacOS" / "Virus Control")); // Mac: bundle binary
-    const uint8_t hdr[] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, cmd};
-    size_t nl = strlen(name);
-    for (auto &b : bins) {
+    for (const fs::path &b : {u8path(source_), u8path(source_) / ".." / "MacOS" / "Virus Control"}) {
         std::error_code ec;
-        if (!fs::is_regular_file(u8path(b), ec))
-            continue;
         std::vector<uint8_t> d;
-        read_file(b, d);
-        for (size_t i = 0; i + size <= d.size(); i++)
-            if (d[i] == 0xF0 && !memcmp(&d[i], hdr, sizeof hdr) && d[i + size - 1] == 0xF7 &&
-                !memcmp(&d[i + name_at], name, nl)) {
-                if (offset)
-                    *offset = i;
-                std::vector<uint8_t> out(d.begin() + i, d.begin() + i + size);
-                if (binary)
-                    *binary = std::move(d);
-                return out;
-            }
+        if (fs::is_regular_file(b, ec) && read_file(u8str(b), d))
+            return d;
     }
     return {};
+}
+
+// the offset of a dump in `d`: F0 00 20 33 01 10 <cmd> ... `name` at `name_at` ... F7; npos if none
+static size_t find_dump(const std::vector<uint8_t> &d, uint8_t cmd, size_t size, size_t name_at, const char *name)
+{
+    const uint8_t hdr[] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, cmd};
+    const size_t nl = strlen(name);
+    for (size_t i = 0; i + size <= d.size(); i++)
+        if (d[i] == 0xF0 && !memcmp(&d[i], hdr, sizeof hdr) && d[i + size - 1] == 0xF7 &&
+            !memcmp(&d[i + name_at], name, nl))
+            return i;
+    return std::string::npos;
 }
 
 std::vector<float> find_osc_waves(const std::vector<uint8_t> &bin)
@@ -349,75 +346,46 @@ std::vector<KnobTemplate> find_knob_templates(const std::vector<uint8_t> &bin)
     return {};
 }
 
-std::vector<KnobTemplate> AccessFiles::knob_templates() const
+std::vector<KnobTemplate> AccessFiles::knob_templates() const { return find_knob_templates(binary()); }
+
+std::vector<float> AccessFiles::osc_waves() const { return find_osc_waves(binary()); }
+
+std::vector<uint8_t> AccessFiles::init_single() const { return embedded().init_single; }
+
+std::vector<uint8_t> AccessFiles::init_multi() const { return embedded().init_multi; }
+
+const std::vector<uint8_t> &AccessFiles::default_page_b() const { return embedded().page_b; }
+
+const AccessFiles::Embedded &AccessFiles::embedded() const
 {
-    std::vector<std::string> bins = {source_};                                       // Windows: the DLL itself
-    bins.push_back(u8str(u8path(source_) / ".." / "MacOS" / "Virus Control")); // Mac: bundle binary
-    for (auto &b : bins) {
-        std::error_code ec;
-        if (!fs::is_regular_file(u8path(b), ec))
-            continue;
-        std::vector<uint8_t> d;
-        read_file(b, d);
-        auto t = find_knob_templates(d);
-        if (!t.empty())
-            return t;
-    }
-    return {};
+    // the search reads the whole plug-in binary (~15 MB): once per AccessFiles for all three, not before every RAM
+    // write (audit #18) or once per item (review M8)
+    std::call_once(embedded_once_, [this] {
+        const std::vector<uint8_t> bin = binary();
+        const size_t multi = find_dump(bin, 0x11, 267, 13, "MultiCtrl!"), off = find_dump(bin, 0x10, 524, 249, " -Init-");
+        if (multi != std::string::npos)
+            embedded_.init_multi.assign(bin.begin() + multi, bin.begin() + multi + 267);
+        if (off == std::string::npos)
+            return;
+        embedded_.init_single.assign(bin.begin() + off, bin.begin() + off + 524);
+        // where the original's upgrader copies page B from, relative to the init single: the 64-bit Windows DLL 0x400
+        // before it (E345), the Mac binary 0x2a0 after it, in both slices of the universal file (E346, FUN_000e5c00)
+        const uint32_t magic = le32(bin, 0);
+        size_t at;
+        if (bin.size() >= 2 && bin[0] == 'M' && bin[1] == 'Z' && off >= 0x400)
+            at = off - 0x400;
+        else if (magic == 0xFEEDFACF || magic == 0xBEBAFECA) // thin 64-bit / universal Mach-O
+            at = off + 0x2a0;
+        else
+            return;
+        if (at + 0x100 > bin.size())
+            return;
+        std::vector<uint8_t> t(bin.begin() + at, bin.begin() + at + 0x100);
+        if (std::all_of(t.begin(), t.end(), [](uint8_t b) { return b <= 0x7F; }))
+            embedded_.page_b = std::move(t);
+    });
+    return embedded_;
 }
-
-std::vector<float> AccessFiles::osc_waves() const
-{
-    std::vector<std::string> bins = {source_};                                       // Windows: the DLL itself
-    bins.push_back(u8str(u8path(source_) / ".." / "MacOS" / "Virus Control")); // Mac: bundle binary
-    for (auto &b : bins) {
-        std::error_code ec;
-        if (!fs::is_regular_file(u8path(b), ec))
-            continue;
-        std::vector<uint8_t> d;
-        read_file(b, d);
-        auto t = find_osc_waves(d);
-        if (!t.empty())
-            return t;
-    }
-    return {};
-}
-
-std::vector<uint8_t> AccessFiles::init_single() const { return find_dump(0x10, 524, 249, " -Init-"); }
-
-const std::vector<uint8_t> &AccessFiles::default_page_b() const
-{
-    // the search reads the whole plug-in binary (~15 MB): once per AccessFiles, not before every RAM write (audit #18)
-    std::call_once(page_b_once_, [this] { page_b_ = find_page_b(); });
-    return page_b_;
-}
-
-std::vector<uint8_t> AccessFiles::find_page_b() const
-{
-    std::vector<uint8_t> bin;
-    size_t off = 0;
-    if (find_dump(0x10, 524, 249, " -Init-", &bin, &off).empty())
-        return {};
-    // where the original's upgrader copies page B from, relative to the init single: the 64-bit Windows DLL 0x400
-    // before it (E345), the Mac binary 0x2a0 after it, in both slices of the universal file (E346, FUN_000e5c00)
-    const uint32_t magic = le32(bin, 0);
-    size_t at;
-    if (bin.size() >= 2 && bin[0] == 'M' && bin[1] == 'Z' && off >= 0x400)
-        at = off - 0x400;
-    else if (magic == 0xFEEDFACF || magic == 0xBEBAFECA) // thin 64-bit / universal Mach-O
-        at = off + 0x2a0;
-    else
-        return {};
-    if (at + 0x100 > bin.size())
-        return {};
-    std::vector<uint8_t> t(bin.begin() + at, bin.begin() + at + 0x100);
-    for (auto b : t)
-        if (b > 0x7F)
-            return {};
-    return t;
-}
-
-std::vector<uint8_t> AccessFiles::init_multi() const { return find_dump(0x11, 267, 13, "MultiCtrl!"); }
 
 #if defined(_WIN32)
 #define FIX_32BIT "run \"Set up Access Virus TI files\" from the Start menu (TI Revive)"

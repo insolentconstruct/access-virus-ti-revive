@@ -25,9 +25,6 @@ struct KeepLoaded {
 } // namespace
 #endif
 
-#ifndef VTI_NATIVE_VERSION
-#define VTI_NATIVE_VERSION "0.0.0" // set by CMake (project version)
-#endif
 #ifdef VTI_NATIVE_DROPIN
 #define VTI_NATIVE_NAME "Virus TI"
 #else

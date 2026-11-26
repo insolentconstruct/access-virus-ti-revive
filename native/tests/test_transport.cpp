@@ -27,6 +27,27 @@ TEST(transport_restart_on_play_on_a_jump_and_at_stop)
     CHECK(w.update(true, 16.25, 0.25, 512, 64) == TransportWatch::Start); // Play again
 }
 
+// #37 (E573): only a Play from a stop brings the DAW's burst; a loop restart or a jump while playing does not, and
+// neither does the restart after a re-anchor (reset)
+TEST(transport_start_tells_a_play_from_a_loop)
+{
+    TransportWatch w;
+    w.update(false, 0.0, 0.25, 0, 64);
+    CHECK(w.update(true, 0.0, 0.25, 64, 64) == TransportWatch::Start);
+    CHECK(w.from_stop());
+    CHECK(w.update(true, 0.0, 0.25, 128, 64) == TransportWatch::Start); // loop back
+    CHECK(!w.from_stop());
+    w.reset(); // a re-anchor while playing
+    CHECK(w.update(true, 0.5, 0.25, 192, 64) == TransportWatch::Start);
+    CHECK(!w.from_stop());
+    CHECK(w.update(false, 0.75, 0.25, 256, 64) == TransportWatch::Stop);
+    CHECK(w.update(true, 0.75, 0.25, 320, 64) == TransportWatch::Start);
+    CHECK(w.from_stop());
+    TransportWatch first; // the first playing block after the plug-in started: a Play
+    CHECK(first.update(true, 4.0, 0.25, 0, 64) == TransportWatch::Start);
+    CHECK(first.from_stop());
+}
+
 // the original's limits: a jump of more than 0.05 quarter, or of more than 128 samples and at least one tick (1/24)
 TEST(transport_jump_limits_like_the_original)
 {

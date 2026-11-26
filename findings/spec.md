@@ -33,7 +33,7 @@ Preset switch (E033): plugin -> Bank Select + Program Change; hardware -> device
 Routing (E039): global 0x3A = Sounddump cable, 0x3B = MIDI Data cable, 0x3C = Panel Data cable; device sends cable 1 on EP 0x85 (MI_03), cables 2/3 on EP 0x86 (MI_04). Plugin sets 3A=3, 3B=1, 3C=2, 52=1 at sync start.
 Plugin sync: 73 x29, 72 00..0F, 10 00 x16, 39 01..04, then 30 bb pp for every program of each RAM bank (~1 s per program in the VM).
 ## 7. Keepalive / clock / TI-mode requirements
-Host sends Active Sensing FE (cable 2) every ~0.31 s, F5 xx yy (cable 5) every ~0.74 s, and F8 clock (cable 2) every ~2.0 s, independently (E025). Plugin requires a host audio buffer of 64/128/256/512 samples or it reports "communication problems" (E031).
+Host sends Active Sensing FE (cable 2) every ~0.31 s (only while the host processes no audio, E602), F5 xx yy (cable 5) every ~0.74 s, and F8 clock (cable 2) every ~2.0 s, independently (E025). Plugin requires a host audio buffer of 64/128/256/512 samples or it reports "communication problems" (E031).
 ## 8. Audio configuration steps (MI_00..02)
 ## 9. State machine
 ## 10. Open questions

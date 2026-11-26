@@ -43,8 +43,8 @@ class Grid(unittest.TestCase):
         self.assertEqual(r["offgrid"], 1)
 
     def test_first_note_too_late_fails(self):
-        r = hil_check.grid([15.0493 + k for k in range(5)], 1.0, 20.0)
-        self.assertIn(("start: first note within 12 s", False),
+        r = hil_check.grid([16.0493 + k for k in range(4)], 1.0, 20.0)
+        self.assertIn(("start: first note within 15 s", False),
                       [(n, ok) for n, ok, _ in hil_check.grid_verdicts(r)])
 
     def test_from_judges_only_the_notes_after_a_wake(self):
@@ -70,7 +70,7 @@ class Grid(unittest.TestCase):
     def test_start_counts_from_since(self):
         # H6: judged from 34 s on, the first judged note at 34.05 s is on time
         r = hil_check.grid([34.05 + k for k in range(26)], 1.0, 60.0, since=34.0)
-        self.assertIn(("start: first note within 12 s", True), [(n, ok) for n, ok, _ in hil_check.grid_verdicts(r)])
+        self.assertIn(("start: first note within 15 s", True), [(n, ok) for n, ok, _ in hil_check.grid_verdicts(r)])
 
     def test_silence_fails(self):
         r = hil_check.grid([], 1.0, 20.0)

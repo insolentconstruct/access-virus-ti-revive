@@ -20,7 +20,7 @@ public:
         if (!active(part))
             ref_[part] = d;
     }
-    Patch reference(int part) const
+    Patch reference(int part) const // test hook: the tests check which reference is kept
     {
         auto it = ref_.find(part);
         return it == ref_.end() ? Patch() : it->second;

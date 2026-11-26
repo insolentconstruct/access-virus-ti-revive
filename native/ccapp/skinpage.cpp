@@ -31,11 +31,11 @@ namespace tirevive {
 namespace {
 
 // pages, as the original's expressions name them; kNerd is TI Revive's own (nerd mode in the Access look, 2026-11-15)
-enum Page { kStartup, kSelector, kBackup, kBurn, kUpdate, kNerd, kOptions }; // kNerd, kOptions: TI Revive's own
+// no Burn Flash / OS update pages: their tabs are neither drawn nor clickable (skin_node_offered)
+enum Page { kStartup, kSelector, kBackup, kNerd, kOptions }; // kNerd, kOptions: TI Revive's own
 
 // our parameters for the elements we add to the layout
-const char *kNotSupported = "TIRevive/NotSupported", *kStatus = "TIRevive/Status",
-           *kChangePath = "TIRevive/ChangePath", *kModel = "TIRevive/Model";
+const char *kStatus = "TIRevive/Status", *kChangePath = "TIRevive/ChangePath", *kModel = "TIRevive/Model";
 
 // Nerd mode in the Access look: a page in the original's content area (0,42 686x379), drawn in its colours
 // (skinview.h tr_* types). Geometry in frame pixels, as the original's layout.
@@ -121,10 +121,6 @@ public:
         for (int m = 0; m < 3; m++)
             if (x == std::string("tab1active") + kModelNames[m])
                 return page_ == kBackup && !snow_ && model_ == m;
-        if (x == "tab2active")
-            return page_ == kBurn;
-        if (x == "tab3active")
-            return page_ == kUpdate;
         if (e == kNerdPage)
             return page_ == kNerd;
         if (e == kOptionsPage)
@@ -151,7 +147,7 @@ public:
     {
         std::lock_guard<std::mutex> l(mu_);
         if (p == "ControlCenter/Tabs/ActiveTab")
-            return page_ == kBackup ? 0 : page_ == kBurn ? 1 : page_ == kUpdate ? 2 : -1;
+            return page_ == kBackup ? 0 : -1;
         if (p == "ControlCenter/SelectVirus/SelectedRow")
             return found_ ? 0 : -1;
         if (p == "ControlCenter/SelectVirus/Family") // picture strip: 1 = TI Desktop, 5 = TI Snow
@@ -189,9 +185,6 @@ public:
             return found_ ? (busy_ ? " BUSY" : " READY") : "";
         if (x == "BackupRestorePath") // one line of 84 characters in the original's field: the end of the path
             return backup_text_.size() > 84 ? "..." + backup_text_.substr(backup_text_.size() - 81) : backup_text_;
-        if (x == "InstallText" || p == kNotSupported)
-            return "Not supported in TI Revive, on purpose: it writes the Virus' flash memory,\n"
-                   "and a failure there can make the Virus unusable. Use Access' own software for it.";
         if (p == kStatus)
             return status_;
         for (auto &b : footer_) // first: the NERD MODE button's label shares the "TIRevive/Nerd" prefix
@@ -205,9 +198,9 @@ public:
             if (p == "TIRevive/BankTitle")
                 return "RAM BANKS";
             if (p == "TIRevive/BankNote")
-                return "Only Restore writes to the Virus: programs into a RAM bank, never its flash. It works next to\n"
-                       "your DAW. Burn Flash, OS updates and factory reset are not offered, on purpose (they write the\n"
-                       "flash). Backups open in the plug-in once their .mid files are in the Patches folder.";
+                return "Only Restore writes to the Virus: programs into a RAM bank, never its flash. Close the plug-in\n"
+                       "(or the DAW) first. Burn Flash, OS updates and factory reset are not offered, on purpose (they\n"
+                       "write the flash). Backups open in the plug-in once their .mid files are in the Patches folder.";
             const int b = p.back() - '0';
             return b >= 0 && b < 4 ? banks_[b] : "";
         }
@@ -286,15 +279,13 @@ public:
         const std::string &p = n.parameter;
         if (p == "ControlCenter/Tabs/ActiveTab") {
             std::unique_lock<std::mutex> l(mu_);
-            if (found_ || n.value != 0) {
+            if (found_ && n.value == 0) { // the only tab offered: Backup & Restore
                 const bool leaving = page_ == kNerd;
-                page_ = n.value == 0 ? kBackup : n.value == 1 ? kBurn : kUpdate;
-                const bool backup_page = page_ == kBackup;
+                page_ = kBackup;
                 l.unlock();
                 if (leaving)
                     nerd_leave();
-                if (backup_page)
-                    read_banks();
+                read_banks();
             }
         } else if (p == kFooter) { // our footer buttons: radios, so the open page's stays down
             if (n.value >= 0 && n.value < (int)footer_.size() && footer_[(size_t)n.value].action)
@@ -395,7 +386,7 @@ private:
         return t;
     }
 
-    // our elements in the original's layout: a note on Burn Flash, buttons + status in the empty footer
+    // our elements in the original's layout: buttons + status in the empty footer
     void add_our_elements()
     {
         for (auto &n : layout_.nodes)
@@ -408,10 +399,6 @@ private:
                     page.children.push_back(path);
                 } else if (page.container && page.expression.find("tab5active") != std::string::npos) {
                     add_model_button(page);
-                } else if (page.container && page.expression.find("tab2active") != std::string::npos) {
-                    auto t = label(page.x + 18, page.y + 185, 623, kNotSupported);
-                    t.h = 20;
-                    page.children.push_back(t);
                 }
         // PLAIN VIEW is gone (2026-11-15): its content is on BACKUP & RESTORE; the plain window is only the fallback
         footer_ = {{"TIRevive/Nerd", "NERD MODE", [this] { page_ == kNerd ? leave_to_back() : nerd_enter(); }},
@@ -978,6 +965,13 @@ private:
                 banks_[0] = "No Virus found";
                 return;
             }
+            if (!vti::cc::virus_free(broker, err)) { // the bank list is 4 requests: not next to a playing plug-in
+                std::lock_guard<std::mutex> l(mu_);
+                for (auto &b : banks_)
+                    b.clear();
+                banks_[0] = vti::cc::fit_text(err, 105);
+                return;
+            }
             vti::MemorySync sync(broker);
             const std::string cache = vti::cc::cache_dir();
             for (int bank = 1; bank <= 4 && !stop_; bank++) {
@@ -1100,16 +1094,18 @@ private:
                 return;
             }
             int fetched = 0;
+            std::string warning;
             bool ok = vti::cc::backup_ram(broker, "1234", out, [&](int bank, int p, bool f, const vti::Dump &) {
                 fetched += f;
                 char s[64];
                 snprintf(s, sizeof s, "Backing up RAM %c: %d / 128", 'A' + bank - 1, p + 1);
                 std::lock_guard<std::mutex> l(mu_);
                 status_ = s;
-            }, err, &cancel_);
+            }, err, &cancel_, &warning);
             std::lock_guard<std::mutex> l(mu_);
             done_ = ok;
-            status_ = ok ? "Done: " + std::to_string(fetched) + " read, RAM A..D saved"
+            status_ = ok ? "Done: " + std::to_string(fetched) + " read, RAM A..D saved" +
+                               (warning.empty() ? "" : ". " + warning)
                          : cancel_ ? "Backup cancelled" : "Not finished: " + err;
         });
     }

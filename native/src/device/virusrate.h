@@ -4,13 +4,12 @@
 // the new rate); the plug-in converts what is left (96 kHz = 2 x 48). Header only: the plug-in and the tests use it.
 #pragma once
 #include <cmath>
-#include <cstdint>
 
 namespace vti {
 
 inline int virus_rate_for(double host)
 {
-    if (!(host > 0))
+    if (!(host > 0) || std::isinf(host)) // also NaN
         return 44100;
     while (host < 44000)
         host *= 2;
@@ -18,8 +17,5 @@ inline int virus_rate_for(double host)
         host /= 2;
     return host >= 46000 ? 48000 : 44100;
 }
-
-// a time in the Virus' frames at `rate` (time constants: keepalive, anchor windows, timeouts)
-inline int64_t frames_for_ms(int rate, double ms) { return (int64_t)std::llround(rate * ms / 1000.0); }
 
 } // namespace vti

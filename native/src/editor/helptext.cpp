@@ -51,7 +51,9 @@ const Entry ENTRIES[] = {
      "the whole patch there."},
     {"Browser/Selected Bank", "Patch browser",
      "The banks of the Virus (RAM and ROM) and your patch libraries. Click a patch to select it, double-click to "
-     "load it into the current part, or drag it onto a part strip."},
+     "load it into the current part, or drag it onto a part strip. A RAM bank marked \"(not checked)\" could not be "
+     "compared with the Virus since it connected, or the Control Center changed it since: before a patch there is "
+     "overwritten, it is read from the Virus for the RAM backup."},
     {"Repository Actions/Search", "Search",
      "Type to filter the browser by patch name; only matching patches stay bright."},
     {"Repository Actions/Category Filter", "Category filter",
@@ -83,13 +85,12 @@ const Entry ENTRIES[] = {
      "parts and presets per page. Locks are not saved with the project, like in the original."},
     {"LockView/Part Lock Indicator", "Lock indicator", "This part has locked sections."},
     {"VirusControl/Live Mode", "Live mode", "For playing live: every note goes to the Virus at once, without the plug-in's lead, sequenced notes too, so they are no longer exact to the sample. The plug-in reports the smaller latency to your DAW. Only while the transport is stopped. Switch it on when you record a part you play into Ableton Live: with live mode off, Live puts the take about 50 ms later than you heard it. Playing a Keyboard or Polar from its own keys feels tightest with Local On on the Virus and the track's monitor off in the DAW: the keys play the sound directly, and the DAW still records them. With Local On and the monitor on you hear every note twice."},
-    {"VirusControl/Plugin Latency", "Latency", "How far ahead the plug-in sends notes to the Virus: the default is the safest. Smaller values lower the latency for everything, Minimal works like live mode. Takes effect with live mode off."},
     {"VirusControl/Direct Monitoring", "Direct monitoring", "Puts this part on the Virus' analog output Out1 L+R, so you hear it there; off gives the part its outputs back. One part at a time. Choosing another output for the part ends it. Not saved with the project, like in the original."},
     {"VirusControl/Access Website", nullptr, "A link to the manufacturer's website (not used by TI Revive)."},
-    {"VirusControl/Display Parameter", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus."},
-    {"VirusControl/Display Value", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus."},
-    {"VirusControl/Display Part", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus."},
-    {"VirusControl/Display Original Value", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus."},
+    {"VirusControl/Display Parameter", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus. When it says the Virus does not answer, switch the Virus off and on: until then the RAM banks in the browser may not match the Virus. When it says the RAM banks may be out of date, some patches could not be read from the Virus at the start: they are read again when the Virus connects next."},
+    {"VirusControl/Display Value", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus. When it says the Virus does not answer, switch the Virus off and on: until then the RAM banks in the browser may not match the Virus. When it says the RAM banks may be out of date, some patches could not be read from the Virus at the start: they are read again when the Virus connects next."},
+    {"VirusControl/Display Part", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus. When it says the Virus does not answer, switch the Virus off and on: until then the RAM banks in the browser may not match the Virus. When it says the RAM banks may be out of date, some patches could not be read from the Virus at the start: they are read again when the Virus connects next."},
+    {"VirusControl/Display Original Value", "Display", "The display shows the parameter you touched last, its value and the part. It changes when you move a knob here or on the Virus. When it says the Virus does not answer, switch the Virus off and on: until then the RAM banks in the browser may not match the Virus. When it says the RAM banks may be out of date, some patches could not be read from the Virus at the start: they are read again when the Virus connects next."},
     {"Envelope/Select", "Envelope select",
      "Chooses which envelope the panel shows and edits: the filter envelope, envelope 3 or envelope 4."},
 

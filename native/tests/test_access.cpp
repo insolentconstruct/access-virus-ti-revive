@@ -4,6 +4,7 @@
 #include "access/firmware.h"
 #include "access/library.h"
 #include "check.h"
+#include "device/answerwatch.h"
 #include "editor/editorrender.h"
 #include "model/remotedevice.h"
 #include "model/sectionlock.h"
@@ -135,6 +136,24 @@ TEST(access_init_messages_show_configuring_like_the_original)
         CHECK(with[at + 1] == timer_on);
         CHECK(with[at + 2] == multi);
         CHECK(with[at + 3][6] == 0x72);
+    }
+}
+
+TEST(access_init_messages_hold_the_reply_cables)
+{
+    // what AnswerWatch re-sends when the Virus does not answer (E591): the three cable globals of GlobalInit, with the
+    // values the original's start-up sends (E395: MIDI Data 1, Panel Data 2, Sounddump 3)
+    const auto r = AnswerWatch::routing_messages(dev().init_messages());
+    if (getenv("VTITESTS_VERBOSE"))
+        for (const auto &m : dev().init_messages())
+            if (m.size() == 11 && m[6] == 0x73)
+                std::fprintf(stderr, "  start-up global %02X = %02X\n", m[8], m[9]);
+    // E601: the user's GlobalInit holds USB MidiPort active = 1 (73 00 52 01); the re-send puts it first
+    CHECK_EQ(r.size(), 4u);
+    CHECK(r.size() == 4 && r[0][8] == 0x52 && r[0][9] == 1);
+    for (size_t i = 1; i < r.size(); i++) {
+        const auto &m = r[i];
+        CHECK((m[8] == 0x3B && m[9] == 1) || (m[8] == 0x3C && m[9] == 2) || (m[8] == 0x3A && m[9] == 3));
     }
 }
 

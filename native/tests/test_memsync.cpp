@@ -4,13 +4,16 @@
 #include "device/memsync.h"
 #include "model/bankdrop.h"
 #include "model/remotedevice.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <thread>
 #ifndef _WIN32
 #include <csignal>
+#include <unistd.h>
 #include <sys/resource.h>
 #endif
 
@@ -38,6 +41,7 @@ struct FakeVirus {
     int corrupt = -1; // this program's dump comes back with a different fingerprint than bank info says
     int corrupt_times = -1; // how many times it does; -1: always
     int short_info = 0;     // this many bank info replies come back cut short (a packet lost on the way); -1: always
+    std::set<int> silent;   // programs whose single dump request gets no reply
     std::function<bool(const Bytes &)> send()
     {
         return [this](const Bytes &m) {
@@ -63,6 +67,8 @@ struct FakeVirus {
                 sync->feed(r);
             } else if (m[6] == 0x30) {
                 int p = m[8];
+                if (silent.count(p))
+                    return true;
                 const bool bad = p == corrupt && corrupt_times != 0;
                 if (bad && corrupt_times > 0)
                     corrupt_times--;
@@ -171,6 +177,71 @@ TEST(memsync_transact_failed_send)
     CHECK_EQ(sends, 1); // no retries when the message cannot even be queued
 }
 
+// missed(): the last request waited its whole time and nothing came - the plug-in's cue to re-send the reply cables
+// and then warn (E591). Not a stop, a send that failed, a handover, or a reply of the wrong size.
+TEST(memsync_missed_only_when_the_virus_did_not_answer)
+{
+    const Dump req = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7};
+    MemorySync quiet([](const Bytes &) { return true; });
+    CHECK(!quiet.missed());
+    CHECK(quiet.transact(req, {0x10, 0x00, 0x00}, 100, 1).empty());
+    CHECK(quiet.missed());
+
+    MemorySync *ms = nullptr;
+    MemorySync answers([&](const Bytes &) {
+        ms->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    ms = &answers;
+    answers.transact(req, {0x10, 0x00, 0x00}, 100, 1);
+    CHECK(!answers.missed());
+
+    MemorySync failed([](const Bytes &) { return false; });
+    CHECK(failed.transact(req, {0x10, 0x00, 0x00}, 100, 1).empty());
+    CHECK(!failed.missed()); // nothing reached the Virus
+
+    MemorySync gone([](const Bytes &) { return true; });
+    gone.present = [] { return false; };
+    CHECK(gone.transact(req, {0x10, 0x00, 0x00}, 100, 1).empty());
+    CHECK(!gone.missed()); // handed over (E591 (2))
+
+    MemorySync stopped([](const Bytes &) { return true; });
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        stopped.cancel();
+    });
+    CHECK(stopped.transact(req, {0x10, 0x00, 0x00}, 1000, 1).empty());
+    stopper.join();
+    CHECK(!stopped.missed());
+
+    // the same instance: a miss, then an answer
+    bool answer = false;
+    MemorySync *ps = nullptr;
+    MemorySync once([&](const Bytes &) {
+        if (answer)
+            ps->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    ps = &once;
+    once.transact(req, {0x10, 0x00, 0x00}, 100, 1);
+    CHECK(once.missed());
+    answer = true;
+    once.transact(req, {0x10, 0x00, 0x00}, 100, 1);
+    CHECK(!once.missed());
+}
+
+TEST(memsync_wrong_size_replies_are_not_missed)
+{
+    MemorySync *ms = nullptr;
+    MemorySync sync([&](const Bytes &m) {
+        ms->feed({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x10, m[7], m[8], 0x00, 0xF7}); // cut short
+        return true;
+    });
+    ms = &sync;
+    CHECK(sync.single(1, 7).empty());
+    CHECK(!sync.missed()); // lost packets, a Virus that answers
+}
+
 TEST(memsync_transact_late_reply)
 {
     // the readiness probe's case: the Virus answers only after it worked through what was queued before
@@ -187,6 +258,301 @@ TEST(memsync_transact_late_reply)
     Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 2000, 1);
     late.join();
     CHECK_EQ(r.size(), 524u);
+}
+
+// E591 (1): answers that came after the timeout were thrown away - one in the 1.5 s pause after a try was kept but never
+// looked at, the next try cleared it. Each reply below comes `after_ms` after the first request, the fake Virus answers
+// only that first one.
+static Dump late_answer(int after_ms, int timeout_ms, int tries, int &sends, const Dump &reply = fake_single(0, 0, 1))
+{
+    MemorySync *self = nullptr;
+    std::thread late;
+    sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        if (sends++ == 0)
+            late = std::thread([&self, after_ms, reply] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(after_ms));
+                self->feed(reply);
+            });
+        return true;
+    });
+    self = &sync;
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, timeout_ms,
+                           tries);
+    late.join();
+    return r;
+}
+
+TEST(memsync_transact_takes_a_reply_in_the_pause_after_a_try)
+{
+    int sends;
+    CHECK_EQ(late_answer(700, 100, 1, sends).size(), 524u); // in the pause after the timeout
+    CHECK_EQ(late_answer(700, 100, 2, sends).size(), 524u); // ... and not cleared by a second try
+    CHECK_EQ(sends, 1); // the reply came before the second try was due: no second request for the Virus
+}
+
+TEST(memsync_transact_takes_the_first_tries_reply_after_the_second_try)
+{
+    int sends;
+    CHECK_EQ(late_answer(1800, 100, 2, sends).size(), 524u); // try 2 went out at 1.6 s: the same request, it counts
+    CHECK_EQ(sends, 2);
+}
+
+TEST(memsync_transact_ignores_a_late_reply_with_another_header)
+{
+    int sends;
+    CHECK(late_answer(700, 100, 1, sends, fake_single(0, 1, 1)).empty()); // 10 00 01 is not the answer to 30 00 00
+}
+
+// E591 (1): the clock started when the request was queued; behind a state upload it may wait seconds before it is
+// even written. `sending` says the plug-in's queue still holds messages: the timeout starts when it is empty.
+TEST(memsync_transact_clock_starts_when_the_request_is_out)
+{
+    MemorySync *self = nullptr;
+    std::atomic<bool> queued{false};
+    std::thread out, late;
+    MemorySync sync([&](const Bytes &) {
+        queued = true;
+        out = std::thread([&] { // the queue in front of the request takes 2 s to go out
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+            queued = false;
+        });
+        late = std::thread([&] { // the Virus answers 0.5 s after it got the request
+            std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+            self->feed(fake_single(0, 0, 1));
+        });
+        return true;
+    });
+    self = &sync;
+    sync.sending = [&] { return queued.load(); };
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 300, 1);
+    out.join();
+    late.join();
+    CHECK_EQ(r.size(), 524u); // 300 ms + 1.5 s from the queueing would have ended at 1.8 s
+}
+
+// E591, like the original (it asks only when its start-up queue is empty): a request does not go out while other
+// messages still wait in the plug-in's queue (bounded), so it is not stuck behind them
+TEST(memsync_transact_asks_only_when_the_queue_is_empty)
+{
+    std::atomic<bool> busy{true};
+    std::thread drain([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        busy = false;
+    });
+    MemorySync *self = nullptr;
+    bool busy_at_send = true;
+    MemorySync sync([&](const Bytes &) {
+        busy_at_send = busy.load();
+        self->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    self = &sync;
+    sync.sending = [&] { return busy.load(); };
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 300, 1);
+    drain.join();
+    CHECK(!busy_at_send);
+    CHECK_EQ(r.size(), 524u);
+}
+
+// research T9 (R1-3, R4-2, R9-3): the plug-in holds its MIDI clock and automation while a request is open, like the
+// original that drops F8 while busy. request_open() is true from the first send until transact returns (reply,
+// timeout, cancel), also over the tries; not while the request still waits for the queue (it is not out yet)
+TEST(memsync_request_open_from_the_send_to_the_answer)
+{
+    std::atomic<bool> busy{true};
+    MemorySync *self = nullptr;
+    bool open_while_queued = true, open_at_send = false, open_while_waiting = false;
+    std::thread answer;
+    MemorySync sync([&](const Bytes &) {
+        open_at_send = self->request_open();
+        answer = std::thread([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            open_while_waiting = self->request_open();
+            self->feed(fake_single(0, 0, 1));
+        });
+        return true;
+    });
+    self = &sync;
+    std::thread drain([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        open_while_queued = sync.request_open();
+        busy = false;
+    });
+    sync.sending = [&] { return busy.load(); };
+    CHECK(!sync.request_open());
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 1000, 1);
+    drain.join();
+    answer.join();
+    CHECK_EQ(r.size(), 524u);
+    CHECK(!open_while_queued); // waiting for the queue: the clock goes on, so the queue can empty
+    CHECK(open_at_send);
+    CHECK(open_while_waiting);
+    CHECK(!sync.request_open()); // answered: clock and automation go on
+}
+
+TEST(memsync_request_open_ends_with_a_timeout_or_a_cancel)
+{
+    MemorySync *self = nullptr;
+    bool open_at_second_try = false;
+    int sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        if (++sends == 2)
+            open_at_second_try = self->request_open();
+        return true;
+    });
+    self = &sync;
+    sync.pause_ms = 0;
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 50, 2);
+    CHECK(r.empty() && sends == 2);
+    CHECK(open_at_second_try); // open over the tries
+    CHECK(!sync.request_open()); // timed out: not open for good
+    bool open_before_cancel = false;
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        open_before_cancel = sync.request_open();
+        sync.cancel();
+    });
+    r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 1);
+    stopper.join();
+    CHECK(r.empty() && open_before_cancel);
+    CHECK(!sync.request_open());
+}
+
+// a queue that never empties (the Virus refused EP 0x06 for 8.7 s, E591 (3); a broker gone): the wait is bounded
+TEST(memsync_transact_queue_wait_is_bounded)
+{
+    int sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        sends++;
+        return true;
+    });
+    sync.sending = [] { return true; };
+    sync.queue_wait_ms = 200;
+    auto t0 = std::chrono::steady_clock::now();
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 100, 1);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(r.empty());
+    CHECK_EQ(sends, 1);
+    CHECK(ms >= 200 + 100);
+    CHECK(ms < 2500); // 200 ms for the queue (before and after the send together), 100 ms + the 1.5 s pause
+}
+
+TEST(memsync_cancel_ends_the_wait_for_the_queue_at_once)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.sending = [] { return true; };
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        sync.cancel();
+    });
+    auto t0 = std::chrono::steady_clock::now();
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 3);
+    stopper.join();
+    CHECK(r.empty());
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1000));
+}
+
+// E591 (2): an instance that handed its Virus over (#51) waited out its probe and logged "no reply". `present` false:
+// a request does not start, one waiting ends at once, nothing is logged as a miss - and unlike cancel() not for good
+TEST(memsync_no_virus_ends_a_request_at_once)
+{
+    std::atomic<bool> have{true};
+    int sends = 0;
+    bool answer = false;
+    std::vector<std::string> lines;
+    MemorySync *self = nullptr;
+    MemorySync sync([&](const Bytes &) {
+        sends++;
+        if (answer)
+            self->feed(fake_single(0, 0, 1));
+        return true;
+    });
+    self = &sync;
+    sync.present = [&] { return have.load(); };
+    sync.log = [&](const std::string &s) { lines.push_back(s); };
+    std::thread handover([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        have = false;
+    });
+    auto t0 = std::chrono::steady_clock::now();
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 10000, 3);
+    handover.join();
+    CHECK(r.empty());
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1000));
+    CHECK_EQ(sends, 1);
+    CHECK(sync.bank_info(1).empty());
+    CHECK_EQ(sends, 1); // no Virus: not even sent
+    Bank cache;
+    CHECK_EQ(sync.sync_bank(1, cache), -2); // a stop, not "bank sync failed"
+    CHECK(lines.empty());                   // and no "no reply" line
+    have = true; // the Virus is back for this instance: requests work again
+    answer = true;
+    CHECK_EQ(sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 500, 1)
+                 .size(),
+             524u);
+}
+
+// research R2-5: the late answer to an earlier probe came while the next probe still waited for the queue and ended
+// it before its own request was even written (the Virus not ready yet). A transact takes only answers that arrive
+// after its first request went out.
+TEST(memsync_transact_ignores_an_answer_from_before_its_request)
+{
+    std::atomic<bool> busy{true};
+    MemorySync *self = nullptr;
+    int sends = 0;
+    MemorySync sync([&](const Bytes &) {
+        sends++;
+        self->feed(fake_single(0, 0, 2)); // the answer to this request
+        return true;
+    });
+    self = &sync;
+    sync.sending = [&] { return busy.load(); };
+    std::thread before([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        self->feed(fake_single(0, 0, 1)); // the earlier probe's answer, while this one waits for the queue
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        busy = false;
+    });
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 300, 1);
+    before.join();
+    CHECK_EQ(sends, 1);
+    CHECK(r == fake_single(0, 0, 2));
+}
+
+// research R6-2: a Virus lost during the bank sync (the plug-in's `present` is false then) stops it like a cancel: no
+// "given up" slots, no miss, nothing more sent to the gone Virus, the patches fetched so far kept. Run again when it is
+// back (the plug-in does at the reconnect), only the slots still stale are fetched.
+TEST(memsync_sync_bank_stops_cleanly_when_the_virus_goes_and_runs_again)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    for (int p = 0; p < 128; p++)
+        v.ram[1][p] = fake_single(1, p, p);
+    std::atomic<bool> here{true};
+    sync.present = [&] { return here.load(); };
+    size_t sent_at_loss = 0;
+    Bank cache;
+    int n = sync.sync_bank(1, cache, [&](int p, bool) {
+        if (p == 9) { // switched off after the 10th patch
+            here = false;
+            sent_at_loss = v.requests.size();
+        }
+    });
+    CHECK_EQ(n, -2);
+    CHECK_EQ(v.requests.size(), sent_at_loss); // not even the display message for the next slot
+    CHECK_EQ(sync.given_up, 0);
+    CHECK(sync.unconfirmed[1].empty());
+    CHECK(!sync.missed());
+    CHECK(cache[9] == v.ram[1][9]);
+    CHECK(cache[10].empty());
+    here = true;
+    CHECK_EQ(sync.sync_bank(1, cache), 118);
+    bool same = true;
+    for (int p = 0; p < 128; p++)
+        same = same && cache[p] == v.ram[1][p];
+    CHECK(same);
 }
 
 TEST(memsync_bank_info_and_single)
@@ -251,9 +617,9 @@ TEST(memsync_sync_bank_cancel_and_errors)
     CHECK_EQ(sync.sync_bank(1, cache), -2);
     CHECK(cache[0] == v.ram[1][0] && cache[1].empty());
     sync.before_request = nullptr;
-    v.corrupt = 2; // a reply that does not match the bank info: the sync stops instead of caching it
-    CHECK_EQ(sync.sync_bank(1, cache), -1);
-    CHECK(cache[2].empty());
+    v.corrupt = 2; // a reply that does not match the bank info: never cached, the slot is given up, the sync goes on
+    CHECK_EQ(sync.sync_bank(1, cache), 126); // 0 was current, 2 given up
+    CHECK(cache[2].empty() && cache[3] == v.ram[1][3]);
 }
 
 // One lost packet must not end a sync: seen on the simulator's bridge (S048), not reported on a real unit. single()
@@ -356,9 +722,276 @@ TEST(memsync_sync_bank_gives_up_on_a_wrong_fingerprint)
     const Dump old = fake_single(1, 2, 500);
     cache[2] = old;
     v.corrupt = 2; // always: never cached
-    CHECK_EQ(sync.sync_bank(1, cache), -1);
-    CHECK(cache[2] == old);
+    std::vector<std::string> lines;
+    sync.log = [&](const std::string &l) { lines.push_back(l); };
+    // like the original (0x18008e220): the slot is given up, not the sync. The stale dump goes too: it is known wrong
+    CHECK_EQ(sync.sync_bank(1, cache), 0);
+    CHECK(cache[2].empty());
+    CHECK(sync.unconfirmed[1] == std::set<int>{2});
+    CHECK_EQ(sync.given_up, 1);
     CHECK_EQ(v.requests.size(), 8u); // display message + bank info + 3 tries (each with its syncing message), bounded
+    CHECK(!lines.empty() && lines.back() == std::string("single RAM A 2: given up, not cached (1 of 3)"));
+}
+
+// T1, like the original (Virus Control 5.1.7 x64 0x18008e220, E594): a single dump request is asked 3 times, each
+// waiting its whole time, before the slot is given up
+TEST(memsync_single_asks_three_times_without_an_answer)
+{
+    int asked = 0;
+    MemorySync sync([&](const Bytes &) {
+        asked++;
+        return true;
+    });
+    sync.single_ms = 1, sync.pause_ms = 5;
+    CHECK(sync.single(1, 7).empty());
+    CHECK_EQ(asked, 3);
+    CHECK(sync.missed());
+}
+
+// T2: the read for a RAM backup asks once (the original's 10 s single wait), so a Virus without an answer ends it
+// after one wait, not three
+TEST(memsync_single_can_ask_once)
+{
+    int asked = 0;
+    MemorySync sync([&](const Bytes &) {
+        asked++;
+        return true;
+    });
+    sync.single_ms = 1, sync.pause_ms = 5;
+    CHECK(sync.single(1, 7, 1).empty());
+    CHECK_EQ(asked, 1);
+    CHECK(sync.missed());
+}
+
+// a bank info is asked 6 times; before the 5th and the 6th ask the reply cables are set again (event 0x22, E591)
+TEST(memsync_bank_info_asks_six_times_and_resends_the_cables_before_the_last_two)
+{
+    std::vector<size_t> resent_at; // how many requests had gone out at each re-send
+    int asked = 0;
+    MemorySync sync([&](const Bytes &) {
+        asked++;
+        return true;
+    });
+    sync.bank_info_ms = 1, sync.pause_ms = 5;
+    sync.resend_routing = [&] { resent_at.push_back((size_t)asked); };
+    CHECK(sync.bank_info(2).empty());
+    CHECK_EQ(asked, 6);
+    CHECK((resent_at == std::vector<size_t>{4, 5}));
+    CHECK(sync.missed());
+
+    // an answer, or a reply of the wrong size (the Virus answers), re-sends nothing
+    FakeVirus v;
+    MemorySync answers(v.send());
+    v.sync = &answers;
+    int resends = 0;
+    answers.resend_routing = [&] { resends++; };
+    CHECK_EQ(answers.bank_info(1).size(), 128u);
+    v.short_info = -1;
+    CHECK(answers.bank_info(1).empty());
+    CHECK_EQ(resends, 0);
+
+    // the cables helped: the 5th ask is answered
+    int n = 0;
+    MemorySync *ps = nullptr;
+    bool cables = false;
+    MemorySync late([&](const Bytes &m) {
+        n++;
+        if (cables) {
+            Bytes r(267, 0); // 14 bank 00, 128 fingerprints, checksum, F7
+            const uint8_t head[8] = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x14, m[7]};
+            std::copy(head, head + 8, r.begin());
+            r[266] = 0xF7;
+            ps->feed(r);
+        }
+        return true;
+    });
+    ps = &late;
+    late.bank_info_ms = 1, late.pause_ms = 5;
+    late.resend_routing = [&] { cables = true; };
+    CHECK_EQ(late.bank_info(3).size(), 128u);
+    CHECK_EQ(n, 5);
+}
+
+// one slot without an answer no longer ends the whole sync (#51): it is given up (empty, so the next start asks again)
+// and the sync goes on with the next slot
+TEST(memsync_sync_bank_gives_up_a_silent_slot_and_goes_on)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank cache;
+    for (int p = 0; p < 128; p++)
+        cache[p] = v.ram[1][p] = fake_single(1, p, p);
+    cache[5] = fake_single(1, 5, 500); // stale, and the Virus does not answer for it
+    cache[9] = fake_single(1, 9, 500); // stale, answered
+    v.silent = {5};
+    std::vector<std::string> lines;
+    sync.log = [&](const std::string &l) { lines.push_back(l); };
+    std::vector<int> fetched;
+    CHECK_EQ(sync.sync_bank(1, cache, [&](int p, bool f) {
+        if (f)
+            fetched.push_back(p);
+    }),
+             1);
+    CHECK(cache[5].empty());
+    CHECK(cache[9] == v.ram[1][9]);
+    CHECK((fetched == std::vector<int>{9}));
+    CHECK(sync.unconfirmed[1] == std::set<int>{5});
+    CHECK_EQ(sync.given_up, 1);
+    CHECK(std::count(lines.begin(), lines.end(), std::string("single RAM A 5: given up, not cached (1 of 3)")) == 1);
+    // a later sync of the bank that gets the slot confirms it
+    v.silent.clear();
+    CHECK_EQ(sync.sync_bank(1, cache), 1);
+    CHECK(sync.unconfirmed[1].empty());
+}
+
+// the 3rd given-up slot of a sync (across banks) ends it, like the original's abort 0x18008e0d0; the stale slots it
+// did not reach in that bank are known wrong: they are emptied and unconfirmed too, never asked
+TEST(memsync_sync_stops_at_the_third_given_up_slot)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank a, b;
+    for (int p = 0; p < 128; p++) {
+        v.ram[1][p] = fake_single(1, p, p);
+        v.ram[2][p] = fake_single(2, p, p);
+    }
+    v.silent = {3, 7};
+    CHECK_EQ(sync.sync_bank(1, a), 126); // RAM A: 3 and 7 given up
+    CHECK_EQ(sync.given_up, 2);
+    for (int p = 0; p < 128; p++)
+        b[p] = v.ram[2][p];
+    b[3] = fake_single(2, 3, 500);
+    b[50] = fake_single(2, 50, 500);
+    v.requests.clear();
+    CHECK_EQ(sync.sync_bank(2, b), -1); // RAM B: 3 is the 3rd
+    CHECK_EQ(sync.given_up, 3);
+    CHECK(b[3].empty() && b[50].empty());
+    CHECK((sync.unconfirmed[2] == std::set<int>{3, 50}));
+    for (auto &r : v.requests)
+        CHECK(!(r[6] == 0x30 && r[8] == 50)); // stopped: slot 50 was never asked
+}
+
+// user ROM programs are part of the same sync (the original's scheduler reads them after the RAM banks)
+TEST(memsync_read_missing_gives_up_a_silent_slot_and_goes_on)
+{
+    FakeVirus v;
+    v.ram.resize(31);
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank cache;
+    for (int p = 0; p < 128; p++)
+        v.ram[30][p] = fake_single(30, p, p);
+    v.silent = {4};
+    CHECK_EQ(sync.read_missing(30, cache), 127);
+    CHECK(cache[4].empty() && cache[5] == v.ram[30][5]);
+    CHECK(sync.unconfirmed[30] == std::set<int>{4});
+    v.silent = {10, 11};
+    Bank other;
+    CHECK_EQ(sync.read_missing(30, other), -1); // 10 and 11: the 2nd and the 3rd of this sync
+    CHECK_EQ(sync.given_up, 3);
+    CHECK(other[4] == v.ram[30][4] && other[11].empty() && other[12].empty());
+}
+
+// T18 (research R1-5, R10-6): like the original, a RAM single dump no transact waits for is filed under its own bank
+// and program - here the late answer to a slot the sync gave up
+TEST(memsync_late_answer_fills_a_given_up_slot)
+{
+    FakeVirus v;
+    MemorySync sync(v.send());
+    v.sync = &sync;
+    sync.single_ms = 1, sync.pause_ms = 5;
+    Bank bank;
+    for (int p = 0; p < 128; p++)
+        v.ram[1][p] = fake_single(1, p, p);
+    v.silent = {5};
+    CHECK_EQ(sync.sync_bank(1, bank), 127);
+    CHECK(sync.unconfirmed[1] == std::set<int>{5});
+    CHECK(!sync.has_late(1));
+    sync.feed(v.ram[1][5]); // the answer comes after the last ask gave up
+    CHECK(sync.has_late(1));
+    std::vector<Dump> cache(bank.begin(), bank.end());
+    CHECK_EQ(sync.file_late(1, cache), 1);
+    CHECK(cache[5] == v.ram[1][5]);
+    CHECK(sync.unconfirmed[1].empty());
+    CHECK(!sync.has_late(1)); // filed once
+    CHECK_EQ(sync.file_late(1, cache), 0);
+}
+
+TEST(memsync_unasked_single_is_filed_by_its_own_bytes)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    const Dump d = fake_single(2, 9, 77), newer = fake_single(2, 9, 78);
+    sync.feed(d);
+    sync.feed(newer); // the newest per slot
+    CHECK(sync.has_late(2) && !sync.has_late(1));
+    std::vector<Dump> cache; // a bank without a cache yet
+    CHECK_EQ(sync.file_late(2, cache), 1);
+    CHECK(cache.size() == 128 && cache[9] == newer && cache[8].empty());
+    sync.feed(newer); // a duplicate of what the cache holds: filed, nothing changed
+    CHECK_EQ(sync.file_late(2, cache), 0);
+    CHECK(cache[9] == newer);
+}
+
+TEST(memsync_late_filing_ignores_edit_buffers_rom_banks_and_damage)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.feed(fake_single(0, 3, 1));  // bank 0: an edit buffer (and the readiness probe's 10 00 00)
+    sync.feed(fake_single(5, 3, 1));  // a user ROM bank: its cache is read_missing's
+    Dump bad = fake_single(1, 3, 1);
+    bad[100] ^= 1;                    // damaged on the way: the checksum is not ours (E552)
+    sync.feed(bad);
+    Dump cut = fake_single(1, 4, 1);
+    cut.resize(300);                  // a lost packet
+    cut.back() = 0xF7;
+    sync.feed(cut);
+    Bytes info = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x14, 0x01, 0x00};
+    info.resize(266, 0);
+    info.push_back(0xF7);
+    sync.feed(info); // a bank info nobody waits for: nothing to file it in
+    for (int b = 0; b <= 5; b++)
+        CHECK(!sync.has_late(b));
+    std::vector<Dump> cache;
+    CHECK_EQ(sync.file_late(1, cache), 0);
+    CHECK(cache.empty());
+}
+
+TEST(memsync_late_filing_held_while_a_ram_write_runs)
+{
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.feed(fake_single(1, 3, 1));
+    sync.hold_late(true); // a RAM write or download starts: what came before may be older than what it writes
+    CHECK(!sync.has_late(1));
+    sync.feed(fake_single(1, 4, 1)); // and what comes while it runs too
+    std::vector<Dump> cache;
+    CHECK_EQ(sync.file_late(1, cache), 0);
+    sync.hold_late(false);
+    CHECK(!sync.has_late(1));
+    sync.feed(fake_single(1, 4, 2)); // after it: filed again
+    CHECK(sync.has_late(1));
+}
+
+// the answer a transact takes is newer than a dump kept for the same slot before; a dump of another slot that comes
+// meanwhile is kept
+TEST(memsync_transact_answer_replaces_a_kept_dump)
+{
+    MemorySync *ms = nullptr;
+    MemorySync sync([&](const Bytes &) {
+        ms->feed(fake_single(1, 6, 1));
+        ms->feed(fake_single(1, 4, 2));
+        return true;
+    });
+    ms = &sync;
+    sync.pause_ms = 5;
+    sync.feed(fake_single(1, 4, 1));
+    CHECK(sync.single(1, 4) == fake_single(1, 4, 2));
+    std::vector<Dump> cache;
+    CHECK_EQ(sync.file_late(1, cache), 1);
+    CHECK(cache[6] == fake_single(1, 6, 1) && cache[4].empty());
 }
 
 TEST(memsync_bank_file_round_trip)
@@ -389,6 +1022,7 @@ TEST(memsync_bank_file_round_trip)
     CHECK(!load_bank_file(write("header.bin", {'X', 'I', 'D', 'I', 0, 1, 8, 0}), none));
     CHECK(!load_bank_file(write("huge.bin", {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0x00, 0x01, 0x00, 0x00}), none));
     CHECK(!load_bank_file(write("short.bin", {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0, 0, 2, 0x0C, 0xF0}), none));
+    CHECK(!load_bank_file(write("cut.bin", {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0, 0, 0, 1, 0xF7}), none)); // 1 of 128
     fs::remove_all(dir);
 }
 
@@ -744,6 +1378,7 @@ TEST(memsync_bank_file_limits)
     Bytes big(12 + 4096, 0x11);
     const uint8_t head[12] = {'M', 'I', 'D', 'I', 0, 1, 8, 0, 0x00, 0x00, 0x10, 0x00}; // one dump of 4096 bytes
     std::copy(head, head + 12, big.begin());
+    big.insert(big.end(), 127 * 4, 0); // programs 2..128 empty
     Bank b;
     CHECK(load_bank_file(t.write("4096.bin", big), b));
     CHECK_EQ(b[0].size(), 4096u);
@@ -784,6 +1419,41 @@ TEST(memsync_bank_file_save_errors)
 #endif
 }
 
+// R11-5: the plug-in and the Control Center (and two plug-in instances in one DAW) save the same cache files; with
+// one fixed "<file>.tmp" two writers interleaved into one temp file, and a hybrid of the right length loaded fine.
+// Each save has its own temp name (process id and a counter), the rename stays atomic, nothing is left behind.
+TEST(memsync_bank_file_temp_name_is_unique_per_writer)
+{
+    const std::string a = bank_temp_path("x/RAM A"), b = bank_temp_path("x/RAM A");
+    CHECK(a != b);
+#ifndef _WIN32
+    CHECK(a.rfind("x/RAM A.tmp." + std::to_string(getpid()) + ".", 0) == 0);
+#endif
+    TempDir t("vtitests-memsync-tmpname");
+    const std::string path = (t.dir / "RAM A").string();
+    Bank one, two;
+    for (int p = 0; p < 128; p++) {
+        one[p] = fake_single(1, p, p);
+        two[p] = fake_single(1, p, p + 1000);
+    }
+    std::atomic<int> failed{0};
+    auto writer = [&](const Bank &bk) {
+        for (int i = 0; i < 100; i++)
+            failed += !save_bank_file(path, bk);
+    };
+    std::thread t1(writer, std::cref(one)), t2(writer, std::cref(two));
+    t1.join();
+    t2.join();
+    CHECK_EQ(failed.load(), 0);
+    Bank in;
+    CHECK(load_bank_file(path, in) && (in == one || in == two)); // one writer's bank, never a mix
+    CHECK_EQ((int)std::distance(std::filesystem::directory_iterator(t.dir), std::filesystem::directory_iterator()), 1); // no temp file left
+    std::filesystem::create_directories(t.dir / "dir");
+    t.write("dir/keep", {1});
+    CHECK(!save_bank_file((t.dir / "dir").string(), one)); // a failed rename removes its temp file
+    CHECK_EQ((int)std::distance(std::filesystem::directory_iterator(t.dir), std::filesystem::directory_iterator()), 2);
+}
+
 // #50: the RAM cache is per Virus number - Virus 1 in the cache folder itself, Virus 2.. in virus-N below it - and an
 // instance on Virus 2 must load that folder's banks, not Virus 1's (it re-read all 512 programs at every start)
 TEST(memsync_ram_cache_per_virus)
@@ -815,4 +1485,39 @@ TEST(memsync_ram_cache_note_names_the_folder)
     CHECK(ram_cache_note(0, 4) == "RAM cache: Virus 1's folder, 4 of 4 banks");
     CHECK(ram_cache_note(1, 0) == "RAM cache: Virus 1's folder, 0 of 4 banks");
     CHECK(ram_cache_note(2, 3) == "RAM cache: Virus 2's own folder, 3 of 4 banks");
+}
+
+// T2 (research R11-2): the plug-in notices a bank cache file the Control Center wrote (restore, backup) by its
+// modification time and reloads that bank
+TEST(memsync_file_watch_sees_a_rewritten_cache_file)
+{
+    TempDir t("vtitests-filewatch");
+    const std::string path = (t.dir / "RAM A").string();
+    FileWatch w;
+    CHECK(!w.changed(path)); // no file: nothing to reload
+    Bank b;
+    b[0] = Dump(524, 1);
+    CHECK(save_bank_file(path, b));
+    CHECK(w.changed(path));  // seen the first time: the caller compares it with what it has
+    CHECK(!w.changed(path)); // unchanged
+    b[0] = Dump(524, 2);
+    CHECK(save_bank_file(path, b));
+    // a coarse file system clock could give the rewrite the same time: move it on explicitly
+    std::filesystem::last_write_time(path, std::filesystem::last_write_time(path) + std::chrono::seconds(2));
+    CHECK(w.changed(path));
+    CHECK(!w.changed(path));
+    std::filesystem::remove(path);
+    CHECK(!w.changed(path)); // gone: nothing to reload
+    CHECK(save_bank_file(path, b));
+    CHECK(w.changed(path)); // there again
+}
+
+TEST(memsync_drop_late_forgets_kept_dumps)
+{
+    // T18: a dump kept from a Virus that went away is not filed into the cache of the one that comes back
+    MemorySync sync([](const Bytes &) { return true; });
+    sync.feed(fake_single(1, 5, 7));
+    CHECK(sync.has_late(1));
+    sync.drop_late();
+    CHECK(!sync.has_late(1));
 }

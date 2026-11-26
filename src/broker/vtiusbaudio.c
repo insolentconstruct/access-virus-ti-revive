@@ -15,6 +15,7 @@
 // switches between two reads in the driver's order (ratesw.h) - it owns the handles, so no SET_CUR hits a running
 // stream.
 #include "vtiusbaudio.h"
+#include "vtiaudioshm.h"
 #include "pktstat.h"
 #include "ratesw.h"
 #include "winslot.h" // which Virus when several are connected (#45)
@@ -33,9 +34,11 @@ static const GUID GUID_MI00 = {0x9B879656, 0x91A6, 0x4D84, {0x9C, 0x75, 0x1F, 0x
 #define OUT_CH 2
 #define IN_PKT 592      // wMaxPacketSize EP 0x82
 #define OUT_PKT 200     // wMaxPacketSize EP 0x01
-#define NP 10           // packets (ms) per IN read = per plugin delivery (as WASAPI's 10 ms period; 4 ms was too short, E077)
-#define NR 8            // IN reads in flight (80 ms)
-#define NW 64           // OUT packet slots
+#define NP VTI_AUDIO_NP  // packets (ms) per IN read = per delivery into the ring (vtiaudioshm.h, R5-1; E077's 4 ms
+                        // failure was the packet-offset bug fixed in fix8, not the size)
+#define NR VTI_AUDIO_NR  // IN reads in flight (80 ms)
+#define NW 128          // OUT packet slots: a held thread's return mirrors all NR * NP queued packets at once, on top
+                        // of the lead; with 64 send_out then waited for a slot at every packet (stub test, NP 4)
 #define OUT_LEAD 12     // OUT packets queued before the first IN packet arrives (ms)
 #define FN_MARGIN 8     // a read is scheduled at least this many USB frames (ms) ahead of the current frame
 #define GAP_MAX 5000    // largest gap (ms) filled with silence after a stall
@@ -229,7 +232,10 @@ static int submit_read(dev *d, int i)
     return 0;
 }
 
-// Deliver `packets` USB frames of silence with the nominal pattern (the driver's repair).
+// Deliver `packets` USB frames of silence with the nominal pattern (the driver's repair). A stall's gap gets no OUT
+// packets: the OUT stream ran dry during the stall already, and the reads that completed meanwhile were mirrored on
+// its return; OUT packets for the gap too would only add their length to the OUT latency for good, and once the OUT
+// slots are full every later packet waits for one (stub test under Wine, research R5-6 checked 2026-11-26).
 static uint32_t fill_silence(dev *d, int16_t *pcm, ULONG packets, vua_in_fn in, void *user)
 {
     uint32_t total = 0;

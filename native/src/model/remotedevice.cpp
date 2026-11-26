@@ -63,8 +63,6 @@ bool RemoteDevice::load(const std::vector<uint8_t> &xml, std::string &error)
             q.controller = num(p, "controllerindex", -1);
             q.shortname = p.attribute("shortname").value();
             q.displayname = p.attribute("displayname").value();
-            q.automatable = std::string(p.attribute("automatable").value()) == "true";
-            q.performance = (bool)p.attribute("performanceCtrl");
             q.meta = std::string(p.attribute("meta").value()) == "true";
             q.retrigger = std::string(p.attribute("retrigger").value()) == "true";
             q.catch_always = std::string(p.attribute("catchAlways").value()) != "false";
@@ -83,6 +81,8 @@ bool RemoteDevice::load(const std::vector<uint8_t> &xml, std::string &error)
             for (auto c : p.children("Child"))
                 q.children.push_back(c.child_value());
             index_[q.path] = parameters.size();
+            if (q.controller >= 0 && !q.message.empty()) // here, not in decode(): that runs on several threads
+                by_ctl_[{q.message, q.controller}].push_back(q.path);
             parameters.push_back(q);
         }
     }
@@ -122,6 +122,11 @@ bool RemoteDevice::load(const std::vector<uint8_t> &xml, std::string &error)
             mb.method = b.attribute("method").value();
             mb.start = num(b, "startindex", -1);
             mb.stop = num(b, "stopindex", -1);
+            // indexes address the message (the largest, a single dump, has 524 bytes): a damaged file is refused
+            if (mb.index < 0 || mb.index > 1023 || (!mb.method.empty() && mb.start < 0)) {
+                error = "remotedevice.xml: " + mm.id + ": byte index out of range";
+                return false;
+            }
             for (auto p : b.children("parameter"))
                 mb.controllers.push_back({num(p, "mapindex", 0), p.attribute("content").value()});
             mm.bytes.push_back(mb);
@@ -136,7 +141,12 @@ bool RemoteDevice::load(const std::vector<uint8_t> &xml, std::string &error)
         messages.push_back(mm);
     }
     for (auto m : root.child("SoftknobMapping").children("Mapping")) {
-        size_t i = (size_t)num(m, "index", 0);
+        const int k = num(m, "index", 0);
+        if (k < 0 || k > 1023) { // soft knob destinations are 0..127
+            error = "remotedevice.xml: soft knob index out of range";
+            return false;
+        }
+        const size_t i = (size_t)k;
         if (softknobs.size() <= i)
             softknobs.resize(i + 1);
         softknobs[i] = m.attribute("parameter").value();
@@ -207,43 +217,8 @@ size_t RemoteDevice::encode_into(const std::string &path, int value, int part, u
 
 std::vector<uint8_t> RemoteDevice::encode(const std::string &path, int value, int part, int device_id) const
 {
-    const Parameter *p = find(path);
-    const MidiMessage *m = p ? message(p->message) : nullptr;
-    if (!m)
-        return {};
-    int ctrl = -1; // the parameter's id inside this message (map index of the controllerid byte)
-    for (auto &b : m->bytes)
-        for (auto &kv : b.controllers)
-            if (kv.second == path)
-                ctrl = kv.first;
-    if (ctrl < 0)
-        return {};
-    std::vector<uint8_t> out;
-    int channel = part & 15;
-    for (auto &b : m->bytes) {
-        const std::string &c = b.content;
-        if (c == "controller")
-            out.push_back((uint8_t)(0xB0 | channel));
-        else if (c == "polypressure")
-            out.push_back((uint8_t)(0xA0 | channel));
-        else if (c == "sysexstart")
-            out.push_back(0xF0);
-        else if (c == "sysexend")
-            out.push_back(0xF7);
-        else if (c == "byte")
-            out.push_back((uint8_t)(b.tag < 0 ? 0 : b.tag));
-        else if (c == "deviceid")
-            out.push_back((uint8_t)device_id);
-        else if (c == "part")
-            out.push_back((uint8_t)part);
-        else if (c == "controllerid")
-            out.push_back((uint8_t)ctrl);
-        else if (c == "value")
-            out.push_back((uint8_t)(value & 0x7F));
-        else
-            return {}; // dumps etc. are not single-parameter transports
-    }
-    return out;
+    uint8_t buf[64]; // single-parameter transports have 3 or 11 bytes; dumps are no transport (empty either way)
+    return std::vector<uint8_t>(buf, buf + encode_into(path, value, part, buf, sizeof buf, device_id));
 }
 
 static bool is_field(const MessageByte &b)
@@ -498,12 +473,6 @@ bool RemoteDevice::upgrade_single(std::vector<uint8_t> &m, const std::vector<uin
 std::vector<RemoteDevice::Change> RemoteDevice::decode(const std::vector<uint8_t> &m) const
 {
     std::vector<Change> out;
-    if (by_ctl_.empty()) { // built lazily: (message id, controller index) -> parameters
-        auto *self = const_cast<RemoteDevice *>(this);
-        for (auto &p : parameters)
-            if (p.controller >= 0 && !p.message.empty())
-                self->by_ctl_[{p.message, p.controller}].push_back(p.path);
-    }
     std::string id;
     int ctl = -1, part = 0, value = 0;
     if (m.size() == 3 && (m[0] & 0xF0) == 0xB0)
@@ -543,7 +512,7 @@ int RemoteDevice::value_of(const std::string &path, const std::string &text) con
     if (vl != valuelists.end())
         for (auto &e : vl->second.entries)
             if (e.text == text)
-                return e.index;
+                return vl->second.value_of(e);
     char *end = nullptr;
     long v = strtol(text.c_str(), &end, 10);
     if (end && *end == 0 && !text.empty()) {
@@ -582,7 +551,8 @@ std::vector<std::vector<uint8_t>> RemoteDevice::init_messages(int device_id, con
         out.push_back(multi);
     for (auto &pi : param_init) {
         int v = value_of(pi.param, pi.value);
-        auto m = v >= 0 ? encode(pi.param, v, pi.part - 1, device_id) : std::vector<uint8_t>{};
+        const bool part_ok = pi.part >= 1 && pi.part <= 16; // else part -1 / 16+: 0xFF in a SysEx or a wrong channel
+        auto m = v >= 0 && part_ok ? encode(pi.param, v, pi.part - 1, device_id) : std::vector<uint8_t>{};
         if (!m.empty())
             out.push_back(m);
         else

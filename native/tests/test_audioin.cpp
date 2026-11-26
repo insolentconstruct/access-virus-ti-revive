@@ -3,7 +3,9 @@
 // Linux only (macOS reads Core Audio, Windows a named mapping).
 #include "check.h"
 #include <algorithm>
+#include <cmath>
 #include "device/audioin.h"
+#include "device/crossfade.h"
 #ifdef __linux__
 #include "../../src/broker/vtiaudioshm.h"
 #include <fcntl.h>
@@ -147,6 +149,8 @@ TEST(audioin_read_at_maps_usb1_usb2)
     CHECK(raw[2 * VTI_AUDIO_IN_CH] == 0);
     a.read_raw_at(raw, 1, -5);
     CHECK(raw[0] == 0);
+    a.read_raw_at(raw, 1, 40000 - VTI_AUDIO_RING + 1023); // the same safe window as read_at: the synth writes there next
+    CHECK(raw[0] == 0);
 }
 
 TEST(audioin_usb3_and_peaks)
@@ -191,12 +195,12 @@ TEST(audioin_read_follows_the_synth_clock)
     int64_t before = a.position();
     a.read(l1, r1, l2, r2, 512, 1024);
     CHECK_EQ(a.position(), before + 513);
-    // the synth falls behind (distance 1024 - 300): one frame repeated per block
+    // the synth falls behind (distance 1024 - 300): one frame repeated per block (crossfaded since R5-3, not hard)
     r.produce(a.position() + 1024 - 300);
     before = a.position();
     a.read(l1, r1, l2, r2, 512, 1024);
     CHECK_EQ(a.position(), before + 511);
-    CHECK(l1[0] == l1[1]); // the repeated frame
+    CHECK(l1[0] != l1[1]);
     // underrun (the reader caught up with the synth): re-anchored and counted
     a.read(l1, r1, l2, r2, 512, 1024);
     a.read(l1, r1, l2, r2, 512, 1024);
@@ -228,6 +232,123 @@ TEST(audioin_read_large_blocks)
     a.read(l1, r1, l2, r2, n, latency);
     CHECK_EQ(a.drops(), 1);
     CHECK_EQ(a.position(), r.shm->in_frames - latency + n);
+}
+
+// blocks above 5376 frames: the fallback target 2 * n + 256 left no room in the ring (re-anchored every block), above
+// 8064 it reached back past the ring's oldest frame (overwritten audio); the target is kept inside the ring
+TEST(audioin_read_blocks_too_large_for_the_target)
+{
+    Ring r;
+    AudioIn a;
+    CHECK(r.shm && a.open(r.name.c_str()));
+    static float l1[8192], r1[8192], l2[8192], r2[8192];
+    r.produce(40000);
+    for (int i = 0; i < 20; i++) {
+        a.read(l1, r1, l2, r2, 6144, 2 * 6144 + 256);
+        r.produce(r.shm->in_frames + 6144);
+    }
+    CHECK_EQ(a.drops(), 0);
+    AudioIn b;
+    CHECK(b.open(r.name.c_str()));
+    const int64_t newest = r.shm->in_frames;
+    b.read(l1, r1, l2, r2, 8192, 2 * 8192 + 256);
+    CHECK(l1[0] == Ring::sample(newest - 8192, 2) * K && l1[8191] == Ring::sample(newest - 1, 2) * K);
+}
+
+// R5-3 (research 2026-11-26): read() is the path before the sync marker and for stretches without one. Its drift steps
+// skipped or repeated a frame hard (a tick each, ~4 a second at 90 ppm) and its re-anchors jumped hard; now each move
+// fades from the old position over Crossfade::LEN frames, as the stamp-aligned path does (E579, E589)
+TEST(audioin_read_steps_are_crossfaded)
+{
+    Ring r;
+    AudioIn a;
+    CHECK(r.shm && a.open(r.name.c_str()));
+    r.produce(10000);
+    float l1[512], r1[512], l2[512], r2[512];
+    a.read(l1, r1, l2, r2, 512, 1024);
+    auto near = [](float v, int64_t f) { return std::fabs(v - Ring::sample(f, 2) * K) < 1.0f * K; };
+    // ahead: a frame skipped. The block starts where the last one ended and reaches the new position after the fade
+    r.produce(10000 + 512 + 300);
+    int64_t before = a.position();
+    a.read(l1, r1, l2, r2, 512, 1024);
+    CHECK_EQ(a.position(), before + 513);
+    CHECK(near(l1[0], before));
+    CHECK(l1[Crossfade::LEN] == Ring::sample(before + 1 + Crossfade::LEN, 2) * K);
+    CHECK(r2[Crossfade::LEN + 50] == Ring::sample(before + 1 + Crossfade::LEN + 50, 5) * K);
+    // behind: a frame repeated, the same way
+    r.produce(a.position() + 1024 - 300);
+    before = a.position();
+    a.read(l1, r1, l2, r2, 512, 1024);
+    CHECK_EQ(a.position(), before + 511);
+    CHECK(near(l1[0], before) && near(l1[1], before + 1));
+    CHECK(l1[Crossfade::LEN] == Ring::sample(before - 1 + Crossfade::LEN, 2) * K);
+    // an underrun re-anchors back, faded too while the old position's frames are still there
+    before = a.position();
+    const int64_t newest = r.shm->in_frames;
+    CHECK(newest - before < 512 && newest - before >= Crossfade::LEN);
+    a.read(l1, r1, l2, r2, 512, 1024);
+    CHECK_EQ(a.drops(), 1);
+    CHECK_EQ(a.position(), newest - 1024 + 512);
+    CHECK(near(l1[0], before));
+    CHECK(l1[Crossfade::LEN] == Ring::sample(newest - 1024 + Crossfade::LEN, 2) * K);
+    // a DAW stall: the old position is gone from the ring, a hard re-anchor as before
+    r.produce(r.shm->in_frames + VTI_AUDIO_RING);
+    a.read(l1, r1, l2, r2, 512, 1024);
+    CHECK_EQ(a.drops(), 2);
+    CHECK(l1[0] == Ring::sample(r.shm->in_frames - 1024, 2) * K);
+}
+
+// below Crossfade::LEN frames per block a step per block restarted the fade half-way (half a frame's step again):
+// the next step waits until the fade is over, as TimelineFollow::SPACE on the aligned path
+TEST(audioin_read_small_blocks_step_once_per_fade)
+{
+    Ring r;
+    AudioIn a;
+    CHECK(r.shm && a.open(r.name.c_str()));
+    r.produce(10000);
+    float l1[32], r1[32], l2[32], r2[32];
+    a.read(l1, r1, l2, r2, 32, 768);
+    int steps = 0;
+    for (int i = 0; i < 8; i++) { // the synth stays 300 ahead of the target: a step is due in every block
+        r.produce(a.position() + 768 + 300);
+        const int64_t before = a.position();
+        a.read(l1, r1, l2, r2, 32, 768);
+        steps += a.position() - before != 32;
+    }
+    CHECK_EQ(steps, 8 * 32 / Crossfade::LEN);
+    CHECK_EQ(a.drops(), 0);
+}
+
+// R5-1: the broker hands its USB audio over in 4 ms pieces now (176/177 frames, VTI_AUDIO_NP) instead of 10 ms ones
+// (441). The newest frame's sawtooth then fits read()'s +-128 band: at equal clocks the reader settles and steps no
+// more. With 441-frame pieces it never could (the band is narrower than the sawtooth): it stepped back and forth
+static int64_t steps_at_equal_clocks(double piece_ms, int n)
+{
+    Ring r;
+    AudioIn a;
+    if (!r.shm || !a.open(r.name.c_str()))
+        return -1;
+    static float l1[512], r1[512], l2[512], r2[512];
+    const double piece = 44.1 * piece_ms, t0 = 20000;
+    r.produce((int64_t)t0);
+    int64_t steps = 0;
+    for (double t = t0; t < t0 + 44100.0 * 10; ) { // 10 s of host blocks; the first second may settle
+        t += n;
+        r.produce((int64_t)(t0 + std::floor((t - t0) / piece) * piece)); // only whole pieces have arrived
+        const int64_t before = a.position();
+        a.read(l1, r1, l2, r2, n, 768);
+        if (t > t0 + 44100 && a.position() - before != n)
+            steps++;
+    }
+    return a.drops() ? -1 : steps;
+}
+
+TEST(audioin_read_settles_with_4_ms_pieces)
+{
+    CHECK_EQ(steps_at_equal_clocks(VTI_AUDIO_NP, 32), 0);
+    CHECK_EQ(steps_at_equal_clocks(VTI_AUDIO_NP, 64), 0);
+    CHECK_EQ(steps_at_equal_clocks(VTI_AUDIO_NP, 256), 0);
+    CHECK(steps_at_equal_clocks(10, 64) > 10); // the old 10 ms pieces
 }
 
 TEST(audioin_output_ring)

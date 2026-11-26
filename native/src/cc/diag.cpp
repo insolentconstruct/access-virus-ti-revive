@@ -109,6 +109,11 @@ const std::vector<PluginOption> &plugin_options()
          "Snow: less CPU while idle",
          "Virus TI Snow on macOS and Linux: after a quiet second the service asks the Snow for MIDI every 4 ms "
          "instead of every 1 ms. The first message after a pause can then come up to 3 ms later."},
+        // on by default (0.8.44, #37, E589, user 2026-11-24): after a Play the timeline may stay behind inside the
+        // stamp lead instead of correcting on the first notes; read when a plug-in instance starts
+        {"keep-rest", "keep-rest.off", "Clean first notes after Play (#37, E589)", true, "Clean first notes after Play",
+         "When the DAW reads ahead at Play, TI Revive keeps the difference instead of correcting it on the first "
+         "notes. Notes you play live can then sound up to about 40 ms later until the next correction."},
     };
     return opts;
 }

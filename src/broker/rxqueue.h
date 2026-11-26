@@ -13,6 +13,10 @@
 
 #define VTI_RX_MAX 64 // the endpoints' wMaxPacketSize is 64 at most (lsusb -v)
 
+// bytes one read asks for: the endpoint's wMaxPacketSize (0 = not found), so a full packet ends the read at once like
+// the original's (R3-6); with 64 asked a full 16- or 32-byte packet left its events waiting for the next one
+static inline int vti_rx_len(int wmax) { return wmax > 0 && wmax <= VTI_RX_MAX ? wmax : VTI_RX_MAX; }
+
 typedef struct {
     uint8_t slot;            // which transfer it came from, for the resubmit after an error
     int8_t err;              // 0 = data, else the libusb error code (vti_xfer_err)
@@ -94,6 +98,16 @@ static inline int vti_rx_done_action(int closing, int quiet, int err)
 // round put all 8 out into a halt that stayed, 375 stalled transfers in one give-up run).
 static inline int vti_rx_probe_now(int inflight) { return inflight == 0; }
 static inline int vti_rx_unpark_after(int err) { return err == 0; }
+
+// E591 (4), #48: if the transfers still out after an error never come back (macOS), nothing unparks the failed one and
+// MIDI IN stays dead until the Virus re-enumerates. The transfers have no timeout, so only data or an error is a record:
+// silence for VTI_RX_STUCK_MS after an error, with a transfer parked, resets the endpoint's transfers. Once per error
+// (`armed`: an error since the last data and the last reset), so a merely idle endpoint is not reset every 2 s.
+#define VTI_RX_STUCK_MS 2000
+static inline int vti_rx_stuck(int armed, unsigned parked, int closing, uint64_t silent_ms)
+{
+    return armed && parked && !closing && silent_ms >= VTI_RX_STUCK_MS;
+}
 
 // libusb_transfer_status -> the libusb error code the reader's rules use (plain numbers, testable without libusb)
 static inline int vti_xfer_err(int status)

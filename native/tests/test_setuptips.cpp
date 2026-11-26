@@ -83,6 +83,7 @@ TEST(setuptips_logic_points)
     CHECK(contains(tip(p, "compensation")->text, "Plug-in Latency Compensation"));
     CHECK(has_key(p, "logic-low-latency"));
     CHECK(has_key(p, "logic-parts"));
+    CHECK(contains(tip(p, "logic-live")->text, "Record Enable")); // #37: a track that is not live is processed ahead
     CHECK(!has_key(p, "live-parts"));
 }
 
@@ -92,6 +93,7 @@ TEST(setuptips_live_points)
     CHECK(contains(tip(p, "compensation")->text, "Delay Compensation"));
     CHECK(has_key(p, "live-parts"));
     CHECK(!has_key(p, "logic-range"));
+    CHECK(!has_key(p, "logic-live"));
     CHECK(!has_key(p, "live-plugin-buffer")); // Live 12.4 has no such setting (user, on the Mac)
 }
 

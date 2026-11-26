@@ -13,10 +13,13 @@
 #include "editor/infopage.h"
 #include "editor/setuptips.h"
 #include "device/automation.h"
+#include "device/idleedits.h"
 #include "device/broker.h"
 #include "device/keepalive.h"
 #include "device/markerscan.h"
 #include "device/memsync.h"
+#include "device/answerwatch.h"
+#include "device/bankcheck.h"
 #include "device/resync.h"
 #include "device/slipwatch.h"
 #include "device/slotpick.h"
@@ -37,8 +40,12 @@
 #include "device/offlinepace.h"
 #include "device/blockevents.h"
 #include "device/heldnotes.h"
+#include "device/statehold.h"
+#include "device/awayqueue.h"
+#include "device/ramqueue.h"
 #include "device/outputdelay.h"
 #include "device/timelinefollow.h"
+#include "device/crossfade.h"
 #include "device/presencewatch.h"
 #include "device/stallwatch.h"
 #include "model/bankdrop.h"
@@ -58,6 +65,7 @@
 #include "model/sysinfo.h"
 #include "model/remotetemplates.h"
 #include "model/sectionlock.h"
+#include "model/state.h"
 #include "model/rambackup.h"
 #include "model/undohistory.h"
 #include "model/comparestate.h"
@@ -97,8 +105,14 @@ public:
     void start() { go_ = true; }
     void send(std::vector<uint8_t> msg); // a complete MIDI message (SysEx or channel message); not from process()
     // the same on another USB-MIDI cable of the plug-in endpoint: the original sends remote template records on
-    // cable 3 (E199), everything else on cable 2
-    void send(std::vector<uint8_t> msg, uint8_t cable);
+    // cable 3 (E199), everything else on cable 2. keep: it stays queued while a Virus this instance had is away (no
+    // state brings it back at the return, awayqueue.h)
+    void send(std::vector<uint8_t> msg, uint8_t cable, bool keep = false, bool ram = false);
+    // a dump into a RAM slot (write_ram): marked, so a close lets it go out before its close sequence (ramqueue.h,
+    // research T11). `backup`: where the patches the writes overwrite were backed up, for the line of a cut write
+    void send_ram(std::vector<uint8_t> dump, const std::string &backup);
+    // a RAM write that did not reach the Virus (bank 0..3; worker or terminate's thread): its cache is not confirmed
+    void on_ram_cut(std::function<void(int bank)> h) { ram_cut_ = std::move(h); }
     // a whole state upload: replaces the records of an earlier upload that are still queued (only the newest state
     // counts; a waiting instance got two before its takeover, E149). Returns how many queued records it dropped.
     int send_state(std::vector<std::vector<uint8_t>> records);
@@ -113,10 +127,24 @@ public:
         if (note_off)
             rt_lost_off_.store(true, std::memory_order_relaxed);
     }
+    // process(), at the block start: the parts (bit 0 = part 1) whose single dump was queued since the last call; their
+    // edits still waiting from before go (R7-3)
+    uint32_t take_loaded_parts()
+    {
+        return loaded_parts_.load(std::memory_order_relaxed) ? loaded_parts_.exchange(0, std::memory_order_acq_rel) : 0;
+    }
+    // the worker's idle hook, the same for the editor edits it sends while the host does not process (T13)
+    uint32_t take_loaded_idle()
+    {
+        return loaded_idle_.load(std::memory_order_relaxed) ? loaded_idle_.exchange(0, std::memory_order_acq_rel) : 0;
+    }
     // after a block's send_rt calls: wakes the worker (no lock; one notify per block instead of a 1 ms poll)
     void wake_rt() { cv_.notify_one(); }
     std::atomic<int64_t> timeline{-1};
-    bool busy() const { return queued_.load() > 0; } // non-realtime messages (state upload) still waiting
+    // non-realtime messages (state upload) still waiting, or written and not yet reported done by the broker (T7)
+    bool busy() const { return queued_.load() > 0; }
+    // process()'s real-time ring still holds events (clock, notes, automation) the worker has not written yet
+    bool events_waiting() const { return rt_r_.load() != rt_w_.load(); }
     int queued() const { return queued_.load(); } // start-up messages and state still to go (the start page's ring)
     bool dumping() const { return dump_pending_.load(); } // a dump in pieces: nothing else may go between them
     // USB control request through the broker (device descriptor / strings)
@@ -140,9 +168,15 @@ public:
     void on_status(std::function<void(bool present, bool elsewhere)> h) { status_ = std::move(h); }
     // another instance has the Virus: in this process (claim_owner) or another program's plug-in (broker state 2)
     bool waiting() const { return wait_reported_.load() || broker_.in_use_elsewhere(); }
+    // this instance holds a Virus: claimed (not handed over to the played instance, #51) and not waiting for it
+    // (E591 (2): only then may it probe or sync; connected() is false for a moment at a reconnect, this is not)
+    bool has_virus() const { return slot_.load() > 0 && !waiting(); }
     // the Virus this instance claimed when several are connected (#45): 1.., 0 = none yet
     int slot() const { return slot_.load(); }
     bool other_owner() const; // another instance of this process talks to another Virus (#50: show the numbers)
+    // process(): the DAW processed this instance (a block with samples, steady ms); #51: the Virus goes to the played one
+    void note_processed(int64_t ms);
+    int64_t processed_ms() const { return processed_ms_.load(std::memory_order_relaxed); } // -1 = none yet
     int preferred_slot() const { return slot_pref_.load(); }
     // the slot where a Virus answered this instance (0 = none yet, or given up): what a project keeps
     int found_slot() const { return found_slot_.load(); }
@@ -203,11 +237,19 @@ public:
     // the newest ring frame that had sound on USB 1 / USB 2 (the ping waits for 1 s of silence, like the original)
     std::atomic<int64_t> last_sound{-1};
     // R5 diagnostics (VTI_NATIVE_STATS, every 10 s): stamp-aligned reads, their smallest distance to the newest frame,
-    // timeline drift steps
-    std::atomic<int64_t> aligned_blocks{0}, read_margin_min{INT64_MAX}, tl_steps{0};
+    // timeline drift steps, crossfaded catch-ups (after a host xrun, E579) and those cut to a hard jump (old audio gone)
+    std::atomic<int64_t> aligned_blocks{0}, read_margin_min{INT64_MAX}, tl_steps{0}, tl_fades{0}, tl_fades_cut{0};
     PullStats pulls; // reads pulled back because the host ran ahead of the Virus' audio (E490), per stats window
     // process() calls/samples and timeline events (anticipative hosts call in bursts ahead of real time)
     std::atomic<int64_t> host_frames{0}, anchors{0}, err_min{INT64_MAX}, err_max{INT64_MIN};
+    // the timeline's anchors and jumps for the VTI_NATIVE_STATS log: process() notes them, the worker prints them (no
+    // stdio on the audio thread). `value`: the newest ring frame (anchor) or the jump
+    struct TimelineNote {
+        const char *what; // "anchor", "re-anchor", "resync", "jump", "fade", "kept" or "preshift" (string literals)
+        int64_t err, value;
+        int block;
+    };
+    void note_timeline(const TimelineNote &n); // process() only
     // the Sidechain bus towards the Virus' USB input ("3 Outs / 1 Input", E167): frames sent, refills (start, the
     // broker ran dry), pauses for another writer of the ring (the ASIO driver), the converter's rate correction
     // (ppm), the smallest/largest queue seen before a block
@@ -263,6 +305,8 @@ private:
     bool claim_owner();
     void release_owner();
     std::atomic<bool> owner_{false}; // this instance holds a claim (worker writes, leave_virus reads)
+    std::atomic<int64_t> processed_ms_{-1}; // note_processed: the last block the DAW processed (-1 = none yet)
+    bool yield_due() const;                 // #51: slot_yield for this instance (slotpick.h)
     std::atomic<int> slot_{0};       // the claimed slot, 1 = the first Virus (0 = none)
     std::atomic<int> slot_pref_{0};  // the slot the project was saved with (0 = none)
     std::atomic<bool> reslot_{false}; // prefer_slot: the worker moves to that slot when it is free
@@ -274,6 +318,7 @@ private:
     std::atomic<bool> wait_reported_{false}; // waiting for the other instance (set by the worker)
     int present_seen_ = -1; // worker: last device presence handled (-1 = unknown)
     vti::PresenceWatch presence_; // worker: gone / back / gone and back between two looks (E212)
+    bool had_virus_ = false;      // worker: the Virus was there once; from then on its absence drops the queue (R6-3)
     Broker broker_;
     std::mutex mu_;
     std::condition_variable cv_;
@@ -298,9 +343,27 @@ private:
         std::vector<uint8_t> msg;
         bool state;        // part of a state upload (send_state)
         uint8_t cable = 2; // USB-MIDI cable
+        bool keep = false; // kept while a Virus this instance had is away (awayqueue.h)
+        bool held = false; // held during a dump and put back (requeue_held): a newer value drops it (drop_superseded)
+        bool ram = false;  // a RAM write (send_ram): a close keeps it (ramqueue.h)
     };
     std::deque<Queued> queue_;
     std::atomic<int> queued_{0};
+    // T7 (R3-3, R12-2): at most this many bytes we wrote wait below us (socket/pipe, broker, USB) before the broker
+    // reports them done; the rest waits in our own queues, where events go first. The original keeps ~64 bytes
+    // (2 x wMaxPacketSize) in its driver's ring, up to 512 with large audio buffers (E597). 256 = 4 dump pieces or 32
+    // stamped notes, so the paced dump and a block's events do not wait on it while the Virus keeps up; a note behind
+    // a full window waits ~8-15 ms (E231's link rate) instead of behind a whole backlog.
+    static constexpr size_t TX_WINDOW = 256;
+    int ack_n_ = 0;        // worker: queued messages written whose report is still due; they stay in queued_
+    uint32_t ack_end_ = 0; // worker: Broker::write's end of the newest of them
+    void count_written()   // worker: reported ones leave queued_, so busy() and a request's timeout follow the wire
+    {
+        if (ack_n_ && broker_.written(ack_end_)) {
+            queued_ -= ack_n_;
+            ack_n_ = 0;
+        }
+    }
     struct Slot {
         uint8_t len, data[16];
         int64_t stamp;
@@ -311,25 +374,41 @@ private:
     std::atomic<size_t> rt_w_{0}, rt_r_{0};
     EventRun rt_run_; // real-time messages sent in a row, the queue's turn after 8 (worker thread, dumppacer.h)
     DumpPacer dump_;            // a single dump on cable 3 in pieces, events between them on cable 5 (E270)
-    HeldParams held_;           // automation that fell into a dump, sent when it is out (E274)
-    std::atomic<bool> dump_pending_{false}; // the dump counts as queued (busy()) until its last piece is out
+    HeldParams held_;           // automation that fell into a dump, sent when it is out (E274, R4-3); under mu_
+    std::atomic<uint32_t> loaded_parts_{0}; // parts whose single dump was queued since process() last looked (R7-3)
+    std::atomic<uint32_t> loaded_idle_{0};  // the same since the worker's idle hook last looked (T13)
+    void part_dump_queued(const std::vector<uint8_t> &m); // under mu_
+    std::atomic<bool> dump_pending_{false}; // the dump counts as queued (busy()) until its last piece is written
     SendBudget budget_; // bytes per second towards the DSP's 2046-byte stamp queue (E261)
     std::atomic<int> blocked_{0}; // messages rule 2 forbids, dropped (sendguard.h); logged by the worker
     std::atomic<int> rt_lost_{0};        // events process() could not queue (ring full); logged by the worker
     std::atomic<bool> rt_lost_off_{false}; // a note-off was among them: the worker sends all notes off
     int rt_lost_logged_ = 0;
+    static constexpr size_t TL_NOTES = 16; // a few per Play at most; the worker drains them every <= 5 ms
+    TimelineNote tl_notes_[TL_NOTES];
+    std::atomic<size_t> tl_w_{0}, tl_r_{0};
+    std::atomic<int> tl_lost_{0};
+    int tl_lost_logged_ = 0;
     std::atomic<int> ev_lost_{0}; // events process() could not collect (collect_lost); logged by the worker
     int ev_lost_logged_ = 0;
     int blocked_logged_ = 0;
     std::atomic<bool> stop_{false};
     std::atomic<bool> open_{false};
-    std::atomic<bool> abandon_dump_{false}; // leave_virus: the worker drops a dump on its way
+    // leave_virus: the worker drops a dump on its way - ABANDON_OTHER unless it is a RAM write, ABANDON_ALL in any case
+    enum { ABANDON_NONE, ABANDON_OTHER, ABANDON_ALL };
+    std::atomic<int> abandon_dump_{ABANDON_NONE};
+    int dump_ram_ = -1;      // under mu_: the RAM slot (ramqueue.h) of the dump in pieces, -1 = none or no RAM write
+    std::string ram_backup_; // under mu_: send_ram's `backup`
+    std::function<void(int)> ram_cut_;
+    void ram_cut(const std::vector<int> &slots, const std::string &backup, const char *why); // log + ram_cut_; no mu_
+    std::vector<int> ram_unsent(); // under mu_: the RAM writes queued or in pieces
     AudioIn audio_;
     AudioGate audio_gate_; // open while audio_ is mapped; closed (waiting for readers) before it is unmapped
     bool audio_ok() const { return audio_gate_.is_open(); }
     void close_audio();    // worker: no reader left, then unmap
     int start_audio();     // worker: the stream and its rate; the broker's answer (1 = streaming)
     void drop_dump();      // worker: the Virus or the broker went away mid-dump
+    int drop_while_away(); // worker: a Virus this instance had is away - the reconnect sends it all again (R6-3)
     void lose_broker();    // worker: the broker connection is gone; drop the dump, close, reopen in the next round
     std::chrono::steady_clock::time_point audio_retry_{}; // next audio start attempt (worker thread)
     std::chrono::steady_clock::time_point stats_next_{};  // VTI_NATIVE_STATS output
@@ -479,6 +558,7 @@ public:
     void editor_opened();  // the editor's open(): knob moves from the Virus become host edits
     void editor_closed();  // its close(): open edits end
     void tick_gestures();  // the gesture timer (UI thread): beginEdit / performEdit / endEdit
+    void tick_timer() { tick_gestures(); check_latency(); } // the gesture timer's tick, or the editor's without one
     // the editor ticks only while the plug-in's own gesture timer does not run (a Linux host without a run loop)
     bool gesture_timer_running() const { return gesture_timer_ran_.load(std::memory_order_relaxed); }
     bool undo_drop(); // "Undo last operation": writes back what the last drop overwrote
@@ -492,6 +572,7 @@ public:
     LibraryImport import_library_file(const std::string &src, int &library);
     // a short note in the LCD (two lines, no part, no [stored value]) - e.g. what a file drop did
     void lcd_message(const std::string &line1, const std::string &line2);
+    void library_saved(bool ok, const std::string &name, const std::string &err, const std::string &what);
     // a hint while a file is dragged over the browser: on saves the LCD, off restores it (unless a message came)
     void lcd_hint(bool on, const std::string &line1 = {}, const std::string &line2 = {});
     // does a stored patch have category `cat` (filter menu index, 0 = any) and contain `q` in its name?
@@ -504,9 +585,6 @@ public:
     std::atomic<bool> stop_warm_{false}; // terminate(): stops the bank sync and the category pass
     // the host plays (transport running or notes): steady_clock milliseconds of the last activity (audio thread)
     std::atomic<int64_t> last_play_ms_{0};
-    std::atomic<int64_t> last_note_ms_{0}; // last note-on from the host (pauses the bank sync)
-    int64_t sync_paused_ms_ = 0;           // bank sync thread only: time paused for notes so far
-    std::atomic<bool> sync_paused_{false}; // the bank sync waits for a gap between notes
     std::atomic<int> sync_eta_s_{-1};       // see sync_eta()
     int marker_retries_ = 0; // process(): sync pings sent again after "no marker"
     ResyncTimer resync_;     // process(): VTI_NATIVE_RESYNC test switch (S094, E491), off by default
@@ -514,7 +592,7 @@ public:
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    bool wait_until_quiet(); // the bank sync's before_request: waits while notes arrive (playing has priority)
+    bool wait_until_quiet(); // the bank sync's before_request: waits until a dump in pieces is out
     void wait_virus_ready(); // the bank sync thread at start-up / takeover: probe, then the sync marker (see .cpp)
     void set_sync_progress(int v);   // the original's "Syncing memory" page: 0..126 shown, 127 hidden
     void set_recall_progress(int v); // its "Starting up" page with the ring (startprogress.h)
@@ -569,14 +647,14 @@ public:
         if (bank == SEARCH_BANK)
             return results_title();
         return bank >= LIB_BASE ? library_root(bank - LIB_BASE) + "/" + library_name(bank - LIB_BASE)
-                                : device_name() + "/" + bank_name(bank);
+                                : device_name() + "/" + bank_name(bank) +
+                                      (bank < 4 && !ram_confirmed_[bank].load() ? " (not checked)" : "");
     }
     static std::string bank_name(int bank) // 0..3 = RAM A..D, 4.. = ROM A..
     {
         return bank < 4 ? std::string("RAM ") + (char)('A' + bank) : std::string("ROM ") + (char)('A' + bank - 4);
     }
     bool ui_changed() { return ui_dirty_.exchange(false); }
-    bool sync_paused() const { return syncing_.load() && sync_paused_.load(); } // the sync page's note
     // estimated seconds the bank sync still needs (-1: unknown or done); a first sync reads 512 programs at ~1 s each
     int sync_eta() const { return syncing_.load() ? sync_eta_s_.load() : -1; }
     // the sync page's line with the patch just fetched ("RAM A 85 / 128: NAME"); empty: nothing fetched yet or done
@@ -595,6 +673,9 @@ public:
     std::atomic<int64_t> diag_next_ms_{0}; // diag_report: when the next line is due
     bool diag_enabled();
     void diag_report(); // editor timer and device worker
+    // editor timer (UI thread, at most every 2 s, not while syncing): a RAM bank whose cache file another program
+    // wrote (the Control Center's restore or backup, research R11-2) is reloaded and stays unconfirmed
+    void check_ram_files();
     // what the host really sends for a note (noteprobe.on in the plug-in folder, with the log on, off by default, #30)
     NoteProbe note_probe_;
     bool note_probe_on_ = false;
@@ -654,11 +735,15 @@ private:
         std::string path;
         int part = 0; // 0-based
         int pending = -1; // automation throttle (audio thread): the latest value waiting to be sent
+        bool standard = false; // sent as a standard controller (hostmidi.h): survives a patch load (R7-3)
     };
     // automation budget: a flood of parameter messages (stress test: 32 lanes per block, ~2750/s) hangs the
     // Virus' audio until a power cycle - changes are coalesced per parameter and sent at <= AUTOMATION_RATE/s
     static constexpr double AUTOMATION_RATE = 250; // 1000/s still hung together with 2750 notes/s
     AutomationQueue automation_{AUTOMATION_RATE};
+    // editor edits of automatable parameters while the host does not call process() (T13, R7-4): the worker sends them
+    IdleEdits idle_edits_{AUTOMATION_RATE};
+    void send_idle_edits(); // worker, idle hook
     MappedPending mapped_; // bend, aftertouch, controllers from the host: the same budget (audit 2026-11-17 #4)
     PedalSwitch pedals_;   // CC 64..69 skip that budget: switches, sent on a flip only
     uint64_t block_no_ = 0;
@@ -770,16 +855,30 @@ private:
     void after_reconnect();
     void resend_to_virus(); // start-up messages + state + readiness probe, after the Virus came back or woke up
     bool probe_virus_ready(); // the readiness probe (30 00 00 behind everything queued); false: no reply
+    // E591: a request answered, or not answered at all (MemorySync::missed): the cables re-sent once, then a warning
+    AnswerWatch answers_;
+    void note_answer(bool answered);
     std::atomic<bool> sync_started_{false};
-    void sync_banks(); // brings the bank cache up to date with the Virus (background thread)
+    // brings the bank cache up to date with the Virus (the sync thread): at start after the start-up wait, later
+    // (at_start false) when bank_check_ is due, the Virus already ready
+    void sync_banks(bool at_start = true);
+    BankCheck bank_check_; // the bank check again at every connection, like the original (R6-1)
+    bool start_bank_check(); // the sync thread: true = a check is due, syncing_ set
+    void file_late_dumps();  // the sync thread: RAM dumps no request waited for into the bank cache (T18)
     // ROM A.. for the connected model: from the user's firmware.bin, except the banks with the user's own patches
     // (E381, #22), which come from their cache file; returns the number of their programs still to read from the Virus
     int load_rom_banks();
     std::atomic<uint32_t> user_rom_{0}; // bit i = ROM bank A+i is a user bank (set by the sync thread, read by others)
     std::string ram_cache_from_; // the folder banks_ RAM A..D came from (load_banks, sync_banks)
+    // RAM A..D compared with the Virus by this session's sync (or a full download). The cache of a bank not confirmed
+    // may be from an earlier session (a failed or stopped sync, a Control Center restore): the browser marks it and a
+    // write reads its slots from the Virus for the backup first (research T2, RamBackup::refresh)
+    std::array<std::atomic<bool>, 4> ram_confirmed_{};
+    FileWatch ram_files_;            // check_ram_files (UI thread)
+    int64_t ram_files_checked_ms_ = 0;
     std::string user_rom_dir_; // their cache folder <cache>/rom-<key> (userrom.h); only the sync thread uses it
     std::atomic<bool> syncing_{false};
-    std::atomic<bool> downloading_{false}; // download_bank's thread is reading a bank
+    std::atomic<bool> downloading_{false}; // download_bank's or send_ram_writes' thread runs (one RAM job at a time)
     std::thread download_thread_;
     std::mutex download_mu_; // starting / joining download_thread_
     std::atomic<bool> starting_{false}; // start-up messages + state on their way: note-ons are held back
@@ -792,7 +891,10 @@ private:
     std::mutex pending_mu_;
     std::vector<std::pair<Steinberg::Vst::ParamID, double>> pending_; // device -> host, handed over in process()
     const MidiMessage *single_template_ = nullptr;
+    const MidiMessage *multi_template_ = nullptr; // VirusTI_MultiDump: the stored multi's Detune/Output Select (R8-2)
+    int parts_ = 16; // the device type's parts: the Snow saves and sends 4 like the original (R8-3)
     std::vector<std::vector<uint8_t>> state_; // the state records (start-up messages), see formats.md
+    UnreadState unread_; // under state_mu_: a project setState could not parse, saved back unchanged (R8-5)
     std::mutex state_mu_;
     std::unique_ptr<DeviceOut> out_;
     int block_ = 512;
@@ -846,6 +948,11 @@ private:
     double stat_acc_ = 0; // the same for the host-frames statistic
     int64_t stream_start_ = -1;
     TimelineFollow tl_follow_; // after the anchor: jumps and drift steps from the error over time, not per block (E337)
+    vti::Crossfade xfade_;     // a fade move of tl_follow_ (a move forward, a one-frame step): the reads fade from the old position
+    int64_t rest_seen_ = 0;    // tl_follow_.rest() as last logged (E589)
+    bool keep_rest_ = true;    // Control Center option keep-rest (keep-rest.off): set before the first process()
+    float xfade_buf_[6][vti::Crossfade::LEN]; // the old position's frames during it (all six output channels)
+    std::atomic<bool> reactivated_{false}; // setActive(1) -> the next process(): a Play then is a fresh start (E351)
     // offline render (export, freeze): each block waits for the Virus' audio; the worker logs mode changes and timeouts
     OfflinePacer pacer_;
     bool offline_ = false;                   // audio thread: the last block's mode
@@ -885,16 +992,25 @@ private:
 #endif
     std::atomic<bool> gesture_timer_ran_{false};
     std::atomic<int> editors_open_{0};
-    bool send_ram_writes(const std::vector<BankDrop::Write> &w); // dumps into RAM slots + cache + cache files
+    // starts write_ram on the background RAM thread (download_thread_); false: refused, a RAM operation runs. `rename`:
+    // the new name of a one-slot rename (applied to the patch read from the Virus); `on_fail` when nothing is written
+    bool send_ram_writes(std::vector<BankDrop::Write> w, const std::string &rename = std::string(),
+                         std::function<void()> on_fail = nullptr);
+    bool write_ram(std::vector<BankDrop::Write> &w, const std::string &rename); // backup, dumps, cache + cache files
     // the patches `w` would overwrite into the day's "RAM Backup" library (rambackup.h); false = not backed up, the
-    // caller writes nothing (write policy 2026-10-31)
-    bool backup_ram(const std::vector<BankDrop::Write> &w);
+    // caller writes nothing (write policy 2026-10-31). Reads slots from the Virus first where needed (blocks).
+    // `where`: the backup libraries by name ("" = nothing backed up), for the log line of a cut write (T11)
+    bool backup_ram(std::vector<BankDrop::Write> &w, const std::string &rename, std::string &where);
+    // true (log + LCD `lcd` "bank sync running" / "the last RAM operation still runs") while a sync or a RAM
+    // operation runs
+    bool ram_busy(const char *what, int bank, const char *lcd = "RAM not written:");
     std::mutex undo_mu_;
     UndoHistory undo_; // editor edits (undo_mu_); ui_set and load_dump record, setState clears
     bool apply_undo(bool redo);
     std::mutex compare_mu_;
     CompareState compare_; // compare_mu_; load_dump and setState set the references
     void end_compare(int part); // an edit or a load while the part compares: the edit becomes an undo step
+    void back_to_edit(int part); // SAVE, copy, rename: the part returns to its edit (what the project keeps)
     // a library operation: `op` makes the library's new patches from the current ones (empty = refused); the old
     // ones are kept for the undo, the file is saved
     bool edit_library(int library, const char *what, const std::function<LibraryEdit::Lib(const LibraryEdit::Lib &)> &op);
@@ -915,6 +1031,8 @@ private:
     std::string dm_output_path(int which) const;
     bool od_changes_only_ = false; // outdelay-changes.on: not all 16 at every Play/Stop (E373)
     HeldNotes held_notes_;          // process() records, setActive(false) releases (heldnotes.h)
+    StateHold state_hold_;          // setState while running: note-ons wait for the state (statehold.h, R8-1)
+    int release_held_notes(); // setActive(false), setState while running: only what is still held; how many sent
     std::chrono::steady_clock::time_point od_next_{};
     int part_output(int part);
     void send_output_delays();

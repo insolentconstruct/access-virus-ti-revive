@@ -59,6 +59,28 @@ struct ChangeNote {
 inline const std::vector<ChangeNote> &changelog()
 {
     static const std::vector<ChangeNote> notes = {
+        {"0.8.44",
+         {"A clean bank sync like the original: while the RAM banks are read or checked, the notes you play are not "
+          "played and the MIDI clock pauses. After banks were changed elsewhere the start stays silent for about a "
+          "second per changed patch.",
+          "A patch the Virus does not send is given up after 3 asks and the sync goes on; the banks are checked again "
+          "at every connection, also when the Virus is switched on after the DAW.",
+          "RAM writes and backups: a slot is read from the Virus before it is overwritten when the plug-in's copy may "
+          "be old (always for SAVE); SAVE with Compare on keeps the edit; closing waits for queued RAM writes; the "
+          "Control Center backs a bank up before a restore and refuses while a plug-in uses the Virus.",
+          "Steadier USB and audio: sending waits for the Virus like the original, audio comes in 4 ms pieces, and "
+          "original projects bring their per-part routing and detune.",
+          "Sync at the start (#37): TI Revive finds the Virus' sync marker also while the Virus already plays, so a "
+          "project that plays right after opening gets its timing at once (before, only after the music paused).",
+          "Play from stop (#37): when the DAW reads ahead at Play, TI Revive learns how far and at the next Play "
+          "shifts back by that much, so the audio no longer jumps after Play (tested in REAPER on Linux, not in "
+          "Logic). Logic reads ahead by a different amount at each Play: TI Revive keeps room for that and closes "
+          "the rest with one short crossfade instead of crackling jumps on the first notes. The note exactly at Play "
+          "still comes late: leave two bars of silence before the first notes.",
+          "When the Virus stops answering (#48, #51): late answers are kept, a MIDI channel that went silent after a "
+          "USB error is restarted, and if the Virus still does not answer the display says so (switch it off and on).",
+          "Library saves (#41): a change is kept only when its file was written, every save goes into the log, and "
+          "a failed one shows \"Library not saved:\" on the plug-in display (before, it failed silently)."}},
         {"0.8.43",
          {"New names: the plug-in is \"TI Revive\" (before \"TI Revive Virus Control\"), the Windows ASIO driver \"TI "
           "Revive Audio\" and the MIDI inputs \"TI Revive Synth\" and \"TI Revive MIDI\". Projects open as before; if a "

@@ -99,6 +99,8 @@ inline TipsPage setup_tips(const TipsFacts &f)
     switch (f.host) {
     case TipsHost::Logic:
         add("logic-range", "Settings > Audio > Devices: Process Buffer Range Small. TI Revive's delay follows the largest block Logic may ask for.");
+        // #37: Logic processes a track that is not live ahead of time, so the timing moves at Play and at track changes
+        add("logic-live", "Turn on Record Enable or Input Monitoring on the TI Revive track. Logic processes tracks that are not live ahead of time, and TI Revive then has to correct its timing on the first notes after Play.");
         add("compensation", "Settings > Audio > General: Plug-in Latency Compensation must not be Off, or the Virus sounds " + delay + " late against other tracks.");
         add("logic-low-latency", "Keep Low Latency Mode off.");
         add("logic-parts", "Several parts: one instance plays them all. In the New Tracks dialog choose Multi-timbral; each MIDI channel plays one part.");

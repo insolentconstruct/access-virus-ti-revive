@@ -121,3 +121,15 @@ TEST(slotpick_label_only_with_several_viruses)
     CHECK(vti::slot_label(2, false) == " - Virus 2");
     CHECK(vti::slot_label(0, true) == "");          // not connected yet: no number
 }
+
+// #51 (rc7, Studio Pro 8): a song opened with two instances, the first one claimed Virus 1 but was never processed,
+// the processed one waited behind it: silence until File > Revert. The Virus goes to the instance the DAW plays.
+TEST(slotpick_an_unplayed_owner_yields_to_a_played_waiting_instance)
+{
+    CHECK(vti::slot_yield(-1, 0));                     // never processed, a waiting instance just was
+    CHECK(vti::slot_yield(vti::YIELD_MS, 100));        // not processed for 2 s
+    CHECK(!vti::slot_yield(vti::YIELD_MS - 1, 100));   // still processed: two real instances behave as before
+    CHECK(!vti::slot_yield(0, 0));                     // both played: the first one keeps it
+    CHECK(!vti::slot_yield(-1, -1));                   // nobody else plays (a scan, a project still loading)
+    CHECK(!vti::slot_yield(-1, vti::PLAYED_MS + 1));   // the waiting one is not played any more either
+}

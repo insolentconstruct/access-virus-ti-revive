@@ -17,6 +17,7 @@ extern "C" {
 #include "../../src/broker/vtiproto.h"
 #include "../../src/broker/brokerinfo.h"
 #include "../../src/broker/flashinfo.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -61,6 +62,24 @@ struct FakeBroker {
     bool present = true;
     std::atomic<bool> answer_control{true}, answer_audio{true}, answer_observe{true};
     std::atomic<int32_t> audio_result{1};
+    std::atomic<bool> answer_owner{true};
+    std::atomic<uint32_t> plugin_owns{0}; // VTIMSG_OWNER_REPLY: 1 = a plug-in owns the Virus (T6)
+    // T7: VTIMSG_WRITTEN after every WRITE (a protocol-6 broker), or only when the test calls report()
+    std::atomic<bool> report_writes{false};
+    std::atomic<uint32_t> wrote{0}; // data bytes of all WRITE messages so far
+    // R11-7: WRITE messages not sent (refused by `refuse_write`), the second u32 of a report unless `short_reports`
+    std::atomic<uint32_t> unsent{0};
+    std::atomic<bool> short_reports{false};
+    std::function<bool(const Bytes &write)> refuse_write; // ep + data; true = refused like a rule 2 write
+    void report()
+    {
+        Bytes r = u32(wrote);
+        if (!short_reports) {
+            Bytes n = u32(unsent);
+            r.insert(r.end(), n.begin(), n.end());
+        }
+        reply(VTIMSG_WRITTEN, r);
+    }
     // optional: own answers to control requests (setup = the 8 setup bytes; empty reply = -1), and SysEx the client
     // writes (USB-MIDI put back together), e.g. a fake Virus answering dump requests with reply_sysex()
     std::function<Bytes(const Bytes &setup)> on_control;
@@ -130,9 +149,16 @@ struct FakeBroker {
                 std::lock_guard<std::mutex> g(mu);
                 got.push_back({h.type, d});
             }
+            const bool refused = h.type == VTIMSG_WRITE && refuse_write && refuse_write(d);
+            if (h.type == VTIMSG_WRITE && !d.empty()) {
+                wrote += (uint32_t)d.size() - 1;
+                unsent += refused;
+                if (report_writes)
+                    report();
+            }
             if (h.type == VTIMSG_HELLO)
                 reply(VTIMSG_STATE, u32(present ? 1 : 0));
-            else if (h.type == VTIMSG_WRITE && d.size() > 1)
+            else if (h.type == VTIMSG_WRITE && d.size() > 1 && !refused)
                 parser.feed(d[0], d.data() + 1, d.size() - 1);
             else if (h.type == VTIMSG_CONTROL && on_control && d.size() >= 12) {
                 Bytes data = on_control(Bytes(d.begin() + 4, d.begin() + 12));
@@ -152,6 +178,8 @@ struct FakeBroker {
                 reply(VTIMSG_CONTROL_REPLY, r);
             } else if (h.type == VTIMSG_AUDIO && answer_audio)
                 reply(VTIMSG_AUDIO_REPLY, u32((uint32_t)audio_result.load()));
+            else if (h.type == VTIMSG_OWNER && answer_owner)
+                reply(VTIMSG_OWNER_REPLY, u32(plugin_owns));
             else if (h.type == VTIMSG_OBSERVE && answer_observe) {
                 reply(VTIMSG_OBSERVE_REPLY, u32(VTI_PROTO_VERSION));
                 reply(VTIMSG_OBS_LOG, Bytes{'h', 'i'});
@@ -212,6 +240,10 @@ TEST(broker_info_version)
     b.close();
     char buf[64];
     CHECK(vti_info_text(buf, sizeof buf) > 0 && std::string(buf).rfind("version=", 0) == 0);
+    // what is in the buffer, never snprintf's would-be length (B7); the size is volatile so GCC's -O3 fortify check
+    // (CI, -Werror) does not reject the truncation this test makes on purpose
+    volatile int small = 4;
+    CHECK_EQ(vti_info_text(buf, small), 3);
 }
 
 // the Virus' identification blocks through the broker (VTIMSG_FLASHINFO, flashinfo.h): the client asks, the broker
@@ -377,6 +409,41 @@ TEST(broker_audio_carries_the_rate)
     b.close();
 }
 
+// AUDIO replies carry no sequence number: the late reply of a request that timed out must not answer the next one
+TEST(broker_audio_drops_a_late_reply)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    fb.answer_audio = false;
+    CHECK_EQ(b.audio(true, 50), -1);
+    std::atomic<int> r{99};
+    std::thread t([&] { r = b.audio(true, 3000); });
+    CHECK(eventually([&] { return fb.messages(VTIMSG_AUDIO).size() == 2; }));
+    fb.reply(VTIMSG_AUDIO_REPLY, FakeBroker::u32(0)); // the first request's answer, late
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    fb.reply(VTIMSG_AUDIO_REPLY, FakeBroker::u32(1)); // the second request's
+    t.join();
+    CHECK_EQ(r.load(), 1);
+    b.close();
+}
+
+// open() on an open broker: one connection, one reader (a second std::thread over a joinable one = std::terminate)
+TEST(broker_open_twice)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    CHECK(b.open(err));
+    CHECK(b.connected());
+    CHECK_EQ(fb.messages(VTIMSG_HELLO).size(), (size_t)1);
+    b.close();
+}
+
 TEST(broker_old_broker_refuses_observer)
 {
     FakeBroker fb;
@@ -410,6 +477,7 @@ Bytes fake_single(int bank, int program, int seed)
     std::copy(head, head + 9, d.begin());
     for (size_t i = 9; i < 523; i++)
         d[i] = (uint8_t)((i * 5 + seed * 11) & 0x7F);
+    d[9] = 12; // a format version the Virus uses (libraries leave unknown ones out)
     for (int i = 0; i < 10; i++)
         d[249 + i] = (uint8_t)("Fake Patch"[i]);
     d[523] = 0xF7;
@@ -602,6 +670,8 @@ struct FakeRam {
     bool flags_to_zero = false; // like the real Virus (#43, E549): a stored patch has 0 in byte 10 (patch flags)
     int corrupt = 0;            // a byte the fake stores wrong (0 = none): a real failed write
     bool mute_after_store = false; // no answer to dump requests once something was stored
+    int infos = 0;                                 // bank info requests answered
+    std::function<void(FakeRam &, int)> on_info;   // before the answer to the n-th one (under mu): a store meanwhile
     Bytes store(Bytes m) const
     {
         if (flags_to_zero)
@@ -625,6 +695,10 @@ struct FakeRam {
             mem[{m[7], m[8]}] = store(m);
             writes++;
         } else if (m[6] == 0x39) {
+            if (on_info)
+                on_info(*this, ++infos);
+            else
+                ++infos;
             Bytes r = {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x14, m[7], 0x00};
             for (int p = 0; p < 128; p++) {
                 int fp = RemoteDevice::single_fingerprint(get(m[7], p));
@@ -739,6 +813,178 @@ TEST(cc_restore_ram_names_the_differing_byte)
     CHECK(err.find("no complete dump read back") != std::string::npos);
     b.close();
 }
+// R11-3: before its first write the restore saves the bank as the Virus has it ("RAM B before restore <date time>"
+// in the Backups folder, a library like a backup's); a stop or an error says which programs were written and where
+// that library is; when it cannot be saved nothing is written
+static std::vector<std::filesystem::path> before_restore_files()
+{
+    std::vector<std::filesystem::path> out;
+    const auto dir = std::filesystem::path(cc::default_backup_dir()).parent_path();
+    std::error_code ec;
+    for (auto &e : std::filesystem::directory_iterator(dir, ec))
+        if (e.path().filename().string().find("before restore") != std::string::npos)
+            out.push_back(e.path());
+    return out;
+}
+
+TEST(cc_restore_ram_saves_the_bank_first)
+{
+    TempHome home;
+    FakeBroker fb;
+    FakeRam ram;
+    fb.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    std::vector<Dump> backup(128);
+    for (int p = 0; p < 128; p++)
+        backup[p] = fake_single(1, p, p);
+    backup[4] = fake_single(1, 4, 1000);
+    backup[77] = fake_single(1, 77, 901);
+    int written = 0;
+    cc::RestoreReport rep;
+    CHECK(cc::restore_ram(b, 2, backup, nullptr, written, err, nullptr, &rep));
+    CHECK(written == 2 && rep.slots == std::vector<int>({4, 77}));
+    auto files = before_restore_files();
+    CHECK(files.size() == 1);
+    if (files.size() == 1) {
+        CHECK(files[0].filename().string().rfind("RAM B before restore ", 0) == 0 && files[0].extension() == ".mid");
+        CHECK(rep.backup == files[0].stem().string());
+        PatchLibrary lib;
+        CHECK(load_library_file(files[0].string(), lib) && lib.dumps.size() == 128);
+        bool same = lib.dumps.size() == 128;
+        for (int p = 0; same && p < 128; p++) // what RAM B held before the restore
+            same = std::equal(lib.dumps[p].begin() + 9, lib.dumps[p].begin() + 265, fake_single(2, p, p).begin() + 9);
+        CHECK(same);
+        CHECK_EQ(cc::bank_from_name(files[0].stem().string()), 2); // the restore menu offers RAM B for it
+    }
+    // nothing differs: nothing written, no new library
+    rep = cc::RestoreReport();
+    CHECK(cc::restore_ram(b, 2, backup, nullptr, written, err, nullptr, &rep) && written == 0 && rep.backup.empty());
+    CHECK_EQ(before_restore_files().size(), 1u);
+    // a stop after the first program: the message names it and the library; a second one the same minute has its own
+    backup[5] = fake_single(1, 5, 902);
+    backup[6] = fake_single(1, 6, 903);
+    std::atomic<bool> stop{false};
+    err.clear();
+    CHECK(!cc::restore_ram(b, 2, backup, [&](int, int) { stop = true; }, written, err, &stop, &rep));
+    CHECK_EQ(written, 1);
+    CHECK(err.rfind("cancelled", 0) == 0 && err.find("RAM B 5") != std::string::npos);
+    CHECK(err.find("\"" + rep.backup + "\"") != std::string::npos && err.find("Backups folder") != std::string::npos);
+    CHECK(err.find(home.dir.string()) == std::string::npos); // no home folder in what is logged (rule 5)
+    CHECK_EQ(before_restore_files().size(), 2u);
+    b.close();
+}
+
+TEST(cc_restore_ram_refused_when_the_bank_cannot_be_saved)
+{
+    TempHome home;
+    FakeBroker fb;
+    FakeRam ram;
+    fb.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    const auto dir = std::filesystem::path(cc::default_backup_dir()).parent_path();
+    std::filesystem::create_directories(dir.parent_path());
+    std::filesystem::remove_all(dir);
+    FILE *f = fopen(dir.string().c_str(), "wb"); // a file where the Backups folder would be
+    if (f)
+        fclose(f);
+    std::vector<Dump> backup(128);
+    for (int p = 0; p < 128; p++)
+        backup[p] = fake_single(1, p, p + 1000);
+    int written = -1;
+    CHECK(!cc::restore_ram(b, 2, backup, nullptr, written, err));
+    CHECK(written == 0 && ram.writes == 0);
+    CHECK(err.find("nothing written") != std::string::npos);
+    b.close();
+}
+
+// R11-7: with a broker that reports its writes (protocol 6) each restored dump counts only once the broker says it
+// went out; a piece it did not send (rule 2, not the owner) ends the restore. An older broker: as before, "not
+// confirmed".
+TEST(cc_restore_ram_waits_for_the_write_report)
+{
+    TempHome home;
+    FakeBroker fb;
+    FakeRam ram;
+    fb.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    fb.report_writes = true;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    std::vector<Dump> backup(128);
+    for (int p = 0; p < 128; p++)
+        backup[p] = fake_single(1, p, p);
+    backup[9] = fake_single(1, 9, 1000);
+    int written = 0;
+    cc::RestoreReport rep;
+    CHECK(cc::restore_ram(b, 3, backup, nullptr, written, err, nullptr, &rep));
+    CHECK(written == 1 && rep.confirmed);
+    // the broker refuses the dump pieces (cable 3), not the requests (cable 2)
+    fb.refuse_write = [](const Bytes &w) { return w.size() > 1 && (w[1] >> 4) == 3; };
+    backup[10] = fake_single(1, 10, 1001);
+    err.clear();
+    CHECK(!cc::restore_ram(b, 3, backup, nullptr, written, err, nullptr, &rep));
+    CHECK(written == 0 && ram.writes == 1);
+    CHECK(err.find("RAM C 10") != std::string::npos && err.find("did not send") != std::string::npos);
+    CHECK(!rep.backup.empty() && err.find(rep.backup) != std::string::npos);
+    b.close();
+    // a broker without reports: the restore works as before, but says the writes are not confirmed
+    FakeBroker old;
+    old.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    b.set_endpoint(old.path);
+    CHECK(b.open(err));
+    backup[11] = fake_single(1, 11, 1002);
+    backup[10] = fake_single(1, 10, 10);
+    bool done = cc::restore_ram(b, 3, backup, nullptr, written, err, nullptr, &rep);
+    if (!done)
+        fprintf(stderr, "  restore: %s\n", err.c_str());
+    CHECK(done && written == 1 && !rep.confirmed);
+    b.close();
+}
+
+// R11-4: a backup takes minutes; a store meanwhile (panel, plug-in SAVE) is caught by a second bank info at the end:
+// the programs whose fingerprint changed are read again, once; still changing, the backup says it may be mixed
+TEST(cc_backup_ram_reads_again_what_changed_during_it)
+{
+    TempHome home;
+    FakeBroker fb;
+    FakeRam ram;
+    fb.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err, warning;
+    CHECK(b.open(err));
+    const std::string out = (home.dir / "backup").string();
+    CHECK(cc::backup_ram(b, "1", out, nullptr, err, nullptr, &warning));
+    CHECK(warning.empty() && ram.infos == 2); // one bank info more than before, nothing else
+    // RAM A 5 is stored after it was taken from the cache: read again, the library has the new patch
+    ram.infos = 0;
+    ram.on_info = [](FakeRam &r, int n) {
+        if (n == 2)
+            r.mem[{1, 5}] = r.store(fake_single(1, 5, 2000));
+    };
+    CHECK(cc::backup_ram(b, "1", out, nullptr, err, nullptr, &warning));
+    CHECK(warning.empty() && ram.infos == 3);
+    auto libs = load_libraries(out);
+    CHECK(libs.size() == 1 && libs[0].dumps.size() == 128 &&
+          std::equal(libs[0].dumps[5].begin() + 9, libs[0].dumps[5].begin() + 265, fake_single(1, 5, 2000).begin() + 9));
+    // still changing: the backup is written, but says it may mix old and new patches
+    ram.infos = 0;
+    ram.on_info = [](FakeRam &r, int n) {
+        if (n >= 2)
+            r.mem[{1, 5}] = r.store(fake_single(1, 5, 3000 + n));
+    };
+    CHECK(cc::backup_ram(b, "1", out, nullptr, err, nullptr, &warning));
+    CHECK(ram.infos == 3 && warning.find("RAM A") != std::string::npos && warning.find("5") != std::string::npos &&
+          warning.find("mix") != std::string::npos);
+    b.close();
+}
 // audit 2026-11-17 #8: on_rx(nullptr) while the reader thread is inside the handler returned at once, so the
 // MemorySync destructor (Control Center backup/restore on a live broker) freed what the running handler used. After
 // on_rx returns, no call of the old handler may still run.
@@ -759,6 +1005,175 @@ TEST(broker_replacing_the_rx_handler_waits_for_a_running_call)
     CHECK(eventually([&] { return inside.load(); }));
     b.on_rx(nullptr);
     CHECK(done.load()); // the running call finished before on_rx returned
+    b.close();
+}
+
+
+// T6 (R12-6): one write() is one run of WRITE messages: another thread's write (MemorySync's send_ next to the
+// plug-in's worker) never falls between its pieces (an F5 stamp and its event, a SysEx across 1024 bytes)
+TEST(broker_write_is_atomic_across_its_pieces)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    const int kRounds = 50;
+    auto writer = [&](uint8_t v) {
+        Bytes m(3000, v);
+        for (int i = 0; i < kRounds; i++)
+            b.write(0x06, m.data(), m.size());
+    };
+    std::thread t1(writer, 0x11), t2(writer, 0x22);
+    t1.join();
+    t2.join();
+    CHECK(eventually([&] { return fb.messages(VTIMSG_WRITE).size() == 2u * kRounds * 3; }));
+    Bytes joined;
+    for (auto &m : fb.messages(VTIMSG_WRITE))
+        joined.insert(joined.end(), m.data.begin() + 1, m.data.end());
+    bool whole = joined.size() == 2u * kRounds * 3000;
+    for (size_t at = 0; whole && at < joined.size(); at += 3000)
+        whole = std::all_of(joined.begin() + (long)at, joined.begin() + (long)at + 3000,
+                            [&](uint8_t x) { return x == joined[at]; });
+    CHECK(whole);
+    b.close();
+}
+
+// T6 (R11-1): the broker says whether a plug-in owns the Virus; an older broker does not answer (-1)
+TEST(broker_plugin_owner_request)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    CHECK_EQ(b.plugin_owner(), 0);
+    fb.plugin_owns = 1;
+    CHECK_EQ(b.plugin_owner(), 1);
+    fb.answer_owner = false;
+    CHECK_EQ(b.plugin_owner(100), -1);
+    b.close();
+}
+
+// T6 (R11-1, R3-2): like the original, the Control Center's bulk work does not run while the plug-in has the Virus
+// (overlapping requests, a note inside a dump); nothing is sent then, and a broker that cannot tell counts as busy
+TEST(cc_bulk_refused_while_a_plugin_owns)
+{
+    TempHome home;
+    FakeBroker fb;
+    FakeRam ram;
+    fb.on_sysex = [&](FakeBroker &f, const Bytes &m) { ram.on(f, m); };
+    fb.plugin_owns = 1;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    CHECK(!cc::backup_ram(b, "1", (home.dir / "backup").string(), nullptr, err));
+    CHECK(err.find("in use by the TI Revive plug-in") != std::string::npos);
+    std::vector<Dump> backup(128);
+    for (int p = 0; p < 128; p++)
+        backup[p] = fake_single(1, p, p + 1000);
+    int written = -1;
+    err.clear();
+    CHECK(!cc::restore_ram(b, 2, backup, nullptr, written, err) && written == 0);
+    CHECK(err.find("in use by the TI Revive plug-in") != std::string::npos);
+    err.clear();
+    CHECK(!cc::virus_free(b, err) && !err.empty());
+    CHECK(fb.messages(VTIMSG_WRITE).empty());
+    fb.answer_owner = false; // an older broker
+    err.clear();
+    CHECK(!cc::virus_free(b, err) && !err.empty());
+    fb.answer_owner = true;
+    fb.plugin_owns = 0;
+    err.clear();
+    CHECK(cc::virus_free(b, err) && err.empty());
+    CHECK(cc::backup_ram(b, "1", (home.dir / "backup").string(), nullptr, err));
+    b.close();
+}
+
+// T7 (R3-3, R12-2): a broker that reports its writes done (protocol 6) lets the plug-in see what is still below it;
+// room() says how much the next write may carry within a window, written() whether a write is out
+TEST(broker_write_reports_keep_a_window)
+{
+    FakeBroker fb;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::atomic<int> woken{0};
+    b.on_written([&] { woken++; });
+    std::string err;
+    CHECK(b.open(err));
+    const Bytes m(300, 0x11), s(100, 0x22);
+    uint32_t end = 0;
+    CHECK(b.write(0x06, s.data(), s.size(), &end) && end == 100);
+    CHECK_EQ(b.room(256), SIZE_MAX); // no report yet: as before
+    CHECK(eventually([&] { return fb.wrote.load() == 100; }));
+    fb.report();
+    CHECK(eventually([&] { return b.room(256) == 256; }));
+    CHECK(b.written(end) && woken.load() == 1);
+    CHECK(b.write(0x06, m.data(), m.size(), &end) && end == 400);
+    CHECK_EQ(b.room(256), 0u); // 300 bytes below us
+    CHECK(!b.written(end));
+    CHECK(eventually([&] { return fb.wrote.load() == 400; }));
+    fb.report();
+    CHECK(eventually([&] { return b.written(end); }));
+    CHECK_EQ(b.room(256), 256u);
+    CHECK(b.write(0x06, s.data(), s.size(), &end) && b.room(256) == 156);
+    CHECK(b.write(0x06, s.data(), s.size(), &end) && b.room(256) == 56);
+    // R11-7: the report's second u32 counts the WRITE messages the broker did not send; a report without it keeps it
+    CHECK(b.reports_writes() && b.unsent() == 0);
+    CHECK(eventually([&] { return fb.wrote.load() == 600; }));
+    fb.unsent = 2;
+    fb.report();
+    CHECK(eventually([&] { return b.unsent() == 2; }));
+    fb.short_reports = true;
+    fb.unsent = 5;
+    fb.report();
+    CHECK(eventually([&] { return b.written(end); }) && b.unsent() == 2);
+    b.close();
+    // a new connection counts from 0; a broker without reports: no window
+    FakeBroker old;
+    b.set_endpoint(old.path);
+    CHECK(b.open(err));
+    CHECK(b.write(0x06, m.data(), m.size(), &end) && end == 300);
+    CHECK_EQ(b.room(256), SIZE_MAX);
+    CHECK(b.written(end) && !b.reports_writes() && b.unsent() == 0);
+    b.close();
+}
+
+// T7 (E592 (A)): a request's timeout starts when the broker reports it written, not when it entered the socket - a
+// Virus slow to take it no longer eats the wait for its answer
+TEST(memsync_timeout_starts_when_the_broker_wrote_the_request)
+{
+    FakeBroker fb;
+    fb.report_writes = true;
+    Broker b;
+    b.set_endpoint(fb.path);
+    std::string err;
+    CHECK(b.open(err));
+    uint32_t end = 0;
+    const Bytes x = {0x29, 0xF8, 0, 0};
+    CHECK(b.write(0x06, x.data(), x.size(), &end));
+    CHECK(eventually([&] { return b.room(256) == 256; })); // the broker reports
+    fb.report_writes = false;
+    MemorySync *self = nullptr;
+    std::thread virus;
+    MemorySync sync([&](const Bytes &req) {
+        const auto pk = usbmidi_pack(req, 2);
+        const bool ok = b.write(0x06, pk.data(), pk.size(), &end);
+        virus = std::thread([&] { // the Virus takes the request after 400 ms and answers 100 ms later
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            fb.report();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            self->feed(fake_single(0, 0, 1));
+        });
+        return ok;
+    });
+    self = &sync;
+    sync.pause_ms = 0;
+    sync.sending = [&] { return !b.written(end); }; // DeviceOut::busy() counts a queued message until this
+    Dump r = sync.transact({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x30, 0x00, 0x00, 0xF7}, {0x10, 0x00, 0x00}, 200, 1);
+    virus.join();
+    CHECK_EQ(r.size(), 524u); // 200 ms from the socket write would have ended before the answer
     b.close();
 }
 

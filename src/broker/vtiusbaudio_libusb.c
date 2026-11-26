@@ -10,6 +10,7 @@
 // Rate following (design-rate.md step 3): the stream runs at 44.1 or 48 kHz; vla_switch_rate() changes it in the
 // driver's order (ratesw.h) without releasing the interfaces (a release would hand them back to snd-usb-audio).
 #include "vtiusbaudio_libusb.h"
+#include "vtiaudioshm.h"
 #include "stallfill.h"
 #include "firstmute.h"
 #include "pktstat.h"
@@ -26,9 +27,9 @@
 #define OUT_CH 2
 #define IN_PKT 592  // wMaxPacketSize EP 0x82
 #define OUT_PKT 200 // wMaxPacketSize EP 0x01
-#define NP 10       // packets (ms) per transfer
-#define NR 8        // IN transfers in flight (80 ms)
-#define NW 16       // OUT transfers
+#define NP VTI_AUDIO_NP // packets (ms) per transfer = per delivery into the ring (vtiaudioshm.h, R5-1)
+#define NR VTI_AUDIO_NR // IN transfers in flight (80 ms)
+#define NW (160 / NP) // OUT transfers: 160 ms, room for every IN transfer's mirror after a held thread
 #define OUT_LEAD 12 // OUT packets queued before the first IN packet
 
 extern void (*vti_log)(const char *fmt, ...);
@@ -262,15 +263,20 @@ static int stream_start(void)
     S.rate_lost = 0;
     memset(&S.ps, 0, sizeof S.ps);
     vti_pktstat_set_rate(&S.ps, S.rate);
-    for (int i = 0; i < NW; i++) {
-        S.wt[i] = libusb_alloc_transfer(NP);
-        libusb_fill_iso_transfer(S.wt[i], S.h, EP_OUT, malloc(NP * OUT_PKT), NP * OUT_PKT, NP, out_cb, NULL, 1000);
-        S.wfree[i] = 1;
-    }
-    for (int i = 0; i < NR; i++) {
-        S.rt[i] = libusb_alloc_transfer(NP);
-        libusb_fill_iso_transfer(S.rt[i], S.h, EP_IN, malloc(NP * IN_PKT), NP * IN_PKT, NP, in_cb, NULL, 1000);
-        libusb_set_iso_packet_lengths(S.rt[i], IN_PKT);
+    for (int i = 0; i < NW + NR; i++) { // all before anything starts: a missing one is an error (stream_stop frees)
+        struct libusb_transfer **t = i < NW ? &S.wt[i] : &S.rt[i - NW];
+        const int len = NP * (i < NW ? OUT_PKT : IN_PKT);
+        uint8_t *b = malloc(len);
+        if (!b || !(*t = libusb_alloc_transfer(NP))) {
+            free(b);
+            vti_log("usbaudio: out of memory");
+            return -1;
+        }
+        libusb_fill_iso_transfer(*t, S.h, i < NW ? EP_OUT : EP_IN, b, len, NP, i < NW ? out_cb : in_cb, NULL, 1000);
+        if (i < NW)
+            S.wfree[i] = 1;
+        else
+            libusb_set_iso_packet_lengths(*t, IN_PKT);
     }
     S.ev_started = pthread_create(&S.ev, NULL, event_thread, NULL) == 0;
     int in_ok = 0;
@@ -287,7 +293,7 @@ static int stream_start(void)
             in_ok++;
     }
     unsigned lead[NP];
-    for (int done = 0; done < OUT_LEAD;) { // OUT lead-in with the nominal pattern (the first IN packets come 10 ms
+    for (int done = 0; done < OUT_LEAD;) { // OUT lead-in with the nominal pattern (the first IN packets come NP ms
         int n = OUT_LEAD - done < NP ? OUT_LEAD - done : NP; // later), then every IN packet is mirrored
         for (int k = 0; k < n; k++)
             lead[k] = vti_pkt_nominal(S.rate, S.pattern++);
@@ -385,6 +391,7 @@ int vla_start(libusb_context *ctx, libusb_device_handle *h, uint32_t rate, vla_i
             vti_log("usbaudio: claim interface %d: %s", i, libusb_error_name(r));
             for (int k = 0; k < i; k++)
                 libusb_release_interface(h, k);
+            S.h = NULL; // nothing to stop: the next start must not touch this handle (freed after a replug)
             return -1;
         }
     }

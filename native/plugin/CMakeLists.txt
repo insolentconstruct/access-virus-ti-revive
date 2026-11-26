@@ -27,7 +27,6 @@ smtg_add_vst3plugin(VirusTINative PACKAGE_NAME "TI Revive"
     ${vst3sdk_SOURCE_DIR}/public.sdk/source/vst/vstsinglecomponenteffect.cpp
 )
 target_link_libraries(VirusTINative PRIVATE sdk vstgui_support vticore)
-target_compile_definitions(VirusTINative PRIVATE TIREVIVE_VERSION="${PROJECT_VERSION}") # welcome / What's New
 # the commit in diag.log, so test builds of one version can be told apart (#50, E563)
 # shortcut: read at configure time only; a local build reconfigured later keeps the old commit (CI configures fresh)
 execute_process(COMMAND git rev-parse --short=8 HEAD WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

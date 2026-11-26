@@ -48,14 +48,13 @@ public:
     // which Virus when several are connected (src/broker/devslot.h, #45): broker N serves the N-th one, on its own
     // pipe/socket ("-N" appended; slot 1 = today's names). Set before open().
     void set_slot(int slot) { slot_ = slot; }
-    int slot() const { return slot_; }
     // Become a read-only observer (after open): the broker refuses our writes and sends a copy of the traffic,
     // its log lines and a status line once a second to `h`. False if the broker does not confirm (older than
     // protocol 4: it would have kept us as the owner of the Virus, so the connection is closed).
     // `replay`: first the newest traffic the broker kept from before this moment (a broker older than 0.8.38 ignores it).
     bool observe(ObserveHandler h, std::string &error, bool replay = false);
 
-    // the reader thread calls them under cb_mu_: when a setter returns, no call of the old handler still runs (a
+    // the reader thread calls them (and observe()'s handler) under cb_mu_: when a setter returns, no call of the old handler still runs (a
     // MemorySync destructor on a live broker freed what a running handler used, audit 2026-11-17 #8). A handler must
     // not set a handler itself.
     void on_rx(RxHandler h)
@@ -69,7 +68,32 @@ public:
         state_ = std::move(h);
     }
 
-    bool write(uint8_t ep, const uint8_t *data, size_t len);
+    // One call is one run of WRITE messages (pieces of 1024 bytes): another thread's write never falls between them
+    // (T6, R12-6: an F5 stamp and its event, a SysEx across a piece). `end`: the count of data bytes written on this
+    // connection after this call, for written().
+    bool write(uint8_t ep, const uint8_t *data, size_t len, uint32_t *end = nullptr);
+    // T7 (protocol 6, vtiproto.h): the broker reports each WRITE message done (VTIMSG_WRITTEN). From its first report
+    // on, room() and written() follow the reports; before it, and with a broker that never sends one (older than
+    // 0.8.44), everything counts as written at once, as before.
+    // the bytes the next write may carry while at most `window` bytes wait below us (0: wait for a report)
+    size_t room(size_t window) const
+    {
+        const uint32_t below = sent_ - acked_;
+        return !acks_ ? SIZE_MAX : below < window ? window - below : 0;
+    }
+    // the broker has handled every byte up to `end` (a write's *end)
+    bool written(uint32_t end) const { return !acks_ || (int32_t)(acked_ - end) >= 0; }
+    // the broker has reported a write (protocol 6): written() means something from here on
+    bool reports_writes() const { return acks_; }
+    // R11-7: the broker's count of our WRITE messages it did not send (refused by rule 2, not the owner, a failed
+    // transfer), from the reports; it changes no later than written() for the same write. 0 without reports.
+    uint32_t unsent() const { return unsent_; }
+    // called by the reader after each report (under cb_mu_, as on_rx)
+    void on_written(std::function<void()> h)
+    {
+        std::lock_guard<std::mutex> g(cb_mu_);
+        written_ = std::move(h);
+    }
     // USB control request through the broker; returns bytes transferred or -1. `data` in/out; a reply never writes
     // more than len bytes into it.
     int control(uint8_t request_type, uint8_t request, uint16_t value, uint16_t index, uint8_t *data, uint16_t len,
@@ -79,13 +103,22 @@ public:
     // (vtiaudioshm.h, VTI_AUDIO_SHM_LINUX), 0 = no audio function, -1 = error / not the owner.
     // `rate` = the Virus rate the plug-in wants (44100/48000, protocol 5; older brokers ignore it and stream 44.1 kHz).
     // The broker may keep another one (not the owner, debounce): the real rate is in the shared ring.
-    int audio(bool on, int timeout_ms = 3000, uint32_t rate = 44100);
+    // The default wait is longer than the broker's own worst case (Windows audio_start: 3 s for the first block, then
+    // up to 3 s for its stream thread to end); a reply that comes after the wait is dropped, never taken for the next.
+    static constexpr int kAudioWaitMs = 8000;
+    int audio(bool on, int timeout_ms = kAudioWaitMs, uint32_t rate = 44100);
+#ifdef _WIN32
+    // the per-process event audio() registers; the broker signals it for every input block (the ASIO driver waits on it)
+    static std::string audio_event_name();
+#endif
 
     // The Virus' identification blocks (model, OS version), read by the broker with the original driver's fixed
     // read-only flash sequence (flashinfo.h, E026/E040; owner only, cached per device open). Returns the byte count
     // (blocks in `out`) or -1 (also at once from a broker without the INFO message: older than 0.8.21). Takes about
     // 2 s the first time.
     int flash_info(std::vector<uint8_t> &out, int timeout_ms = 8000);
+    // Does a plug-in own the Virus (VTIMSG_OWNER, T6)? 1 = yes, 0 = no, -1 = no answer (a broker older than 0.8.44).
+    int plugin_owner(int timeout_ms = 1500);
     // macOS: ask the broker to let the system re-enumerate the Virus (software replug after a sleep, E472); no reply,
     // an older broker ignores it
     bool reenumerate();
@@ -99,16 +132,17 @@ public:
 
 private:
     intptr_t fd_ = -1; // POSIX socket / Windows pipe HANDLE (overlapped)
-    int audio_reply_ = 0;
-    bool audio_replied_ = false;
+    uint32_t audio_sent_ = 0, audio_got_ = 0; // AUDIO requests sent / replies read: answered in order, unnumbered
+    std::set<uint32_t> audio_waiting_;        // request numbers an audio() still waits for
+    std::map<uint32_t, int> audio_replies_;   // request number -> result
     int flash_reply_ = 0;
     bool flash_replied_ = false;
+    int owner_reply_ = -1; // ctl_: the last VTIMSG_OWNER_REPLY, -1 = none since the request
     std::vector<uint8_t> flash_;
     uint32_t observe_reply_ = 0;
     std::string name_, endpoint_, broker_version_;
     int slot_ = 1;
     mutable std::mutex info_mu_;
-    ObserveHandler observe_;
     std::thread reader_;
     std::mutex wr_;
     mutable std::mutex ctl_;
@@ -118,10 +152,16 @@ private:
     uint32_t seq_ = 0;
     std::atomic<bool> present_{false}, elsewhere_{false}, stop_{false}, reader_done_{true};
     std::atomic<uint32_t> arrivals_{0};
-    std::mutex cb_mu_; // rx_ and state_: set by any thread, called by the reader
+    std::atomic<uint32_t> sent_{0}, acked_{0}; // T7: data bytes written on this connection / reported done
+    std::atomic<uint32_t> unsent_{0};          // R11-7: WRITE messages the broker reported not sent
+    std::atomic<bool> acks_{false};            // the broker has reported (protocol 6)
+    std::mutex cb_mu_; // rx_, state_, observe_ and written_: set by any thread, called by the reader
     RxHandler rx_;
     StateHandler state_;
+    ObserveHandler observe_;
+    std::function<void()> written_;
     bool send(uint16_t type, const void *a, size_t alen, const void *b = nullptr, size_t blen = 0);
+    bool send_locked(uint16_t type, const void *a, size_t alen, const void *b, size_t blen); // wr_ held
     void read_loop();
 };
 

@@ -231,6 +231,9 @@ TEST(accessfiles_bundle_dumps)
     // a folder holding the bundle is found too
     auto b = AccessFiles::open(t.dir.string(), err);
     CHECK(b && b->init_single() == single);
+    // review 2026-11-25 M8: the init dumps and page B come from one read of the ~15 MB binary, not one read each
+    fs::remove(bundle / "Contents" / "MacOS" / "Virus Control");
+    CHECK(b && b->init_multi() == multi && b->default_page_b() == Bytes(0x100, 0x06));
 }
 
 TEST(accessfiles_no_dumps)

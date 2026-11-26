@@ -1,0 +1,133 @@
+{
+  "round": "0.8.44",
+  "core": "core.json",
+  "core_items": ["LC4", "WC4", "MC4", "MC5"],
+  "lead": "Test of 0.8.44 with the CI test build 45880538174 of the round head (c561c9b): the fixes from the research run (original vs ours, T1-T23: bank sync that goes on past a dead slot, bank check at every connect, broker writes and Windows reads, Control Center refused while a plug-in plays, backups read fresh, 4 ms audio pieces, original projects with routing) and the clean bank sync (no notes and no clock while it runs, like the original). Already done on the local build: hil.sh H1-H6, a block sweep 32-512 at 44.1/48 kHz, a full 512-patch sync with notes (silent, cache identical), your REAPER smoke test and Virus off/on (E603). risk.py: class C on all three systems; by hand: Virus off/on everywhere, sleep on the Mac. Mark each item and add a note where something looks different; Claude reads the marks from this page.",
+  "rules": [
+    "Order: Linux first (the Virus is there), then the Windows VM, later the Mac. Close the DAW before the Virus moves.",
+    "Never power-cycle the Virus while it is attached to the VM without telling Claude first (Claude re-attaches it afterwards).",
+    "Use a disposable project. Only L5 and L6 write to the Virus, and only into the RAM bank you name in the note (the plug-in and the Control Center back it up first).",
+    "No game or other heavy program running during the timing items."
+  ],
+  "sections": [
+    {
+      "id": "linux",
+      "title": "Linux",
+      "where": "This PC, REAPER, the 0.8.44 CI build (installed by Claude)",
+      "prep": ["Nothing to install. Claude installs the CI build, runs hil.sh and posts the result here."],
+      "items": [
+        {
+          "id": "L1",
+          "title": "Automated core run (Claude runs it)",
+          "steps": ["Claude runs <code>scripts/hil.sh --sleep</code> with the installed CI build (asks for your password once), then the block sweep 32-512 at both rates."],
+          "expect": "ALL PASS: cold start, two reopens, export, broker killed while playing, sleep; the sweep without drops."
+        },
+        {
+          "id": "L2",
+          "title": "Clean bank sync at the start",
+          "steps": [
+            "Open a project with a MIDI clip on the TI Revive track and press Play right away, while the plug-in shows its start-up page.",
+            "Keep playing until the editor appears."
+          ],
+          "expect": "Nothing plays during the start-up and the short bank check (about 12 s in all with a full cache), then every note plays on time. No \"SYNC PAUSED\" text, no hanging note."
+        },
+        {
+          "id": "L3",
+          "title": "Virus switched on after the DAW, and a replug while playing",
+          "steps": [
+            "Switch the Virus off, open the project, then switch the Virus on.",
+            "Play, then pull the USB cable for 5 s and plug it in again while it plays."
+          ],
+          "expect": "Both times the plug-in finds the Virus by itself, runs its bank check and plays on within about 20 s; no note hangs after the replug."
+        },
+        {
+          "id": "L4",
+          "title": "Loading a project while notes play",
+          "steps": [
+            "Play a clip with long notes, then open a second project with a different patch (or undo a patch change in REAPER) while it plays."
+          ],
+          "expect": "What sounded stops, the new patch is there and the next notes play with it; nothing hangs."
+        },
+        {
+          "id": "L5",
+          "title": "SAVE with Compare, sort, and closing during a sort",
+          "steps": [
+            "Name a RAM bank you can lose (note it here). Edit a patch, press Compare, then SAVE it into a slot of that bank.",
+            "Sort that bank by name, and close REAPER right after starting the sort. Open the project again."
+          ],
+          "expect": "The stored patch is the edited one, not the one Compare showed. The sort is complete after reopening (closing waits up to 20 s for it). A backup of the overwritten slots is in the backup folder."
+        },
+        {
+          "id": "L6",
+          "title": "Control Center: refused while playing, then backup and restore",
+          "steps": [
+            "With REAPER playing, open the Control Center and its RAM bank list.",
+            "Close REAPER. Back up the bank from L5, then restore it into the same bank."
+          ],
+          "expect": "While the plug-in plays, the bank list, backup and restore say the Virus is in use. Without it, the backup is made, the restore saves \"RAM X before restore ...\" first and the bank matches the backup."
+        },
+        {
+          "id": "L7",
+          "title": "An original Access project with part routing",
+          "steps": ["Open a project saved with the original plug-in whose parts go to other outputs (USB 2/3) or use detune."],
+          "expect": "The parts come out on the same outputs as with the original, with their detune."
+        }
+      ]
+    },
+    {
+      "id": "vm",
+      "title": "Windows 11 VM",
+      "where": "win11 VM, Ableton Live, the 0.8.44 CI build (installed by Claude, setup.exe /quiet)",
+      "prep": ["Claude passes the Virus through to the VM and runs <code>hil-win</code> for the automated core items."],
+      "items": [
+        {
+          "id": "W1",
+          "title": "Automated core run (Claude runs it)",
+          "steps": ["Claude runs <code>hil-win</code> in the VM with the installed CI build."],
+          "expect": "ALL PASS (cold start, two reopens, export, broker killed while playing)."
+        },
+        {
+          "id": "W2",
+          "title": "Plays in Live over ASIO at small and large buffers",
+          "steps": ["Play a busy clip for a minute each at ASIO buffers 64, 256 and 1024 (TI Revive Audio)."],
+          "expect": "No crackles or drop-outs at any buffer; Live's latency shown changes with the buffer."
+        },
+        {
+          "id": "W3",
+          "title": "Control Center while Live plays",
+          "steps": ["With Live playing, open the Control Center and try its RAM bank list and a backup. Then close Live and try again."],
+          "expect": "Refused with a clear message while Live plays; works after Live is closed."
+        },
+        {
+          "id": "W4",
+          "title": "Clean bank sync and project load in Live",
+          "steps": ["Open the project and play right away (as L2), then load another project while it plays (as L4)."],
+          "expect": "Same as L2 and L4."
+        }
+      ]
+    },
+    {
+      "id": "mac",
+      "title": "macOS",
+      "where": "MacBook Air M3, Ableton Live 12 and Logic, the 0.8.44 CI build 45880538174",
+      "prep": [
+        "Plug the Mac into power. Move the Virus' USB cable to the Mac.",
+        "Quit every DAW, then double-click <b>Install test build.command</b> in the folder Claude names in the chat (asks for your password). Claude checks the installed files afterwards."
+      ],
+      "items": [
+        {
+          "id": "M1",
+          "title": "Automated core run (you start it, Claude grades it)",
+          "steps": ["Double-click <code>hil-mac.command</code> in the test build folder and wait for it to finish (about 5 minutes)."],
+          "expect": "ALL PASS (Claude grades the results folder)."
+        },
+        {
+          "id": "M2",
+          "title": "Clean bank sync, project load and playing in Live and Logic",
+          "steps": ["In Live: L2 and L4. In Logic: open a project with the Audio Unit and play for a minute."],
+          "expect": "Same as L2 and L4; Logic plays without drop-outs."
+        }
+      ]
+    }
+  ]
+}

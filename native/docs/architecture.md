@@ -51,7 +51,10 @@ Access is installed or registered. These are the files it loads:
 - **Single dumps:** 524 bytes, decoded to and updated from parameter values. Checksums sit at bytes 265 and 522.
 - **Upgrader:** brings older dumps (format versions 1–12, Virus C 267-byte dumps) to the current layout, ported
   from the original.
-- **`init_messages()`:** the original's start-up sequence (global init, parameter init), byte-identical to it.
+- **`init_messages()`:** the original's start-up sequence (global init, parameter init) with its fixed multi
+  unchanged. The original writes the parts' Detune and Output Select into that multi at connect, so the sequence is
+  byte-identical only while they are the defaults; a project with other values gets the patched multi with its state
+  records (`startup_multi()`, R8-2).
 - **Automation:** `automation.xml` maps (parameter, part) to a VST parameter ID.
 
 ### UI: `src/editor/*` and `plugin/source/viruseditor.*`
@@ -94,9 +97,10 @@ Access is installed or registered. These are the files it loads:
     the Virus' DSP parks stamped bytes in a 2046-byte queue without a fill check until they are due (E235/E238),
     so a flood larger than that within the lead window corrupts its MIDI stream. Musical rates never come near
     the budget; a runaway host is delayed a few blocks, and stamps are absolute, so timing is unchanged.
-  - Active Sensing (`src/device/keepalive.h`): one FE every 300 ms on the timeline, like the original. The DSP arms
-    a watchdog with the first FE and releases every voice about a second after the last one (E237), so FE goes out
-    regularly or not at all - never once.
+  - Active Sensing (`src/device/keepalive.h`): one FE every 300 ms on the timeline, always. The DSP arms a watchdog
+    with the first FE and releases every voice about a second after the last one (E237), so FE goes out regularly or
+    not at all - never once. The original sends FE at the same pace but only while the host processes no audio or is
+    offline/suspended, and apparently only while its F8 clock is off (E602).
   - Timing (sample accurate, the same latency in every session): the Virus plays a time-stamped event when its own
     14-bit stamp clock reaches the stamp. After the start-up sync ping it marks where that clock is 0 with a single
     sample on USB 2; the plug-in finds it and converts every stamp, so an event sounds a fixed `lead` after its
@@ -153,9 +157,12 @@ Access is installed or registered. These are the files it loads:
   envelopes) and values are drawn as lines and text and stay sharp.
 
 ### Device ownership
-- One broker owns the Virus' USB interfaces; it serves **one program at a time** (the owner). Others wait and
-  take over when the owner disconnects. A second program restarting the stream in a running session left the Virus
-  without USB audio until a power cycle (E112), hence the rule.
+- One broker owns the Virus' USB interfaces. It gives the Virus to **one program's plug-in at a time** (the owner):
+  plug-ins of other programs wait and take over when the owner disconnects. A second program restarting the stream
+  in a running session left the Virus without USB audio until a power cycle (E112), and two plug-ins' sync pings
+  reset the Virus' one stamp clock (E148), hence the rule. The ASIO driver and the Control Center share the Virus
+  with the owner; the Control Center refuses its bank list, backup and restore while a plug-in owns it (E596), and
+  the broker keeps one client's SysEx whole on the wire (`src/broker/sxhold.h`).
 - Read-only observers (the Control Center's Nerd mode, protocol 4) never become the owner and cannot write.
 - The plug-in connects only from its first activation (`setActive(true)`): a DAW's plug-in scan (initialize +
   terminate) never reaches the Virus (E147). The Control Center and `tirevive-cc` connect only while an action runs.
@@ -170,7 +177,10 @@ Access is installed or registered. These are the files it loads:
   Revive)" open with it: Windows/Linux the wrapper's id (the original's with byte 15 XOR 0x5A), macOS the bridge's id.
   `moduleinfo.json` declares the other ids compatible (the original Access plug-in, the other platform's, the test
   builds'; VST 3.7.5+ hosts). The project state format is the original's: a state saved by the original (= what the
-  wrapper and the bridge store) loads unchanged, and `getState` returns it byte-identical.
+  wrapper and the bridge store) loads, and `getState` returns it in the same format, though not byte-identical:
+  System Clock globals are dropped (E445), single dumps are marked "eLIB" and upgraded, Input/Atomizer records
+  removed, a Snow keeps 4 parts, edited parts and the Virus slot record are written (docs/formats.md). A state that
+  does not parse is saved back unchanged until something is edited (R8-5).
 
 ## 3. Platforms
 

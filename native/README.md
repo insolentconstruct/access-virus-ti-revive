@@ -49,7 +49,7 @@ ctest --test-dir build-native -C Release        # unit tests, no Virus needed
 1. Close every other program that uses the Virus: only one session can own it.
 2. Start REAPER (any sample rate; 44.1 kHz avoids the conversion). With PipeWire for example `pw-jack reaper`.
 3. Insert "TI Revive". On the first start it syncs RAM A–D from the Virus. That takes about 8 minutes;
-   the progress bar shows it, and you can play meanwhile (the sync pauses while notes arrive). The banks are cached in `~/.local/share/virus-ti-native/cache`; rename that folder
+   the progress bar shows it; like the original, notes you play meanwhile are not played. The banks are cached in `~/.local/share/virus-ti-native/cache`; rename that folder
    to force a new sync.
 4. Where the other banks come from:
    - ROM A–Z: the user's `firmware.bin`.

@@ -1,7 +1,7 @@
 // library.cpp - see library.h.
 #include "library.h"
 #include "model/bankdrop.h"
-#include "device/sendguard.h"
+#include "model/patchhistory.h"
 #include "model/remotedevice.h"
 #include "model/utf8.h"
 #include <algorithm>
@@ -53,32 +53,37 @@ bool load_library_file(const std::string &path, PatchLibrary &lib, const std::ve
     for (size_t i = 0; i + 8 < d.size(); i++) {
         if (!(d[i] == 0x00 && d[i + 1] == 0x20 && d[i + 2] == 0x33 && d[i + 3] == 0x01 && d[i + 5] == 0x10))
             continue;
-        auto end = std::find(d.begin() + i, d.end(), 0xF7);
+        // ends at the first status byte: a dump cut off before its F7 does not run into the next one
+        auto end = std::find_if(d.begin() + i, d.end(), [](uint8_t b) { return b & 0x80; });
         if (end == d.end())
             break;
-        std::vector<uint8_t> m = {0xF0};
-        m.insert(m.end(), d.begin() + i, end + 1);
-        if (!one_message(m.data(), m.size())) { // a status byte inside (damaged or foreign file): never on the wire
+        if (*end != 0xF7) { // a status byte inside (damaged or foreign file): never on the wire
             skip("a byte above 0x7F");
-            i = end - d.begin();
+            i = end - d.begin(); // the next dump's header may follow this byte (its F0)
             continue;
         }
-        // other sizes are skipped like the original's decoder does (E356); a version upgrade_single does not know
-        // (e.g. 127) stays out too: the original would list it, but what such a dump does on the Virus is unknown
-        if (m.size() == 524) {
+        std::vector<uint8_t> m = {0xF0};
+        m.insert(m.end(), d.begin() + i, end + 1);
+        // other sizes are skipped like the original's decoder does (E356). A version we know no format for stays out
+        // too: above 12 (the latest, formats.md), or 8 and up in a 267-byte dump (only a Virus C dump, below 8, gets
+        // its pages C/D from the upgrade). The original would list it, but what such a dump does on the Virus is unknown
+        const bool virus_c = m.size() == 267;
+        const int version = virus_c || m.size() == 524 ? m[9] : -1;
+        if (version < 0) {
+            skip(std::to_string(m.size()) + " bytes");
+        } else if (virus_c && page_b.size() != 256) {
+            skip("Virus C without page B");
+        } else if (version > 12 || (virus_c && version >= 8)) {
+            skip("version " + std::to_string(version));
+        } else if (!virus_c) {
             found.push_back(m);
-        } else if (m.size() == 267 && page_b.size() == 256) { // Virus C: page A only -> upgrade like the original
-            const int version = m[9];
+        } else { // page A only -> upgrade like the original
             m.resize(524, 0);
             m[523] = 0xF7;
             if (RemoteDevice::upgrade_single(m, page_b))
                 found.push_back(m);
             else
                 skip("version " + std::to_string(version));
-        } else if (m.size() == 267) {
-            skip("Virus C without page B");
-        } else {
-            skip(std::to_string(m.size()) + " bytes");
         }
         i = end - d.begin();
     }
@@ -89,7 +94,7 @@ bool load_library_file(const std::string &path, PatchLibrary &lib, const std::ve
     for (auto &m : found) {
         if (!by_program)
             break;
-        if (m[8] >= 128 || used[m[8]])
+        if (used[m[8]])
             by_program = false;
         else
             used[m[8]] = true;
@@ -145,11 +150,8 @@ bool same_patches(const PatchLibrary &a, const PatchLibrary &b)
     const size_t n = std::max(a.dumps.size(), b.dumps.size());
     for (size_t i = 0; i < n; i++) {
         const auto &x = i < a.dumps.size() ? a.dumps[i] : gap, &y = i < b.dumps.size() ? b.dumps[i] : gap;
-        if (x.size() != y.size())
+        if (!PatchHistory::same(x, y))
             return false;
-        for (size_t k = 0; k < x.size(); k++)
-            if (k != 7 && k != 8 && k != 265 && k != 522 && x[k] != y[k])
-                return false;
     }
     return true;
 }
@@ -272,12 +274,18 @@ bool save_library(const PatchLibrary &lib, std::string &error)
         while (n)
             trk.push_back(b[--n]);
     };
-    for (size_t i = 0; i < lib.dumps.size() && i < 128; i++) {
+    std::vector<uint8_t> syx; // the same dumps for a .syx library (import keeps a .syx of several banks as it is)
+    for (size_t i = 0; i < lib.dumps.size(); i++) {
         std::vector<uint8_t> m = lib.dumps[i];
         if (m.size() != 524) // a gap: no patch at this position (the original leaves it out, E298)
             continue;
+        if (i >= 128) { // the program byte ends at 127: refused rather than losing the patches after it
+            error = "More than 128 patches";
+            return false;
+        }
         m[7] = 1, m[8] = (uint8_t)i;
         vti::BankDrop::checksums(m);
+        syx.insert(syx.end(), m.begin(), m.end());
         varlen(120);
         trk.push_back(0xF0);
         varlen((uint32_t)m.size() - 1);
@@ -289,20 +297,22 @@ bool save_library(const PatchLibrary &lib, std::string &error)
     for (int s = 24; s >= 0; s -= 8)
         f.push_back((uint8_t)(trk.size() >> s));
     f.insert(f.end(), trk.begin(), trk.end());
-    std::string tmp = lib.path + ".tmp";
-    {
-        std::ofstream o(u8path(tmp), std::ios::binary);
-        o.write((const char *)f.data(), (std::streamsize)f.size());
-        if (!o) {
-            error = "cannot write " + tmp;
-            return false;
-        }
-    }
+    if (lower_ext(u8path(lib.path)) == ".syx")
+        f = std::move(syx);
+    const fs::path tmp = u8path(lib.path + ".tmp");
+    std::ofstream o(tmp, std::ios::binary);
+    o.write((const char *)f.data(), (std::streamsize)f.size());
+    o.close(); // checked after the flush: a full disk fails only here
     std::error_code ec;
-    fs::rename(u8path(tmp), u8path(lib.path), ec);
-    if (ec)
-        error = ec.message();
-    return !ec;
+    if (o)
+        fs::rename(tmp, u8path(lib.path), ec);
+    if (!o || ec) {
+        error = !o ? "cannot write " + lib.path + ".tmp" : ec.message();
+        std::error_code rm;
+        fs::remove(tmp, rm);
+        return false;
+    }
+    return true;
 }
 
 std::string xdg_documents_dir(const std::string &home, const std::string &user_dirs)
@@ -326,6 +336,17 @@ std::string xdg_documents_dir(const std::string &home, const std::string &user_d
         return v;
     }
     return {};
+}
+
+bool commit_library(const PatchLibrary &lib, std::vector<std::vector<uint8_t>> &cur,
+                    const std::vector<std::vector<uint8_t>> &after, std::string &error)
+{
+    PatchLibrary out = lib;
+    out.dumps = after;
+    if (!save_library(out, error))
+        return false;
+    cur = after;
+    return true;
 }
 
 std::string library_dir()

@@ -18,7 +18,6 @@
 #ifdef __linux__
 #include "resetguard.h"
 #include "giveback.h"
-#include <stdio.h>
 #include <time.h>
 #define RESET_GAP_S 5 // E136, see resetguard.h
 static int gb_claim(void *h, int i) { return libusb_claim_interface((libusb_device_handle *)h, i); }
@@ -37,7 +36,6 @@ static int reset_allowed(void)
 #ifdef __APPLE__
 #include "resetguard.h"
 #include <time.h>
-#include <unistd.h>
 #define REENUM_GAP_S 60 // E136, E312: USB resets close together have hung the Virus until a power cycle
 #endif
 
@@ -82,6 +80,7 @@ struct vti {
     int leak;               // transfers still out after the close: keep this struct (rx_stop)
     volatile int closing;   // rx_stop runs: transfers cancelled, nothing resubmitted, readers still draining
     uint8_t bulk[16];       // by endpoint number: 1 = bulk (Virus TI Snow), 0 = interrupt (TI/TI2 Desktop, E021) - E387
+    uint16_t rxmax[16];     // IN endpoints by number: wMaxPacketSize, what each read asks for (vti_rx_len, R3-6)
     unsigned long idle;     // FF FE 00 00 packets dropped on a bulk EP 0x85 (E387)
     int captured;           // macOS libusb-audio test: taken from Apple's audio driver (E511), given back at close
 };
@@ -99,6 +98,8 @@ static void find_bulk_endpoints(vti *v)
             const struct libusb_interface_descriptor *d = &cfg->interface[i].altsetting[a];
             for (int e = 0; e < d->bNumEndpoints; e++) {
                 uint8_t ep = d->endpoint[e].bEndpointAddress;
+                if (ep & 0x80)
+                    v->rxmax[ep & 15] = d->endpoint[e].wMaxPacketSize;
                 if ((d->endpoint[e].bmAttributes & 3) == LIBUSB_TRANSFER_TYPE_BULK && strlen(list) < sizeof list - 4) {
                     v->bulk[ep & 15] = 1;
                     snprintf(list + strlen(list), sizeof list - strlen(list), " %02x", ep);
@@ -274,6 +275,21 @@ static void rx_clear_halt(rxep *e)
     pthread_mutex_unlock(&e->mu);
 }
 
+// E591 (4): silent after an error with a transfer parked (vti_rx_stuck): the transfers still out are cancelled, the
+// halt cleared, then one probes again as after any error (S143). -1 when even the cancel did not bring them back.
+static int rx_reset(rxep *e)
+{
+    rx_clear_halt(e);
+    pthread_mutex_lock(&e->mu);
+    const int left = e->inflight;
+    int slot;
+    if (!left && !e->v->closing && vti_rxq_may_resubmit(&e->q, 1) && (slot = vti_unpark(&e->parked)) >= 0 &&
+        rx_submit(e, slot))
+        vti_rxq_push(&e->q, slot, -4, NULL, 0);
+    pthread_mutex_unlock(&e->mu);
+    return left ? -1 : 0;
+}
+
 static void *reader(void *p)
 {
     rxep *e = p;
@@ -281,13 +297,32 @@ static void *reader(void *p)
     const uint8_t ep = e->ep;
     int fails = 0, last = 0; // errors in a row and the last one (vtireaderr.h)
     int gave_up = 0;
+    int armed = 0;                // an error since the last data or reset (vti_rx_stuck)
+    uint64_t last_ns = mono_ns(); // the last record, data or error
     vti_rx_rec rec;
     for (;;) { // after stop, until the queue is empty: the close hands on what still came (S139)
         if (rx_take(e, &rec)) {
             if (v->stop)
                 break;
+            const uint64_t silent_ms = (mono_ns() - last_ns) / 1000000ull;
+            pthread_mutex_lock(&e->mu);
+            const unsigned parked = e->parked;
+            pthread_mutex_unlock(&e->mu);
+            if (vti_rx_stuck(armed, parked, v->closing || gave_up, silent_ms)) {
+                armed = 0;
+                vti_log("vti: read ep %02x: no data for %llu ms after an error - transfers reset (E591)\n", ep,
+                        (unsigned long long)silent_ms);
+                if (rx_reset(e)) { // they never came back: the broker closes it and opens the Virus again
+                    vti_log("vti: read ep %02x: transfers still pending after the reset, giving up on the device\n", ep);
+                    v->dead = 1;
+                    gave_up = 1;
+                }
+                last_ns = mono_ns();
+            }
             continue;
         }
+        last_ns = mono_ns();
+        armed = rec.err != 0;
         if (gave_up && !vti_rx_hand_on_after_giveup(rec.err))
             continue;
         if (rec.err && !gave_up) {
@@ -356,14 +391,15 @@ static int rx_start(vti *v)
         pthread_cond_init(&e->cv, NULL);
         vti_rxq_init(&e->q, e->recs, RX_QCAP);
         pthread_mutex_lock(&e->mu);
+        const int len = vti_rx_len(v->rxmax[e->ep & 15]); // one packet per transfer (R3-6)
         for (int s = 0; s < RX_PENDING; s++) {
             e->t[s] = libusb_alloc_transfer(0);
             if (!e->t[s])
                 continue;
             if (v->bulk[e->ep & 15])
-                libusb_fill_bulk_transfer(e->t[s], v->h, e->ep, e->buf[s], VTI_RX_MAX, rx_done, e, 0);
+                libusb_fill_bulk_transfer(e->t[s], v->h, e->ep, e->buf[s], len, rx_done, e, 0);
             else
-                libusb_fill_interrupt_transfer(e->t[s], v->h, e->ep, e->buf[s], VTI_RX_MAX, rx_done, e, 0);
+                libusb_fill_interrupt_transfer(e->t[s], v->h, e->ep, e->buf[s], len, rx_done, e, 0);
             int r = rx_submit(e, s);
             if (r)
                 vti_log("vti: read ep %02x: transfer %d not submitted (%s)\n", e->ep, s, libusb_error_name(r));
@@ -517,8 +553,11 @@ vti *vti_open(vti_rx_cb cb, void *user)
     v->linked = 1;
     return v;
 fail:
-    if (v->h)
+    if (v->h) {
+        for (int i = 3; i <= 4; i++) // interface 3 when 4 failed, both when the readers did not start
+            libusb_release_interface(v->h, i); // not claimed: LIBUSB_ERROR_NOT_FOUND, nothing sent
         libusb_close(v->h);
+    }
     libusb_exit(v->ctx);
     free(v);
     return NULL;
@@ -578,7 +617,15 @@ struct write_ctx {
     vti *v;
     uint8_t ep;
     int err; // last libusb error that was not a timeout
+    vti_keep_fn keep;
+    void *u;
 };
+
+static int write_keep(void *ctx) // a packet waits on a busy Virus: go on unless it is gone or the caller says stop
+{
+    struct write_ctx *c = ctx;
+    return !c->v->dead && (!c->keep || c->keep(c->u));
+}
 
 static int write_packet(void *ctx, const uint8_t *data, int n, int *done)
 {
@@ -603,23 +650,30 @@ static void tap_control(uint8_t rt, uint8_t req, uint16_t val, uint16_t idx, uin
     g_tap(2, 0, rec, 12, data, (rt & 0x80) ? (r > 0 ? r : 0) : len);
 }
 
-int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len)
+int vti_write_keep(vti *v, uint8_t ep, const uint8_t *data, int len, vti_keep_fn keep, void *u)
 {
     if (g_tap) // before the transfer: the order on the wire
         g_tap(0, ep, data, len, NULL, 0);
     int max = ep == VTI_EP_MI03_OUT ? 8 : 32; // wMaxPacketSize (lsusb -v)
-    struct write_ctx c = {v, ep, 0};
+    struct write_ctx c = {v, ep, 0, keep, u};
     int timeouts = 0;
-    // a timed-out packet was NAKed, never taken (the link is lossless, E239): try it again, up to 5 s in a row
-    int r = vti_write_chunks(&c, write_packet, data, len, max, 5, &timeouts);
+    // a timed-out packet was NAKed, never taken (the link is lossless, E239): try it again while the Virus is busy
+    int r = vti_write_chunks(&c, write_packet, data, len, max, VTI_WRITE_TRIES, &timeouts, write_keep);
     if (timeouts)
-        vti_log("vti: write ep %02x: %d timeout(s), %s\n", ep, timeouts, r ? "gave up" : "then accepted");
+        vti_log("vti: write ep %02x: %d timeout(s), %s\n", ep, timeouts,
+                !r ? "then accepted" : r == VTI_WRITE_STOPPED ? "stopped (device or client gone)" : "gave up");
+    if (r == VTI_WRITE_STUCK) { // the existing failed-device path closes and reopens it (writeretry.h)
+        vti_log("vti: write ep %02x: refused for %d s: treating the Virus as failed\n", ep, VTI_WRITE_TRIES);
+        v->dead = 1;
+    }
     if (r && c.err)
         vti_log("vti: write ep %02x: %s\n", ep, libusb_error_name(c.err));
     if (r && vti_libusb_stalled(c.err)) // a stalled OUT endpoint refuses every later write until its halt is cleared
         libusb_clear_halt(v->h, ep);
     return r;
 }
+
+int vti_write(vti *v, uint8_t ep, const uint8_t *data, int len) { return vti_write_keep(v, ep, data, len, NULL, NULL); }
 
 int vti_control(vti *v, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex, uint8_t *data,
                 uint16_t len)
@@ -630,14 +684,6 @@ int vti_control(vti *v, uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue
                 libusb_error_name(r));
     tap_control(bmRequestType, bRequest, wValue, wIndex, len, r < 0 ? -1 : r, data);
     return r < 0 ? -1 : r;
-}
-
-int vti_audio(vti *v, int on, const char *event_name) // broker audio exists only behind vtibroker (vticore_pipe.c)
-{
-    (void)v;
-    (void)on;
-    (void)event_name;
-    return -1;
 }
 
 int vti_link(vti *v, int on)

@@ -7,6 +7,7 @@
 #include "device/hostmidi.h"
 #include <cmath>
 #include <limits>
+#include <vector>
 
 using namespace vti;
 
@@ -40,6 +41,25 @@ TEST(hostmidi_clock_tempo_is_sane)
     CHECK(clock_tempo(0.5) == 1.0);
 }
 
+// research T9 (R9-3): while a dump request is open the clock ticks are left out (each F8 can make the DSP queue a
+// sync report behind the answer, E251), and the grid moves on, so the clock resumes on its beat, not shifted
+TEST(hostmidi_clock_held_keeps_its_grid)
+{
+    std::vector<int64_t> ticks;
+    auto emit = [&](int64_t t) { ticks.push_back(t); };
+    const double per = 918.75; // 120 BPM at 44.1 kHz
+    double next = clock_ticks(100.0, 100.0 + 3 * per, per, false, emit);
+    CHECK_EQ(ticks.size(), 3u);
+    CHECK(ticks[0] == 100 && ticks[1] == 1019 && ticks[2] == 1938);
+    next = clock_ticks(next, 100.0 + 10 * per, per, true, emit); // held: none
+    CHECK_EQ(ticks.size(), 3u);
+    CHECK(next == 100.0 + 10 * per);
+    next = clock_ticks(next, 100.0 + 12 * per, per, false, emit);
+    CHECK_EQ(ticks.size(), 5u);
+    CHECK(ticks[3] == std::lround(100.0 + 10 * per)); // the 11th tick of the grid
+    CHECK(next == 100.0 + 12 * per);
+}
+
 // Issue #18: the mod wheel did nothing in Ableton Live - a VST3 plug-in gets a controller only when it maps it to a
 // parameter (IMidiMapping), and only aftertouch and pitch bend were mapped. Controllers 0..119 now map too; the
 // channel mode messages 120..127 (all notes off, reset, ...) stay unmapped.
@@ -70,7 +90,7 @@ TEST(hostmidi_mapped_controllers_share_the_automation_budget)
         uint8_t m[3];
         size_t n = mapped_message(3, 129, (block % 100) / 100.0, m);
         if (p.set(3, 129, m, n, 7, block))
-            CHECK(q.push(bend));
+            CHECK(q.push(bend, false)); // bend: outside the original's 20 ms gate (T20)
         q.refill(32, 48000);
         q.drain(96, [&](uint32_t id) {
             MappedPending::Slot s;
@@ -115,4 +135,30 @@ TEST(hostmidi_pedals_go_at_once_but_only_on_a_flip)
     for (int i = 0; i < 1500; i++) // a 0..127 saw, 12 cycles in a second: two flips each, not 1500 messages
         sent += p.flips(2, 64, (i * 127 / 125) % 128);
     CHECK(sent >= 20 && sent <= 25);
+}
+
+// R7-3: a part's single dump was queued (a patch load, a state): the controllers still waiting on its channel go, the
+// new patch would get the old values on top; like the original's slot clear, the standard controllers (not in the
+// patch: mod wheel, breath, volume, expression, the pedals 64-66), aftertouch and bend stay, as do other channels
+TEST(hostmidi_a_load_drops_the_waiting_controllers_of_its_channel)
+{
+    CHECK(standard_controller(0) && standard_controller(4) && !standard_controller(5) && standard_controller(6));
+    CHECK(standard_controller(9) && !standard_controller(10) && standard_controller(11) && standard_controller(16));
+    CHECK(!standard_controller(17) && !standard_controller(63) && standard_controller(64) && standard_controller(66));
+    CHECK(!standard_controller(67) && !standard_controller(119));
+    MappedPending p;
+    const uint8_t cut[3] = {0xB3, 40, 1}, mod[3] = {0xB3, 1, 2}, at[2] = {0xD3, 3}, bend[3] = {0xE3, 0, 64},
+                  other[3] = {0xB4, 40, 5};
+    p.set(3, 40, cut, 3, 0, 0);
+    p.set(3, 1, mod, 3, 0, 0);
+    p.set(3, 128, at, 2, 0, 0);
+    p.set(3, 129, bend, 3, 0, 0);
+    p.set(4, 40, other, 3, 0, 0);
+    p.drop_loaded(3);
+    MappedPending::Slot s;
+    CHECK(!p.take(3, 40, s));
+    CHECK(p.take(3, 1, s) && p.take(3, 128, s) && p.take(3, 129, s) && p.take(4, 40, s));
+    CHECK(p.set(3, 40, cut, 3, 0, 0)); // free again: a change after the load is queued anew
+    p.drop_loaded(16);                 // out of range: nothing
+    CHECK(p.take(3, 40, s));
 }

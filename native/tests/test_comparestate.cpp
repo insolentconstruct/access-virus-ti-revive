@@ -89,3 +89,19 @@ TEST(comparestate_edited_for_the_project)
     c.start(1, single(2), p);
     CHECK(c.edited(1, e) && e == single(2));
 }
+
+// R7-2: a SAVE, copy or rename while comparing first goes back to the edit (VirusPlugin::back_to_edit = stop): it
+// stores the edit, which is also what the project keeps, and the reference stays for the next Compare
+TEST(comparestate_save_while_comparing_takes_the_edit)
+{
+    CompareState c;
+    c.set_reference(2, single(1));
+    Patch p;
+    c.start(2, single(2), p);
+    Patch project, saved;
+    CHECK(c.edited(2, project));
+    CHECK(c.stop(2, saved));
+    CHECK(saved == single(2) && saved == project && saved != c.reference(2));
+    CHECK(!c.active(2) && c.reference(2) == single(1));
+    CHECK(c.start(2, saved, p) && p == single(1)); // Compare works again after the SAVE
+}

@@ -1,5 +1,6 @@
 // state.cpp - the plug-in's project state records and the meta parameter value mapping (see state.h)
 #include "model/state.h"
+#include "model/bankdrop.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -13,9 +14,16 @@ std::vector<std::vector<uint8_t>> parse_container(const std::vector<uint8_t> &d)
     std::vector<std::vector<uint8_t>> out;
     if (d.size() < 8 || memcmp(d.data(), "MIDI", 4))
         return out;
-    size_t end = std::min(d.size(), 8 + ((size_t)d[4] << 24 | d[5] << 16 | d[6] << 8 | d[7]));
+    auto len = [&](size_t i) { // big-endian, little-endian when that has a top-10 bit set (the original's fallback)
+        const uint32_t be = (uint32_t)d[i] << 24 | d[i + 1] << 16 | d[i + 2] << 8 | d[i + 3];
+        return (size_t)((be & 0xFFC00000u) ? (uint32_t)d[i + 3] << 24 | d[i + 2] << 16 | d[i + 1] << 8 | d[i] : be);
+    };
+    const size_t total = len(4);
+    if (total > d.size() - 8)
+        return out; // a truncated project: nothing, so the caller keeps the data as it came (R8-5)
+    const size_t end = 8 + total;
     for (size_t pos = 8; pos + 4 <= end;) {
-        size_t n = (size_t)d[pos] << 24 | d[pos + 1] << 16 | d[pos + 2] << 8 | d[pos + 3];
+        size_t n = len(pos);
         pos += 4;
         if (pos + n > end)
             break;
@@ -65,6 +73,72 @@ int upgrade_state_dumps(std::vector<std::vector<uint8_t>> &recs)
     return n;
 }
 
+int mark_project_dumps(std::vector<std::vector<uint8_t>> &recs)
+{
+    int n = 0;
+    for (auto &r : recs)
+        if (r.size() == 524 && r[0] == 0xF0 && r[1] == 0x00 && r[2] == 0x20 && r[3] == 0x33 && r[4] == 0x01 &&
+            r[6] == 0x10) {
+            set_patch_origin(r, 0, 0, false);
+            BankDrop::checksums(r);
+            n++;
+        }
+    return n;
+}
+
+int drop_input_atomizer(std::vector<std::vector<uint8_t>> &recs)
+{
+    const size_t before = recs.size();
+    recs.erase(std::remove_if(recs.begin(), recs.end(),
+                              [](const std::vector<uint8_t> &r) {
+                                  return r.size() == 11 && r[0] == 0xF0 && r[6] == 0x6F && r[8] == 0x7E;
+                              }),
+               recs.end());
+    return (int)(before - recs.size());
+}
+
+int keep_parts(std::vector<std::vector<uint8_t>> &recs, int n)
+{
+    const size_t before = recs.size();
+    recs.erase(std::remove_if(recs.begin(), recs.end(),
+                              [n](const std::vector<uint8_t> &r) {
+                                  const bool dump = r.size() == 524 && r[0] == 0xF0 && r[6] == 0x10 && r[7] == 0x00;
+                                  const bool channel = (r.size() == 2 || r.size() == 3) && r[0] >= 0x80 && r[0] < 0xF0;
+                                  return (dump && r[8] >= n) || (channel && (r[0] & 15) >= n);
+                              }),
+               recs.end());
+    return (int)(before - recs.size());
+}
+
+static bool is_multi_dump(const std::vector<uint8_t> &m)
+{
+    return m.size() == 267 && m[0] == 0xF0 && m[6] == 0x11 && m[266] == 0xF7;
+}
+
+std::vector<uint8_t> startup_multi(const std::vector<uint8_t> &fixed, const std::vector<uint8_t> &stored)
+{
+    if (!is_multi_dump(fixed) || !is_multi_dump(stored))
+        return fixed;
+    auto m = fixed;
+    std::copy(stored.begin() + 137, stored.begin() + 153, m.begin() + 137); // Detune, parts 1-16
+    std::copy(stored.begin() + 185, stored.begin() + 201, m.begin() + 185); // Output Select, parts 1-16
+    unsigned sum = 0; // the template's add7 checksum over bytes 5..264
+    for (int i = 5; i < 265; i++)
+        sum += m[i];
+    m[265] = (uint8_t)(sum & 0x7F);
+    return m;
+}
+
+void multi_routing_values(const MidiMessage &t, const std::vector<uint8_t> &multi,
+                          std::map<int, std::map<std::string, int>> &parts)
+{
+    if (!is_multi_dump(multi))
+        return;
+    for (auto &b : t.bytes)
+        if (b.part >= 0 && b.part < 16 && (b.index == 137 + b.part || b.index == 185 + b.part))
+            parts[b.part][b.content] = multi[(size_t)b.index];
+}
+
 bool is_part_dump(const std::vector<uint8_t> &m, int part)
 {
     return m.size() == 524 && m[0] == 0xF0 && m[6] == 0x10 && m[7] == 0x00 && m[8] == part;
@@ -94,7 +168,9 @@ int add_missing_part_dumps(std::vector<std::vector<uint8_t>> &recs, const std::v
 }
 
 // editor-only per-part settings (LFO link buttons, ...) have no Virus message: they are kept in the state as
-// F0 7D 'V' 'T' 'N' 01 <part> <path ASCII> 00 <value> F7 (7D = non-commercial ID: the original and the Virus ignore it)
+// F0 7D 'V' 'T' 'N' 01 <part> <path ASCII> 00 <value> F7 (7D = non-commercial ID). TI Revive never sends them; the
+// original's setChunk does not filter them (R8-8: only 0xFF and 6F/7E records), so a TI Revive project opened there
+// most likely sends them to the Virus, which is not known to act on a 7D message (wire not traced)
 std::vector<uint8_t> editor_record(const std::string &path, int part, int value)
 {
     std::vector<uint8_t> m = {0xF0, 0x7D, 'V', 'T', 'N', 0x01, (uint8_t)(part & 0x7F)};
