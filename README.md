@@ -58,8 +58,8 @@ contains no Access material. No kernel code of its own is installed.
 - **Timing:** notes land sample-accurately on the grid (measured jitter 0.01 to 0.33 ms, std. dev.); the plug-in
   reports its latency so the DAW compensates it. Since 0.8.39 that delay follows your buffer down to 32 samples, as the original's does (3584 samples plus the buffer: 76 ms at 64 samples and 48 kHz, before 82.7 ms), and notes you play live skip it in DAWs that mark them (Ableton Live), about 22 ms. Since 0.8.41 "Lower latency (experimental)" on the Control Center's Options page shortens that delay to 36 to 48 ms at buffers up to 256 (55 to 59 ms at 512); it leaves your DAW only about 20 ms, so switch it off if notes come late. If you record a part you play into Ableton Live, switch the plug-in's Live Mode on while you record: otherwise Live puts the take about 50 ms later than you heard it (measured on macOS with Live 12; the original's VST3 can also tell Live only one latency). Played notes can come 1 to 3 ms late now and then (the original stamps them the same way); "Even rhythm for played notes" on the Control Center's Options page (since 0.8.41) plays them about 3 ms later, so they come at most about 1.3 ms late (measured on a Mac). The Virus follows the project's sample rate like with the
   original: it runs at 44.1 or 48 kHz, at other rates (88.2, 96 kHz, ...) the plug-in converts (since 0.8.32).
-- **First start:** the plug-in reads RAM A-D from the Virus (a few minutes without a cache); you can play meanwhile -
-  the sync pauses while notes arrive.
+- **First start:** the plug-in reads RAM A-D from the Virus (a few minutes without a cache). Like the original, notes
+  you play meanwhile are not played.
 - **Coming from 0.7.x:** the classic plug-in "Virus TI (TI Revive)" (the original Access plug-in in a wrapper) is
   replaced. Projects saved with it open with "TI Revive" (same plug-in ID). The Access software that
   earlier versions installed is offered for removal; the files the plug-in needs stay.
@@ -473,8 +473,6 @@ Revive rebuilds that plug-in, and we want to fix its problems instead of copying
 
 - In our timing test the original plug-in played the first note late and dropped the second. TI Revive puts all 256
   notes on the grid.
-- While it starts up or syncs banks, the original plug-in drops the notes you play and sends "All Notes Off". TI
-  Revive holds the notes back at start-up and pauses its bank sync while you play.
 - Owners reported drifting notes and sync errors over USB
   ([Gearspace](https://gearspace.com/threads/fixing-access-virus-sync-issues.839737/),
   [Ableton forum](https://forum.ableton.com/viewtopic.php?p=938076)). TI Revive stamps every note on the Virus' own
@@ -580,9 +578,7 @@ hardware (TI2 Desktop) - details and raw numbers in [`findings/evidence.md`](fin
 - When the Virus is busy for a moment, for example while you change a patch on its panel, it holds back what the computer sends. Since 0.8.26 the plug-in sends it again instead of dropping it, so a bank sync or patch dump no longer breaks. (E239)
 - New projects reliably reset the Virus: it drops the message that follows a multi dump, so the plug-in now pauses
   250 ms after one (part 1 kept its old patch in 3 of 11 start-ups before, 0 of 8 after; E145).
-- Notes play while the bank sync runs: the sync pauses while you play (dump requests delay the Virus' notes by
-  ~130 ms) and continues in the gaps; notes are only held back for the first ~4 s, when the Virus would play them
-  up to 1.6 s late (E144).
+- Like the original, a bank sync runs without notes: what you play while it runs is not played and the MIDI clock pauses, so no dump request makes the Virus play notes late (by about 130 ms).
 - While the plug-in waits for the answer to a dump request (about a second each, while it reads presets it has not
   cached yet), it holds its MIDI clock and the DAW's automation, like the original. The arpeggiator and clock-synced
   LFOs can stop for that moment; automation goes out with its latest value right after.

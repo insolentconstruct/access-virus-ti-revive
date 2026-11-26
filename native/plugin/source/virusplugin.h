@@ -585,9 +585,6 @@ public:
     std::atomic<bool> stop_warm_{false}; // terminate(): stops the bank sync and the category pass
     // the host plays (transport running or notes): steady_clock milliseconds of the last activity (audio thread)
     std::atomic<int64_t> last_play_ms_{0};
-    std::atomic<int64_t> last_note_ms_{0}; // last note-on from the host (pauses the bank sync)
-    int64_t sync_paused_ms_ = 0;           // bank sync thread only: time paused for notes so far
-    std::atomic<bool> sync_paused_{false}; // the bank sync waits for a gap between notes
     std::atomic<int> sync_eta_s_{-1};       // see sync_eta()
     int marker_retries_ = 0; // process(): sync pings sent again after "no marker"
     ResyncTimer resync_;     // process(): VTI_NATIVE_RESYNC test switch (S094, E491), off by default
@@ -595,7 +592,7 @@ public:
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
-    bool wait_until_quiet(); // the bank sync's before_request: waits while notes arrive (playing has priority)
+    bool wait_until_quiet(); // the bank sync's before_request: waits until a dump in pieces is out
     void wait_virus_ready(); // the bank sync thread at start-up / takeover: probe, then the sync marker (see .cpp)
     void set_sync_progress(int v);   // the original's "Syncing memory" page: 0..126 shown, 127 hidden
     void set_recall_progress(int v); // its "Starting up" page with the ring (startprogress.h)
@@ -658,7 +655,6 @@ public:
         return bank < 4 ? std::string("RAM ") + (char)('A' + bank) : std::string("ROM ") + (char)('A' + bank - 4);
     }
     bool ui_changed() { return ui_dirty_.exchange(false); }
-    bool sync_paused() const { return syncing_.load() && sync_paused_.load(); } // the sync page's note
     // estimated seconds the bank sync still needs (-1: unknown or done); a first sync reads 512 programs at ~1 s each
     int sync_eta() const { return syncing_.load() ? sync_eta_s_.load() : -1; }
     // the sync page's line with the patch just fetched ("RAM A 85 / 128: NAME"); empty: nothing fetched yet or done

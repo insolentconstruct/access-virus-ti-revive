@@ -314,8 +314,6 @@ def page_landing(latest, releases, sums):
         <ul>
           <li>In our timing test the original plug-in played the first note late and dropped the second. TI Revive puts all 256
           notes on the grid.</li>
-          <li>While it starts up or syncs banks, the original plug-in drops the notes you play and sends &ldquo;All Notes
-          Off&rdquo;. TI Revive holds the notes back at start-up and pauses its bank sync while you play.</li>
           <li>Owners reported drifting notes and sync errors over USB
           (<a href="https://gearspace.com/threads/fixing-access-virus-sync-issues.839737/">Gearspace</a>,
           <a href="https://forum.ableton.com/viewtopic.php?p=938076">Ableton forum</a>). TI Revive stamps every note
@@ -396,7 +394,7 @@ def page_landing(latest, releases, sums):
       ROM banks from the installer you own. No Access files come with TI Revive.</p></div>
       <div><h3>Load the plug-in</h3><p><strong>TI Revive</strong> on a MIDI track. Projects made with the
       original plug-in (VST3) open with it. The first start reads RAM A&ndash;D from the Virus once, which takes a few
-      minutes; you can play meanwhile. New names since 0.8.43: the plug-in is &ldquo;TI Revive&rdquo; (before &ldquo;TI Revive Virus Control&rdquo;), the ASIO driver &ldquo;TI Revive Audio&rdquo; and the MIDI inputs &ldquo;TI Revive Synth&rdquo; and &ldquo;TI Revive MIDI&rdquo; (before &ldquo;Virus TI Synth&rdquo; and &ldquo;Virus TI MIDI&rdquo;). Projects saved with the old name open with it (same plug-in ID). If a track used one of the MIDI inputs, choose it there once more.</p></div>
+      minutes. Like the original, notes you play meanwhile are not played. New names since 0.8.43: the plug-in is &ldquo;TI Revive&rdquo; (before &ldquo;TI Revive Virus Control&rdquo;), the ASIO driver &ldquo;TI Revive Audio&rdquo; and the MIDI inputs &ldquo;TI Revive Synth&rdquo; and &ldquo;TI Revive MIDI&rdquo; (before &ldquo;Virus TI Synth&rdquo; and &ldquo;Virus TI MIDI&rdquo;). Projects saved with the old name open with it (same plug-in ID). If a track used one of the MIDI inputs, choose it there once more.</p></div>
     </div>
   </div>
 </section>
@@ -801,7 +799,7 @@ def features_section():
         <li>At host sample rates other than 44.1 kHz the first notes after Play and after a render no longer come late and catch up over several seconds (since 0.8.27).</li>
         <li>The Virus drops the message right after a multi dump. The plug-in pauses after one, so new projects reset
         the synth reliably.</li>
-        <li>Bank sync requests make the Virus play its notes late. The sync pauses while you play and continues in the gaps.</li>
+        <li>Like the original, a bank sync runs without notes: what you play while it runs is not played and the MIDI clock pauses, so no dump request makes the Virus play notes late (by about 130 ms).</li>
         <li>While the plug-in waits for the answer to a dump request (about a second each, while it reads presets it has not cached yet), it holds its MIDI clock and the DAW's automation, like the original. The arpeggiator and clock-synced LFOs can stop for that moment; automation goes out with its latest value right after.</li>
         <li>Switch the Virus off and on, or replug it, while the DAW runs: the editor shows the original's &ldquo;No Virus
         TI can be found&rdquo; page meanwhile, then the plug-in waits until the Virus is ready and plays in time again.

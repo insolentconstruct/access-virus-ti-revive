@@ -2355,7 +2355,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             add(3072, ping, 11);
         }
     }
-    // one of our dump requests is out (MemorySync, research T9): clock and automation wait, notes play
+    // one of our dump requests is out (MemorySync, research T9): clock and automation wait
     const bool request_open = sync_ && sync_->request_open();
     // MIDI clock at the host tempo (120 BPM without a process context), 24 ticks per quarter
     const double tempo = clock_tempo(data.processContext && (data.processContext->state & ProcessContext::kTempoValid)
@@ -2400,9 +2400,11 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         // behind the answer in its one send FIFO (E251), the original sends none while busy. Their F5 stamps go with
         // them; the stamp clock is the DSP's own (E245-E247), so notes keep their timing
         static const uint8_t f8 = 0xF8;
-        next_tick_ = clock_ticks(next_tick_, (double)(tl_ + block_frames), per_tick, request_open,
+        // and none for a whole bank sync, like the original while busy (E161)
+        next_tick_ = clock_ticks(next_tick_, (double)(tl_ + block_frames), per_tick,
+                                 request_open || syncing_.load(std::memory_order_relaxed),
                                  [&](int64_t t) { add(t, &f8, 1); });
-        // FE stays: notes play during a request, and the DSP releases every voice ~1.1 s after the last FE (E237);
+        // FE stays: notes play during a request outside a sync, and the DSP releases every voice ~1.1 s after the last FE (E237);
         // an answer can take up to 10 s. FE triggers no sync report (only F8 does, E251)
         static const uint8_t fe = 0xFE; // Active Sensing every 300 ms, always (the original: idle host only, E602)
         fe_.run(tl_ + block_frames, [&](int64_t t) { add(t, &fe, 1); });
@@ -2498,9 +2500,10 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         });
     if (data.inputEvents && out_) {
         // the Virus is still busy with the start-up messages and the state, or with a project loaded while running
-        // (R8-1): note-ons would be late and land under patches that change
-        const bool hold_ons =
-            starting_.load(std::memory_order_relaxed) || state_hold_.holding(out_->busy(), now_ms());
+        // (R8-1): note-ons would be late and land under patches that change. During a bank sync or check they are
+        // dropped like the original's (E161): a clean sync, no request delays notes (E144) and none waits for them
+        const bool hold_ons = starting_.load(std::memory_order_relaxed) || syncing_.load(std::memory_order_relaxed) ||
+                              state_hold_.holding(out_->busy(), now_ms());
         for (int32 i = 0; i < data.inputEvents->getEventCount(); i++) {
             Event e;
             if (data.inputEvents->getEvent(i, e) != kResultOk)
@@ -2520,7 +2523,6 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             if (e.type == Event::kNoteOnEvent && hold_ons)
                 continue;
             if (e.type == Event::kNoteOnEvent) {
-                last_note_ms_.store(now_ms(), std::memory_order_relaxed);
                 uint8_t m[3] = {(uint8_t)(0x90 | (e.noteOn.channel & 15)), note7(e.noteOn.pitch),
                                 std::max<uint8_t>(1, data7(e.noteOn.velocity))};
                 evs.add(at(e.sampleOffset), m, 3,
@@ -3889,35 +3891,10 @@ void VirusPlugin::set_recall_progress(int v)
 
 bool VirusPlugin::wait_until_quiet()
 {
-    // playing has priority: no dump request while notes arrive (the Virus delays notes behind requests, E144). After
-    // 30 s of pauses in total a short gap is enough for the next request, so constant playing cannot block the sync.
-    // Unlike the original, which drops notes for its whole sync (E161), notes stay playable on purpose (README: you
-    // can play while it runs); the cost is E144's late notes (~130 ms) when a request overlaps them after the 30 s.
-    // Only clock and automation are held while a request is open (process(), research T9).
-    bool shown = false;
-    const int64_t t0 = now_ms();
-    auto gap = [&] { return sync_paused_ms_ + (now_ms() - t0) >= 30000 ? 300 : 1500; };
-    while (!stop_warm_ && now_ms() - last_note_ms_.load(std::memory_order_relaxed) < gap()) {
-        if (!shown) {
-            if (ui_value("VirusControl/InitialSyncProgress", -1) < 127) // only during a real sync, not a bank check
-                set_lcd("Bank sync paused (playing)", std::string(), std::string(), std::string());
-            sync_paused_ = true;
-            ui_dirty_ = true; // the note on the sync page
-            shown = true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    // a dump in pieces (dumppacer.h): a request between its pieces would land in the host CPU's dump parse
+    // a dump in pieces (dumppacer.h): a request between its pieces would land in the host CPU's dump parse. Notes do
+    // not pause the sync any more: like the original (E161) the sync drops them (process(), syncing_)
     while (!stop_warm_ && out_ && out_->dumping())
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    if (shown) {
-        sync_paused_ = false;
-        ui_dirty_ = true;
-        sync_paused_ms_ += now_ms() - t0;
-        if (out_)
-            out_->log("Virus TI native: bank sync paused %.1f s for notes (%.0f s in total)\n", (now_ms() - t0) / 1000.0,
-                      sync_paused_ms_ / 1000.0);
-    }
     return !stop_warm_;
 }
 
@@ -4127,8 +4104,8 @@ void VirusPlugin::file_late_dumps()
 void VirusPlugin::sync_banks(bool at_start)
 {
     // until the Virus is ready it works through the start-up messages and the state and plays notes up to 1.6 s late
-    // (E144), so note-ons are held back; from then on notes play, and the sync pauses while they arrive (dump requests
-    // delay the Virus' notes by ~130 ms and the sync stalls - measured 2026-10-14)
+    // (E144); then the sync runs clean like the original's (E161): note-ons and F8 are dropped until it ends
+    // (process(), syncing_), so no request delays notes by ~130 ms (measured 2026-10-14) and none waits for them
     // a RAM bank without a cache file is read in full: its "Syncing memory" page follows "Starting up" directly,
     // without the editor in between (user, L4)
     if (at_start) {
@@ -4142,6 +4119,9 @@ void VirusPlugin::sync_banks(bool at_start)
         set_start_pages(127, 127);
         return;
     }
+    // what still sounds stops before the first request, like the original's All Notes Off when it turns busy (E161)
+    if (release_held_notes() > 0)
+        out_->log("Virus TI native: held notes released for the bank sync\n");
     std::string dir = bank_cache_dir();
     if (!dir.empty()) {
         std::error_code ec;
@@ -4224,7 +4204,7 @@ void VirusPlugin::sync_banks(bool at_start)
             // "a couple of seconds", but a first sync takes 8-9 minutes (issue #5); only what is sure to be fetched
             // counts, not all 512 (one missing bank said "about 9 min" for 2, 2026-11-11)
             fetched_total += fetched;
-            sync_eta_s_ = sync_eta_s(sync_remaining(empty, b, p, rom_missing), now_ms() - sync_t0 - sync_paused_ms_,
+            sync_eta_s_ = sync_eta_s(sync_remaining(empty, b, p, rom_missing), now_ms() - sync_t0,
                                      fetched_total);
 
             if (page.shown()) {

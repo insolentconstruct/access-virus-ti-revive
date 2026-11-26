@@ -1440,9 +1440,11 @@ FX 1 changes on a held note (issue #4, nasguile: "the effect doesn't take hold; 
 
 How the original holds notes at start-up and while it is busy (closes E153's open part). REA/Ghidra, Virus Control.dll 5.1.7 x64: every MIDI message from the host passes 0x18007aa50 (via CRemoteDeviceFromHostQueue 0x18006cc00); while the byte CRemoteDevice +0xccc49 is set, note-on, note-off (status 0x80/0x90) and the MIDI clock F8 are dropped - not delayed - while all other messages go on. The constructor (0x18006ce00) and the connection set-up in the timer 0x18007ec30 set +0xccc49/+0xccc4a to 1; on every timer tick 0x18007a9b0 sets +0xccc49 = busy, where busy = its library/sync object +0xccc90 is syncing (+0x548) or has requests open (+0x5d4 > 0), or the start-up queue +0xcd058 still holds messages, or the flags +0xcd0f0 / +0x136580 are set; when busy turns on, it sends All Notes Off (B0..BF 7B 00) on all 16 channels. So the original plays nothing while it works through its start-up messages, a bank sync or dump requests. The native plug-in instead holds notes back until the readiness probe is answered (E149) and pauses its bank sync while the host plays (README: "you can play while it runs") - kept that way on purpose: no lost notes, same start-up safety
 
+Update 2026-11-26 (maintainer decision, round 0.8.44): the native plug-in now does the same during a bank sync or check: note-ons and F8 are dropped while `syncing_` is set, the held notes are released (pedal up, all notes off on the channels in use) before the first request, and the sync no longer pauses for notes. Built and unit-tested only, not yet on hardware.
+
 - **Date:** 2026-10-16
 - **Pointer:** REA static analysis (addresses above)
-- **Method:** native/plugin/source/virusplugin.cpp (wait_virus_ready, the note hold, the sync pause)
+- **Method:** native/plugin/source/virusplugin.cpp (wait_virus_ready, the note gate in process(), sync_banks)
 - **Confidence:** HIGH
 
 ### E162
