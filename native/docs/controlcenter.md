@@ -52,8 +52,9 @@ it as the owner, so it disconnects and says the broker is too old. `src/cc/decod
 together and names them: notes, CCs, clock, the Access SysEx commands documented in findings/spec.md §6 (single
 dump / request, multi dump, bank info / request, sync ping), parameter changes by name through the device model
 (the user's Access files; without them as page/id/value). Clients name themselves in HELLO (plug-in "TI Revive
-Virus Control", ASIO driver, Control Center, tirevive-cc). The Windows broker has no owner (every client
-shares the Virus, as before); there an observer simply gets no raw RX and the status says "owner=shared".
+Virus Control", ASIO driver, Control Center, tirevive-cc). The Windows broker shares the Virus with the ASIO driver
+and the Control Center and gives it to one program's plug-in at a time, like the other brokers; there an observer
+simply gets no raw RX and the status says "owner=shared" (with the plug-in's name while one owns it).
 
 ## The Access look
 
@@ -89,6 +90,13 @@ installation in `/Applications` works too (checked on the M3: 106 files, layout 
   product string; not the serial number, which would end up in bug reports) (E115), bank info `39` -> `14` and
   single dump request `30` -> `10` (E027, E031, E037). The one write is Restore: single dumps into a RAM bank, the
   messages the plug-in's browser sends (E294-E303), never the Virus' flash.
+- The link (`4E 73 52 01`, global 0x52 on the raw pipe, E524): the broker links the Virus before a user's first write
+  when the last user had unlinked it, and unlinks it when the last user leaves (`src/broker/linkrule.h`, both
+  brokers). The Control Center is such a user: run alone (no plug-in open), its first request links the Virus and its
+  disconnect at the end unlinks it again. While linked, a Keyboard or Polar sends its own keys to USB only and keeps
+  Local off (E392), so its keys are silent while a backup or restore runs alone. Access' Control Center has no MIDI
+  path and never links: its backup and restore work in BIOS mode, on a unit rebooted into the bootloader where
+  nothing else plays (research R11-1, R11-6; not observed on our Virus).
 - Backups reuse the plug-in's bank cache (`MemorySync`): programs whose fingerprint still matches come from the cache,
   the others are read at the Virus' pace of about 1 s each (a full bank: about 2 minutes). The cache is updated on
   the way.

@@ -1,11 +1,11 @@
-// ccapp.cpp - "TI Revive Control Center": the window around src/cc/controlcenter.h (phase 1, read-only), built with
-// VSTGUI's standalone library like the plug-in's editor. One window: the connected Virus and its RAM banks, backup
-// of the RAM banks as patch libraries, export of a library (.mid <-> .syx).
+// ccapp.cpp - "TI Revive Control Center": the window around src/cc/controlcenter.h, built with VSTGUI's standalone
+// library like the plug-in's editor. One window: the connected Virus and its RAM banks, backup of the RAM banks as
+// patch libraries, restore of a RAM bank (since 0.8.30), export of a library (.mid <-> .syx).
 //
 // The work (broker requests, ~1 s per program) runs on a worker thread; a timer copies its state into the labels.
-// The broker serves one program at a time, so the app connects only while an action runs and never keeps the Virus
-// from the plug-in. Firmware/OS update, Burn To Flash, factory reset and renaming are not offered, on purpose: they
-// write the Virus' flash (AGENTS.md rule 2).
+// The app connects only while an action runs, so it never keeps the Virus from the plug-in (bank list, backup and
+// restore refuse while a plug-in owns it, virus_free). Firmware/OS update, Burn To Flash, factory reset and renaming
+// are not offered, on purpose: they write the Virus' flash (AGENTS.md rule 2).
 #include "access/accessfiles.h"
 #include "model/utf8.h"
 #include "access/library.h"

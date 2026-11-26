@@ -1,6 +1,6 @@
-// Active Sensing (FE) on the stamped timeline: one FE every 300 ms like the original Virus Control (E025, median
-// 0.31 s). The Virus' DSP arms a watchdog with the first FE it sees and releases every voice about one second
-// after the last one (E237) - so FE goes out either never or regularly, never just once.
+// Active Sensing (FE) on the stamped timeline: one FE every 300 ms, always (the original only while its host is idle,
+// E602; E025's median 0.31 s). The Virus' DSP arms a watchdog with the first FE it sees and releases every voice
+// about one second after the last one (E237) - so FE goes out either never or regularly, never just once.
 #include "check.h"
 #include "device/keepalive.h"
 #include <vector>

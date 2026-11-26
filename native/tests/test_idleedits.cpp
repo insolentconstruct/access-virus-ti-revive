@@ -173,3 +173,28 @@ TEST(idleedits_dropped_edits_do_not_fill_the_queue)
         s.pump(e, t, 21001);
     CHECK((s.m == std::vector<std::pair<uint32_t, int>>{{5000, 1}}));
 }
+
+// research T20 (R4-4): one knob dragged in an idle host (an edit every ms) goes at most every 20 ms like the
+// original's gate, latest value wins, and the value it ends on goes out
+TEST(idleedits_one_knob_at_most_every_20_ms)
+{
+    IdleEdits e;
+    Sent s;
+    std::vector<int64_t> at;
+    s.pump(e, 999, 900);
+    for (int64_t t = 1000; t < 1200; t++) {
+        e.edit(7, (int)(t % 128), 0, t);
+        size_t before = s.m.size();
+        s.pump(e, t, 900);
+        if (s.m.size() > before)
+            at.push_back(t);
+    }
+    for (int64_t t = 1200; t < 1240; t++)
+        s.pump(e, t, 900);
+    CHECK(s.m.size() >= 9 && s.m.size() <= 11); // 200 ms / 20 ms, plus the final value
+    CHECK(s.m.back().second == 1199 % 128);
+    bool spaced = true;
+    for (size_t i = 1; i < at.size(); i++)
+        spaced = spaced && at[i] - at[i - 1] >= 20;
+    CHECK(spaced);
+}

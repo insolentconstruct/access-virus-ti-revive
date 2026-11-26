@@ -1,5 +1,5 @@
 // controlcenter.h - the core of TI Revive's Control Center (the standalone replacement of Access' "Virus Control
-// Center"), shared by the CLI (tools/tirevive-cc) and a later UI.
+// Center"), shared by the CLI (tools/tirevive-cc) and the app (ccapp/).
 //
 // It reads with requests whose behaviour is documented in findings/evidence.md - standard USB GET_DESCRIPTOR (E115),
 // bank info 39 -> 14 and single dump request 30 -> 10 (E027, E031, E037). The one write is restore_ram: single dumps

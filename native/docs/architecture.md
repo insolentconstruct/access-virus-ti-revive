@@ -97,9 +97,10 @@ Access is installed or registered. These are the files it loads:
     the Virus' DSP parks stamped bytes in a 2046-byte queue without a fill check until they are due (E235/E238),
     so a flood larger than that within the lead window corrupts its MIDI stream. Musical rates never come near
     the budget; a runaway host is delayed a few blocks, and stamps are absolute, so timing is unchanged.
-  - Active Sensing (`src/device/keepalive.h`): one FE every 300 ms on the timeline, like the original. The DSP arms
-    a watchdog with the first FE and releases every voice about a second after the last one (E237), so FE goes out
-    regularly or not at all - never once.
+  - Active Sensing (`src/device/keepalive.h`): one FE every 300 ms on the timeline, always. The DSP arms a watchdog
+    with the first FE and releases every voice about a second after the last one (E237), so FE goes out regularly or
+    not at all - never once. The original sends FE at the same pace but only while the host processes no audio or is
+    offline/suspended, and apparently only while its F8 clock is off (E602).
   - Timing (sample accurate, the same latency in every session): the Virus plays a time-stamped event when its own
     14-bit stamp clock reaches the stamp. After the start-up sync ping it marks where that clock is 0 with a single
     sample on USB 2; the plug-in finds it and converts every stamp, so an event sounds a fixed `lead` after its
@@ -156,9 +157,12 @@ Access is installed or registered. These are the files it loads:
   envelopes) and values are drawn as lines and text and stay sharp.
 
 ### Device ownership
-- One broker owns the Virus' USB interfaces; it serves **one program at a time** (the owner). Others wait and
-  take over when the owner disconnects. A second program restarting the stream in a running session left the Virus
-  without USB audio until a power cycle (E112), hence the rule.
+- One broker owns the Virus' USB interfaces. It gives the Virus to **one program's plug-in at a time** (the owner):
+  plug-ins of other programs wait and take over when the owner disconnects. A second program restarting the stream
+  in a running session left the Virus without USB audio until a power cycle (E112), and two plug-ins' sync pings
+  reset the Virus' one stamp clock (E148), hence the rule. The ASIO driver and the Control Center share the Virus
+  with the owner; the Control Center refuses its bank list, backup and restore while a plug-in owns it (E596), and
+  the broker keeps one client's SysEx whole on the wire (`src/broker/sxhold.h`).
 - Read-only observers (the Control Center's Nerd mode, protocol 4) never become the owner and cannot write.
 - The plug-in connects only from its first activation (`setActive(true)`): a DAW's plug-in scan (initialize +
   terminate) never reaches the Virus (E147). The Control Center and `tirevive-cc` connect only while an action runs.

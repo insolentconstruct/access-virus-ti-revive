@@ -65,7 +65,7 @@ static int usage()
                     "       tirevive-cc capture [--seconds N] [--out FILE]\n"
                     "       tirevive-cc update-check   (asks GitHub once for the latest release, now)\n"
                     "Only restore writes to the Virus (RAM, never flash). Close the TI Revive plug-in (or your DAW)\n"
-                    "first: the Virus serves one program at a time.\n");
+                    "first: the bank list, backup and restore do not run while a plug-in uses the Virus.\n");
     return 2;
 }
 

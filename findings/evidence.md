@@ -2138,6 +2138,7 @@ The DSP's Active Sensing watchdog, and what the plug-in did wrong with it (stati
 - **Method:** work/firmware/out/dsp_X_04f000.asm, dsp_P_000000.asm; native/plugin/source/virusplugin.cpp
 - **Confidence:** HIGH (handler, counter, one-shot release), MED (what 0x5362b releases), LOW (1.1 s - depends on the tick length)
 - **Hardware:** no (as written in this entry; a later entry may have tested it)
+- **Status:** corrected by E602 (only its premise about the original's FE cadence)
 
 ### E238
 
@@ -6313,4 +6314,29 @@ every pass, so cables sent before the link could be undone before it is on again
 - **Pointer:** native/src/device/answerwatch.h (routing_messages); native/plugin/source/virusplugin.cpp (resend_routing, the probe miss); native/tests/test_answerwatch.cpp, native/tests/test_access.cpp; work/research-2026-11-26 R9 (R9-1), R1, R2, R10; E014, E039, E524, E591, E594
 - **Method:** the user's own GlobalInit read through the unit test (vtitests, Linux); research R9 (static, firmware listings); code
 - **Confidence:** HIGH (1) the start-up list / HIGH (2) firmware, static (research R9) / open: what clears 0x52 in a session, whether 0x52 is persistent, the order effect of (2) on a real Virus
+- **Hardware:** no
+
+### E602
+
+When the original sends Active Sensing (FE), and why TI Revive keeps sending it always (fix item T20, research R4-5
+and R6-6 of 2026-11-26; corrects E237's premise, qualifies E025). Original, static analysis of Virus Control.dll 5.1.7
+x64 (research R4, R6; every FE constant in the file grepped, two senders found): (1) a timer 0x1800a7770 sends FE,
+at most every 300 ms, only while the host has processed no audio block for more than 40 ms; 0x1800aa7c0 (the device
+audio) clears that timer mode when blocks come again; (2) the process path 0x180030ce0 sends FE while the host is
+offline or suspended, at most once per block and per 300 ms, and only in the branch where its F8 clock is off (flags
++0x429/+0x399, meaning not resolved). During real-time processing the original sends F8 and, as far as the code shows,
+no FE. So E025's FE every 0.31 s was captured with an idle host, and E237's "the original sends FE every 0.31 s, so
+the watchdog never fires with it" holds only for an idle host. Not seen, only inferred from E237: with the original, an
+FE from an idle phase arms the DSP watchdog, and it would fire once about 1.1 s after processing starts unless F8
+also feeds it (open). TI Revive (keepalive.h, since round 0.8.26, kept in T9) sends FE every 300 ms on the stamped
+timeline, clock on or off, after the first anchor: a superset of the original's FE while anchored, one 1-byte message
+per 300 ms (rule 2: far below every rate bound), and it keeps the watchdog fed while notes play. Changed in round
+0.8.44: the comments (keepalive.h, virusplugin.cpp, test_keepalive.cpp), native/docs/architecture.md and protocol.md,
+findings/spec.md, the README and the site text no longer say the original sends FE every 300 ms in general. No code
+change for FE.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 0x1800a7770, 0x180030ce0, 0x1800aa7c0 (research R4-5, R6-6); native/src/device/keepalive.h; native/plugin/source/virusplugin.cpp (fe_); work/research-2026-11-26 R4, R6; E025, E237
+- **Method:** static analysis (research R4 and R6, REA/Ghidra on the user's own file; not re-read for this entry); code reading
+- **Confidence:** MED (the two senders and their conditions, research R4: all FE constants grepped) / LOW (that the original sends no FE while its clock runs: flag meaning not resolved) / open (whether F8 feeds the DSP watchdog)
 - **Hardware:** no

@@ -791,7 +791,7 @@ def features_section():
       <ul>
         <li>A flood of parameter changes can hang the audio of the Virus until it is switched off, and so did one extreme note flood in a test of ours. Automation is limited to
         250 messages per second and merged per parameter; a 4-minute full-load test passes.</li>
-        <li>The Virus releases every sounding note about a second after the last Active Sensing message it received. Since 0.8.26 the plug-in sends one every 300 ms, like the original; before, it sent one at the start only.</li>
+        <li>The Virus releases every sounding note about a second after the last Active Sensing message it received. Since 0.8.26 the plug-in sends one every 300 ms; before, it sent one at the start only. The original sends it at that pace only while the DAW processes no audio.</li>
         <li>The Virus keeps time-stamped MIDI in a small buffer without an overflow check. Since 0.8.26 the plug-in keeps its time-stamped MIDI well under that buffer's limit; normal playing and automation never come near it.</li>
         <li>When the Virus is busy for a moment, for example while you change a patch on its panel, it holds back what the computer sends. Since 0.8.26 the plug-in sends it again instead of dropping it, so a bank sync or patch dump no longer breaks.</li>
         <li>Choosing a patch for one part no longer stops the other parts for a moment. Since 0.8.27 the plug-in sends the patch like the original: in small pieces on its own USB-MIDI cable, with the other parts' notes in between.</li>

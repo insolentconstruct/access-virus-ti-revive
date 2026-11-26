@@ -90,7 +90,7 @@ TEST(hostmidi_mapped_controllers_share_the_automation_budget)
         uint8_t m[3];
         size_t n = mapped_message(3, 129, (block % 100) / 100.0, m);
         if (p.set(3, 129, m, n, 7, block))
-            CHECK(q.push(bend));
+            CHECK(q.push(bend, false)); // bend: outside the original's 20 ms gate (T20)
         q.refill(32, 48000);
         q.drain(96, [&](uint32_t id) {
             MappedPending::Slot s;

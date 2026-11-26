@@ -3,10 +3,11 @@
 // to process(). A host that stops calling process() (stopped transport with "suspend plug-ins", audio device closed,
 // no audio device) left the knob move unsent while the editor showed it. The original pumps its GUI edits from a timer
 // without host blocks (R4: 0x1800a8ba0, gate 0x1800815e0). So the worker sends an edit itself when no block came for
-// IDLE_MS and none since the edit: latest value per parameter, at the automation rate (AutomationQueue, rule 2), with
-// an empty budget at the start of each idle phase (no burst right after one of process()'s). An edit made before a
-// block is the host's to pass to process(): it is dropped here. The host's hand-back of a value sent here, in the
-// first block after the send, is an echo and not sent again (from_host), so each change goes out once.
+// IDLE_MS and none since the edit: latest value per parameter, at the automation rate and at most every 20 ms per
+// parameter (AutomationQueue, rule 2, T20), with an empty budget at the start of each idle phase (no burst right after
+// one of process()'s). An edit made before a block is the host's to pass to process(): it is dropped here. The host's
+// hand-back of a value sent here, in the first block after the send, is an echo and not sent again (from_host), so each
+// change goes out once.
 // Threads: edit from the editor thread, pump and drop_parts from the worker, from_host from the audio thread (try_lock,
 // no allocation; if the lock is busy the value counts as no echo: at worst the same value goes twice).
 #pragma once
@@ -41,13 +42,14 @@ public:
             if (kv.second.value >= 0 && processed > kv.second.at)
                 kv.second.value = -1; // a block came after the edit: the host passes it to process()
         const bool idle = processed < 0 || now - processed > IDLE_MS;
-        if (!idle || last_ < 0) {
+        if (last_ >= 0) // also while the host runs: the queue's clock of the 20 ms floor keeps going (T20)
+            q_.refill((int)std::min<int64_t>(now - last_, 1000), 1000.0);
+        const bool first = last_ < 0;
+        last_ = now;
+        if (!idle || first) {
             q_.clear_budget(); // process() has the rate while it runs
-            last_ = now;
             return 0;
         }
-        q_.refill((int)std::min<int64_t>(now - last_, 1000), 1000.0);
-        last_ = now;
         return q_.drain(hold ? 0 : AutomationQueue::MAX, [&](uint32_t id) {
             Slot &s = slots_[id];
             s.queued = false;

@@ -2404,7 +2404,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                                  [&](int64_t t) { add(t, &f8, 1); });
         // FE stays: notes play during a request, and the DSP releases every voice ~1.1 s after the last FE (E237);
         // an answer can take up to 10 s. FE triggers no sync report (only F8 does, E251)
-        static const uint8_t fe = 0xFE; // Active Sensing every 300 ms, like the original (E025); see keepalive.h
+        static const uint8_t fe = 0xFE; // Active Sensing every 300 ms, always (the original: idle host only, E602)
         fe_.run(tl_ + block_frames, [&](int64_t t) { add(t, &fe, 1); });
     }
     auto at = [&](int32 offset) { return tl_valid_ ? tl_ + (int64_t)std::lround(offset * ratio) : -1; };
@@ -2438,7 +2438,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                     if (PedalSwitch::pedal(ctl)) { // a switch: at once, on a flip only (hostmidi.h)
                         if (pedals_.flips(ch, ctl, m[2]))
                             add(at(offset), m, n);
-                    } else if (mapped_.set(ch, ctl, m, n, offset, block_no_) && !automation_.push(id)) {
+                    } else if (mapped_.set(ch, ctl, m, n, offset, block_no_) && // CCs get the 20 ms floor of the
+                               !automation_.push(id, ctl < 0x80)) { // original's gate (T20), bend and aftertouch not
                         mapped_.take(ch, ctl, gone); // queue full: not waiting, or it would never go out
                     }
                     if ((m[0] & 0xF0) == 0xB0 && m[1] == 64)
@@ -2461,7 +2462,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                 value = std::min(std::max(value, p->min), p->max);
             if (idle_edits_.from_host(id, value, prev_block)) // an editor edit the worker sent while we were idle (T13)
                 continue;
-            // coalesce: only the latest value per parameter waits for the budget below
+            // coalesce: only the latest value per parameter waits for the budget below (and its 20 ms, T20)
             if (it->second.pending >= 0 || automation_.push(id))
                 it->second.pending = value;
             size_t w = pu_w_.load(std::memory_order_relaxed); // part dump update: off the audio thread
