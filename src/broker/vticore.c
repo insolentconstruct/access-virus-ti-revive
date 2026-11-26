@@ -80,6 +80,7 @@ struct vti {
     int leak;               // transfers still out after the close: keep this struct (rx_stop)
     volatile int closing;   // rx_stop runs: transfers cancelled, nothing resubmitted, readers still draining
     uint8_t bulk[16];       // by endpoint number: 1 = bulk (Virus TI Snow), 0 = interrupt (TI/TI2 Desktop, E021) - E387
+    uint16_t rxmax[16];     // IN endpoints by number: wMaxPacketSize, what each read asks for (vti_rx_len, R3-6)
     unsigned long idle;     // FF FE 00 00 packets dropped on a bulk EP 0x85 (E387)
     int captured;           // macOS libusb-audio test: taken from Apple's audio driver (E511), given back at close
 };
@@ -97,6 +98,8 @@ static void find_bulk_endpoints(vti *v)
             const struct libusb_interface_descriptor *d = &cfg->interface[i].altsetting[a];
             for (int e = 0; e < d->bNumEndpoints; e++) {
                 uint8_t ep = d->endpoint[e].bEndpointAddress;
+                if (ep & 0x80)
+                    v->rxmax[ep & 15] = d->endpoint[e].wMaxPacketSize;
                 if ((d->endpoint[e].bmAttributes & 3) == LIBUSB_TRANSFER_TYPE_BULK && strlen(list) < sizeof list - 4) {
                     v->bulk[ep & 15] = 1;
                     snprintf(list + strlen(list), sizeof list - strlen(list), " %02x", ep);
@@ -388,14 +391,15 @@ static int rx_start(vti *v)
         pthread_cond_init(&e->cv, NULL);
         vti_rxq_init(&e->q, e->recs, RX_QCAP);
         pthread_mutex_lock(&e->mu);
+        const int len = vti_rx_len(v->rxmax[e->ep & 15]); // one packet per transfer (R3-6)
         for (int s = 0; s < RX_PENDING; s++) {
             e->t[s] = libusb_alloc_transfer(0);
             if (!e->t[s])
                 continue;
             if (v->bulk[e->ep & 15])
-                libusb_fill_bulk_transfer(e->t[s], v->h, e->ep, e->buf[s], VTI_RX_MAX, rx_done, e, 0);
+                libusb_fill_bulk_transfer(e->t[s], v->h, e->ep, e->buf[s], len, rx_done, e, 0);
             else
-                libusb_fill_interrupt_transfer(e->t[s], v->h, e->ep, e->buf[s], VTI_RX_MAX, rx_done, e, 0);
+                libusb_fill_interrupt_transfer(e->t[s], v->h, e->ep, e->buf[s], len, rx_done, e, 0);
             int r = rx_submit(e, s);
             if (r)
                 vti_log("vti: read ep %02x: transfer %d not submitted (%s)\n", e->ep, s, libusb_error_name(r));

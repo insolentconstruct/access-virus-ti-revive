@@ -13,6 +13,10 @@
 
 #define VTI_RX_MAX 64 // the endpoints' wMaxPacketSize is 64 at most (lsusb -v)
 
+// bytes one read asks for: the endpoint's wMaxPacketSize (0 = not found), so a full packet ends the read at once like
+// the original's (R3-6); with 64 asked a full 16- or 32-byte packet left its events waiting for the next one
+static inline int vti_rx_len(int wmax) { return wmax > 0 && wmax <= VTI_RX_MAX ? wmax : VTI_RX_MAX; }
+
 typedef struct {
     uint8_t slot;            // which transfer it came from, for the resubmit after an error
     int8_t err;              // 0 = data, else the libusb error code (vti_xfer_err)

@@ -160,3 +160,16 @@ TEST(rxqueue_an_endpoint_silent_after_an_error_is_reset_once)
     // after the reset is not reset every 2 s; only a new error arms it again
     CHECK(!vti_rx_stuck(0, 0xffu, 0, 10 * VTI_RX_STUCK_MS));
 }
+
+// R3-6: each read asks exactly the endpoint's wMaxPacketSize, like the original (VirusUSB.sys 0xf10092e0): a full
+// packet then ends the read at once; with 64 bytes asked a full 16- or 32-byte packet left its events waiting for the
+// next packet. Unknown or larger than the record: the record size.
+TEST(rx_read_length_is_the_endpoints_packet_size)
+{
+    CHECK_EQ(vti_rx_len(16), 16); // EP 0x85 (TI, TI2, E388)
+    CHECK_EQ(vti_rx_len(32), 32); // EP 0x86
+    CHECK_EQ(vti_rx_len(64), 64);
+    CHECK_EQ(vti_rx_len(0), VTI_RX_MAX);   // not found in the descriptor
+    CHECK_EQ(vti_rx_len(512), VTI_RX_MAX); // more than a record holds
+    CHECK_EQ(vti_rx_len(-1), VTI_RX_MAX);
+}

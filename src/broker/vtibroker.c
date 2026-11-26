@@ -28,6 +28,7 @@
 #include "keyport.h"
 #include "vtikeyport.h"
 #include "devslot.h" // one broker per Virus when several are connected (#45)
+#include "winread.h" // a full client queue drops a device packet, not the client (R12-7)
 #include <windows.h>
 #include <sddl.h>
 #include <stdarg.h>
@@ -72,7 +73,7 @@ typedef struct {
     HANDLE sender;
     int notes; // has sent note-ons: silence the Virus when it goes away (hanging-note protection)
     int observer;            // protocol 4: read-only observer (Nerd mode)
-    volatile LONG64 dropped; // observer: messages dropped because its queue was full
+    volatile LONG64 dropped; // messages dropped because its queue was full (an observer: any, else device packets)
     char name[48];           // from HELLO (protocol 4)
     vti_sxwatch sx;          // its SysEx going on, for the rule 2 write filter (ctrlguard.h)
     uint32_t proto;          // the protocol of its HELLO (0 = none)
@@ -132,7 +133,8 @@ static void blog(const char *fmt, ...)
     obs_log(buf, n - 1);
 }
 
-// Queue one message (header + a + b). On overflow the client is dropped instead of blocking the caller.
+// Queue one message (header + a + b). On overflow a device packet is dropped, any other message drops the client
+// (vti_queue_full_drops_client); the caller is never blocked.
 // Called by vua_run's streaming thread for every completed IN read (VTI_AUDIO_NP ms: ~176 frames per 4 ms).
 static void audio_in(const int16_t *pcm, uint32_t frames, void *user)
 {
@@ -413,15 +415,17 @@ static int send_msg(client *c, uint16_t type, const void *a, int alen, const voi
         for (int p = 0; p < 3; p++)
             for (uint32_t i = 0; i < lens[p]; i++)
                 c->queue[(c->q_head + c->q_len++) % QUEUE_BYTES] = parts[p][i];
-    } else if (c->observer) { // an observer only loses this message (counted in its status)
-        InterlockedIncrement64(&c->dropped);
-    } else {
-        c->alive = 0;
     }
+    int drop_client = !ok && vti_queue_full_drops_client(c->observer, type);
+    LONG64 dropped = !ok && !drop_client ? InterlockedIncrement64(&c->dropped) : 0; // counted in an observer's status
+    if (drop_client)
+        c->alive = 0;
     LeaveCriticalSection(&c->q);
     SetEvent(c->q_event);
-    if (!ok && !c->observer)
+    if (drop_client)
         blog("client queue overflow: dropping client");
+    else if (!c->observer && vti_drop_logged((uint64_t)dropped))
+        blog("client queue full: %lld device packet(s) dropped for this client so far", (long long)dropped);
     return ok ? 0 : -1;
 }
 
