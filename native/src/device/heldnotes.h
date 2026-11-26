@@ -49,6 +49,18 @@ public:
         }
         return 32;
     }
+    // The Virus went away (research R6-4): process() drops its events now, so a note-off in the gap never reaches a
+    // Virus that stays powered (a short USB drop, E212). What is held now is released at its return (worker thread).
+    void away() { away_n_ = release(away_); }
+    // the messages for that at the return, once per absence; at most 32
+    int returned(uint8_t out[32][3])
+    {
+        const int n = away_n_;
+        for (int i = 0; i < n; i++)
+            out[i][0] = away_[i][0], out[i][1] = away_[i][1], out[i][2] = away_[i][2];
+        away_n_ = 0;
+        return n;
+    }
     // after a panic: nothing is held any more
     void forget()
     {
@@ -60,6 +72,8 @@ public:
 private:
     std::atomic<uint64_t> keys_[16][2] = {};
     std::atomic<uint16_t> pedal_{0};
+    uint8_t away_[32][3] = {}; // away() / returned(): the worker thread only
+    int away_n_ = 0;
 
     static uint64_t bit(int key) { return 1ull << (key & 63); }
     static void put(uint8_t *m, int ch, uint8_t cc) { m[0] = (uint8_t)(0xB0 | ch), m[1] = cc, m[2] = 0; }

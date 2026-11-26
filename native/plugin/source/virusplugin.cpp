@@ -233,7 +233,7 @@ void DeviceOut::send(std::vector<uint8_t> msg)
     send(std::move(msg), CABLE_PLUGIN);
 }
 
-void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable)
+void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable, bool keep)
 {
     if (msg.empty()) // nothing to write, and the worker's write accounting (pending_send_) expects bytes
         return;
@@ -242,7 +242,7 @@ void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable)
         return;
     }
     std::lock_guard<std::mutex> lk(mu_);
-    queue_.push_back({std::move(msg), false, cable});
+    queue_.push_back({std::move(msg), false, cable, keep});
     queued_++;
     cv_.notify_one();
 }
@@ -275,6 +275,20 @@ void DeviceOut::lose_broker()
     close_audio();
     broker_.close();
     open_ = false;
+}
+
+// Like the original, which clears its start-up queue while no Virus is connected and builds it again at the
+// connection (R6-3): what is queued for a Virus this instance had goes, and at its return resend_to_virus queues the
+// start-up and the state (the editor's edits are in it). Else an unfinished start-up block and stale edits went out
+// in front of the new start-up. Returns how many went.
+int DeviceOut::drop_while_away()
+{
+    if (!had_virus_) // never there: the start-up and the state wait for it (E591 (2))
+        return 0;
+    std::lock_guard<std::mutex> lk(mu_);
+    const int n = vti::drop_while_away(queue_);
+    queued_ -= n;
+    return n;
 }
 
 // A dump in pieces and the automation held for it, when the Virus or the broker went away: the state goes out again
@@ -527,6 +541,8 @@ void DeviceOut::check_presence()
     }
     auto lost = [this] {
         drop_dump();
+        if (int n = drop_while_away())
+            log("Virus TI native: %d queued message(s) dropped, sent again from the state at the return (R6-3)\n", n);
         close_audio();
         std::lock_guard<std::mutex> g(info_mu_); // the next Virus may be another unit, or have new banks burned
         flash_.clear();
@@ -566,6 +582,7 @@ void DeviceOut::check_presence()
     }
     case vti::Presence::back:
         present_seen_ = 1;
+        had_virus_ = true;
         arrived();
         if (device_)
             device_(true);
@@ -718,7 +735,7 @@ void DeviceOut::run()
         }
         // no Virus (switched off, or another program has it): keep the queued messages (start-up, state) until it is
         // there - written into the void, a Virus switched on later never got them; events from process() (notes)
-        // are dropped, they would play late
+        // are dropped, they would play late. A Virus this instance had: the queue goes, the return sends it again (R6-3)
         if (!broker_.device_present()) {
             if (!broker_.connected()) { // the broker itself went away (crash, update, restart): open it again above
                 log("Virus TI native: the connection to the TI Revive broker ended - reconnecting\n");
@@ -729,6 +746,8 @@ void DeviceOut::run()
             if (idle_)
                 idle_();
             check_presence();
+            if (present_seen_ != 1) // still away (a return just now queued the start-up): what the editor queued
+                drop_while_away();  // meanwhile is in the state (R6-3)
             // Virus 2+ is not there, or another program's plug-in has this one (#45, audit 2026-11-18 #4): after 3 s
             // try another slot (slotpick.h); the one given up is skipped once, the log says it once per wait
             const bool elsewhere = broker_.in_use_elsewhere();
@@ -1462,6 +1481,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
             ready_ = false;
             for (auto &c : ram_confirmed_) // its RAM may change while it is away; the check at the return confirms it
                 c = false;
+            held_notes_.away(); // released at the return: a note-off in the gap never reaches it (R6-4)
             set_lcd("Virus disconnected", std::string(), std::string(), std::string());
             return;
         }
@@ -1475,6 +1495,16 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         }
         set_lcd("Virus reconnected", std::string(), std::string(), std::string());
         resend_to_virus();
+        // a Virus that stayed powered (a short USB drop) still sounds what was held when it went: the setActive(0)
+        // release, behind the start-up and the state (R6-4; neither the original nor 0.8.43 sent anything here)
+        uint8_t rel[32][3];
+        const int n = held_notes_.returned(rel);
+        for (int i = 0; i < n; i++)
+            out_->send({rel[i][0], rel[i][1], rel[i][2]});
+        if (n > 0) {
+            out_->pedals_up.store(true, std::memory_order_relaxed);
+            out_->log("Virus TI native: %d note release(s) of the time before the drop sent (R6-4)\n", n);
+        }
     });
     out_->on_resume([this] { resend_to_virus(); }); // worker thread
     usb_io_ = load_usb_io();
@@ -3370,7 +3400,8 @@ void VirusPlugin::send_remote(const std::vector<std::vector<uint8_t>> &records)
         return;
     for (auto &r : records)
         if (!r.empty())
-            out_->send(r, 3); // the original's cable for template records (E199)
+            out_->send(r, 3, true); // the original's cable for template records (E199); kept while away (R6-3):
+                                    // the template file holds them, not the state
 }
 
 void VirusPlugin::choose_remote_template(int t)
@@ -3394,7 +3425,7 @@ void VirusPlugin::choose_remote_template(int t)
     // "Global Patch Select/Remote Patch" = t first (Bank F global, 73 00 6C t), then the template (E199)
     if (out_)
         if (auto msg = dev_.encode("Global Patch Select/Remote Patch", t, 0); !msg.empty())
-            out_->send(msg);
+            out_->send(msg, CABLE_PLUGIN, true); // not in the state either: kept while away like the records (R6-3)
     send_remote(records);
 }
 

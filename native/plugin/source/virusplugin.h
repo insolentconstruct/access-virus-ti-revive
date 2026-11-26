@@ -39,6 +39,7 @@
 #include "device/offlinepace.h"
 #include "device/blockevents.h"
 #include "device/heldnotes.h"
+#include "device/awayqueue.h"
 #include "device/outputdelay.h"
 #include "device/timelinefollow.h"
 #include "device/crossfade.h"
@@ -100,8 +101,9 @@ public:
     void start() { go_ = true; }
     void send(std::vector<uint8_t> msg); // a complete MIDI message (SysEx or channel message); not from process()
     // the same on another USB-MIDI cable of the plug-in endpoint: the original sends remote template records on
-    // cable 3 (E199), everything else on cable 2
-    void send(std::vector<uint8_t> msg, uint8_t cable);
+    // cable 3 (E199), everything else on cable 2. keep: it stays queued while a Virus this instance had is away (no
+    // state brings it back at the return, awayqueue.h)
+    void send(std::vector<uint8_t> msg, uint8_t cable, bool keep = false);
     // a whole state upload: replaces the records of an earlier upload that are still queued (only the newest state
     // counts; a waiting instance got two before its takeover, E149). Returns how many queued records it dropped.
     int send_state(std::vector<std::vector<uint8_t>> records);
@@ -292,6 +294,7 @@ private:
     std::atomic<bool> wait_reported_{false}; // waiting for the other instance (set by the worker)
     int present_seen_ = -1; // worker: last device presence handled (-1 = unknown)
     vti::PresenceWatch presence_; // worker: gone / back / gone and back between two looks (E212)
+    bool had_virus_ = false;      // worker: the Virus was there once; from then on its absence drops the queue (R6-3)
     Broker broker_;
     std::mutex mu_;
     std::condition_variable cv_;
@@ -316,6 +319,7 @@ private:
         std::vector<uint8_t> msg;
         bool state;        // part of a state upload (send_state)
         uint8_t cable = 2; // USB-MIDI cable
+        bool keep = false; // kept while a Virus this instance had is away (awayqueue.h)
     };
     std::deque<Queued> queue_;
     std::atomic<int> queued_{0};
@@ -353,6 +357,7 @@ private:
     void close_audio();    // worker: no reader left, then unmap
     int start_audio();     // worker: the stream and its rate; the broker's answer (1 = streaming)
     void drop_dump();      // worker: the Virus or the broker went away mid-dump
+    int drop_while_away(); // worker: a Virus this instance had is away - the reconnect sends it all again (R6-3)
     void lose_broker();    // worker: the broker connection is gone; drop the dump, close, reopen in the next round
     std::chrono::steady_clock::time_point audio_retry_{}; // next audio start attempt (worker thread)
     std::chrono::steady_clock::time_point stats_next_{};  // VTI_NATIVE_STATS output
