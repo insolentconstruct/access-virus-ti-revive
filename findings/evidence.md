@@ -6342,3 +6342,13 @@ change for FE.
 - **Method:** static analysis (research R4 and R6, REA/Ghidra on the user's own file; not re-read for this entry); code reading
 - **Confidence:** MED (the two senders and their conditions, research R4: all FE constants grepped) / LOW (that the original sends no FE while its clock runs: flag meaning not resolved) / open (whether F8 feeds the DSP watchdog)
 - **Hardware:** no
+
+### E603
+
+The Virus left USB by itself once in a REAPER smoke test (TI2 Desktop, Linux, local round-0.8.44 build with the clean sync, 2f74e96; broker protocol 6; REAPER at 48 kHz, block 256). The plug-in started, the Virus was ready after 1.0 s, the start-up bank check ended normally (4 of 4 banks cached, 0 fetched, 3.6 s); 0.9 s later the kernel logged 'usb 1-8: USB disconnect, device number 16' (19:51:17.86 local). The broker saw only the result (LIBUSB_ERROR_NO_DEVICE on ep 85/86, then on writes of MIDI clock F8 to ep 06) and polled every 2 s; the Virus came back as device 18 at 19:51:33 (number 17 skipped: one failed enumeration try), the broker opened it at 19:51:34, and the plug-in set it up again and played on (a second start-up check fine, no drops after it). The user heard it as a short drop. No broker port reset and no unknown message is in either log; the plug-in's drop counter rose only around the gap (5 at the start before the marker, 22 after the reconnect, then 0 more). Device 16 had been on the bus since 05:58 that day, through hil.sh (H1-H6), 10 sweep runs and a 540 s full sync without a disconnect. Cause open: a Virus restart (16 s fits its boot), the cable or port, or something at the end of the check (the F8 clock resumes there since the clean sync). Not an overflow of the plug-in's or the broker's buffers: those count, and they stayed quiet up to the disconnect.
+
+- **Date:** 2026-11-26
+- **Pointer:** ~/.local/share/virus-ti-native/diag.log (lines from 1795719065), journalctl --user -u tirevive-broker and journalctl -k for 19:51:00-19:51:40 (local, not in the repo)
+- **Method:** log reading (plug-in diag log, broker journal, kernel log)
+- **Confidence:** HIGH (the sequence and times) / open (the cause)
+- **Hardware:** yes (TI2 Desktop, Linux)
