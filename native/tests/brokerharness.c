@@ -121,6 +121,18 @@ void bh_serve(int fd) // as main() does for an accepted connection
     pthread_t t;
     pthread_create(&t, NULL, client_thread, c);
     pthread_detach(t);
+    // T22: return once the thread holds its slot. The next owner is the first waiting plug-in by slot (next_owner), so
+    // clients that took their slots out of creation order under load handed the Virus to the wrong one (2 s, -1).
+    for (int i = 0; i < 2000; i++) {
+        int in = 0;
+        pthread_mutex_lock(&g_cs_clients);
+        for (int k = 0; k < MAX_CLIENTS; k++)
+            in |= g_clients[k] == c;
+        pthread_mutex_unlock(&g_cs_clients);
+        if (in)
+            return;
+        usleep(1000);
+    }
 }
 
 int bh_clients(void)
