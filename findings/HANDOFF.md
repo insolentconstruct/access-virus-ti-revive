@@ -111,8 +111,8 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    CI 45879876669 failed (test_broker -O3 fortify truncation, fixed in the test); running: CI 45880538174 (c561c9b),
    CI green; installed on Linux (install.sh) + win11 (setup.exe /quiet). L1: hil.sh H1-H6 pass, sweep 10/10 (no sleep:
    needs the user's sudo). W1 hil-win: H1/H2-2/H3/H6 pass, H2-1 drift +173 ppm only (8-note fit, VM clock, as 0.8.42).
-   User Linux: LC4 L2-L6 pass (L5/L6 into RAM D), L7 skipped (no original project), logs clean. NEXT: LC5 sleep
-   (user runs hil.sh --sleep), W2-W4 in the VM (Virus to the VM first), then the Mac; checklist scripts/checklists/round-0.8.44.json published as
+   User Linux: LC4 L2-L6 pass (L5/L6 into RAM D), L7 skipped (no original project), logs clean. LC5 sleep pass
+   (work/hil/20261126-204122, slept 46 s). NEXT: W2-W4 in the VM (Virus to the VM first), then the Mac; checklist scripts/checklists/round-0.8.44.json published as
    https://claude.ai/artifact/FhiP1yThnqamYEPb36HBig (marks in rounds/0.8.44/marks).
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
