@@ -3295,7 +3295,7 @@ How the original keeps notes in time in every host (REA, Virus Control.dll 5.1.7
 - **Pointer:** REA static analysis
 - **Method:** work/rea/virus-control-5.1.7-x64.ghidra12.snapshot (local)
 - **Confidence:** HIGH (stamp rule, lead 3072 forced, host table contents), MED (device position = the driver's real-time position: from the call site and E329, the device class not decompiled)
-- **Status:** corrected by E400
+- **Status:** corrected by E400, E598
 
 ### E365
 
@@ -6193,4 +6193,65 @@ never reports: the plug-in writes as before. Nothing new on the audio thread.
 - **Pointer:** Virus Control 0x1800a8ba0, 0x1800fe600, 0x18007a690; VirusUSB.sys 0x2200A8 handler (as read in work/research-2026-11-26 R3, R12); src/broker/vtiproto.h, vtibroker_posix.c, vtibroker.c (VTIMSG_WRITTEN); native/src/device/broker.{h,cpp} (write end, room, written, on_written); native/plugin/source/virusplugin.{h,cpp} (DeviceOut TX_WINDOW, count_written, the worker's wait and selection); native/src/device/dumppacer.h (between_pieces); native/tests/test_brokermsg.cpp, test_broker.cpp, test_dumppacer.cpp; E035, E036, E231, E252, E270, E274, E592
 - **Method:** static analysis by the research round (REA); code review; unit tests (brokertests with the POSIX broker and a stub device, vtitests against a fake broker, Linux; the timeout test fails with the reports ignored)
 - **Confidence:** MED (the original's window and queue order: research, static plus capture fit) / HIGH (our code: unit tests; the Windows broker built with mingw, not run) / open (note delay and dump timing on a real Virus)
+- **Hardware:** no
+
+### E598
+
+The original's stamp clock is host-driven, not the driver's real-time position; this corrects E364 in part (1)
+(research R5-4 of 2026-11-26). E364 (1) took the "current position" the stamp starts from (vtable +0x60 of the device
+object) for the driver's real-time position. From the research's static analysis (not re-read for this entry): the
+stamp function 0x1800a8420 calls slot +0x60 of input converter 0 of the device's converter array (dev+0x940), and that
+slot (0x180024f30) returns the converter's read position (+0x40048). The input converters are CSampleRateConverter
+objects (built by 0x180024f50, vtable 0x180158208); their read position moves when the host process 0x1800aa7c0 reads
+each host output from them (slot +0x90 = 0x180025910, a fractional position stepped by the converter rate), so with
+the host's frames, not with the USB stream in real time. So the original stamps from a host-driven clock, as TI
+Revive's timeline does. What keeps a late or bursty host from making its stamps late is the converters' fill window:
+the lead is 3584 frames (2X + 256 + 3072 at X = 128, E400, E402) and the window check 0x1800a94c0 resets every input
+converter to the 512-frame target (0x1800251d0, a hard jump, no fade) once any fill leaves [16, 1024], so a stamp is
+still at least about 2560 frames ahead; when a reset moves the stamp clock back the original pings again (E491).
+E364's "a late or bursty block cannot make it late" therefore holds inside that window, with a hard reset beyond it.
+TI Revive: no code change; the StampFloor comment (stamprule.h) said the original "cannot have that" and now says what
+bounds it.
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 (sha256 a622f9a2...) 0x1800a8420, 0x180024f30, 0x180024f50 (vtable 0x180158208), 0x1800aa7c0, 0x180025910, 0x1800a94c0, 0x1800251d0, 0x1800aa090 (as read in work/research-2026-11-26 R5, partly from the text dump work/disasm/vc.asm); native/src/device/stamprule.h (StampFloor); E364, E400, E402, E491
+- **Method:** static analysis by the research round (REA/Ghidra on the user's own file); not re-read for this entry
+- **Confidence:** HIGH (the stamp reads input converter 0's read position: research, code path) / MED (that nothing but the host's reads moves it: the converter class read, the clock object at dev+0x948 not followed)
+- **Hardware:** n/a
+
+### E599
+
+USB audio in 4 ms pieces, a gentler fallback read and the ASIO input latency; TI Revive's port (fix item T14, research
+R5-1, R5-3, R5-5, R5-6 of 2026-11-26). Original (E402, research R5): Virus Control gets the Virus' audio in X = 128-frame
+blocks and reads 512 (2X + 256) behind the newest frame, so the newest frame's sawtooth is about +-64. TI Revive before:
+both brokers handed the IN stream over in 10-packet transfers (441/480 frames) with the same 512-frame margin, so the
+sawtooth alone was +-220..240 (fits E465's thin "read margin min" and E564's err range; not measured as the cause). The
+code comment that kept 10 packets said "4 ms was too short, E077", but in E077 both fix6 (4 ms) and fix7 (10 ms) failed
+on the packet-offset bug that fix8 fixed; 4-packet reads streamed cleanly in E076 (vtiisotest). TI Revive now (round
+0.8.44): (1) vtiaudioshm.h VTI_AUDIO_NP = 4 packets per read and delivery (176/177 frames at 44.1 kHz, 192 at 48),
+VTI_AUDIO_NR = 20 reads in flight (80 ms as before), in both brokers. 4 rather than 2: the size with earlier evidence on
+WinUSB (E076, E077 after fix8), 250 completions a second instead of 500, and 2 would gain only about 44 frames more. The
+Linux OUT transfers are 160 / NP = 40 (160 ms as before): with 16 a held thread's return mirrored only 16 of its 20 IN
+transfers (vlatests); the Windows OUT slots are 128 instead of 64: in a stub test of vtiusbaudio.c under Wine (fake
+1 ms frame clock, the thread held 250 ms) the return's burst of 76 mirrored packets filled 64 slots and send_out then
+waited for a slot at every packet from then on (about 1480 waits in the 1.5 s after it; NP 10: 5; NP 4 with 128 slots: 0).
+The stall detection on Linux (stallfill.h) scales its limit with the transfer: 12 ms instead of 30. Consumers checked
+in code for the piece size: AudioIn read()/read_at(), the ASIO driver's clock (any piece size), the sidechain (fill
+averaged), OfflinePacer (learns the step). (2) R5-3: AudioIn::read() (before the sync marker and stretches without one)
+skipped or repeated a frame hard per drift step and re-anchored hard; each move now crossfades from the old position
+(Crossfade, as the aligned path since E579/E589), one step per crossfade at most, hard only when the old frames left the
+ring. With 4 ms pieces its +-128 band also holds the sawtooth at equal clocks (no steps; with 441-frame pieces it stepped
+back and forth all the time, unit test). (3) R5-5: the ASIO driver reported input latency = buffer size; now buffer +
+(NP / 2 + 1) ms of frames (a packet's transfer plus half a piece on average): 388 at 256 / 44.1 kHz (the original
+reports 392, E082). Inferred, not measured. (4) R5-6 checked and not ported: the Windows broker sends no OUT packets for
+a stall's gap, Linux does. In the same stub test the OUT stream had run dry during the stall either way (234 empty
+frames), the reads completed meanwhile were mirrored on return, and OUT packets for the gap only filled the free slots:
++60 ms OUT latency for good and, with the slots full, a wait at every later packet. Linux by code reading: its gap OUT
+fills the free transfers, so after a stall longer than the 80 ms queued its OUT latency stays up to about 160 ms until the
+stream restarts (before this change too; not run, open).
+
+- **Date:** 2026-11-26
+- **Pointer:** src/broker/vtiaudioshm.h (VTI_AUDIO_NP, VTI_AUDIO_NR), vtiusbaudio.c (NP, NR, NW, fill_silence), vtiusbaudio_libusb.c (NP, NR, NW), stallfill.h; native/src/device/audioin.{h,cpp} (read), asioclock.h (asio_in_latency), native/asio/asiodriver.cpp (getLatencies); native/tests/test_vla.cpp, test_audioin.cpp, test_stallfill.cpp, test_asioclock.cpp; work/research-2026-11-26 R5; E076, E077, E082, E402, E465, E564, E579, E589
+- **Method:** code review; unit tests (vtitests, vlatests, Linux); a stub test of the Windows stream under Wine (scratch, not in the repo); the Linux and Windows brokers built (make, mingw)
+- **Confidence:** HIGH (E077's cause, our code: unit tests) / MED (Windows stream: stub test only) / open (that the sawtooth drives E465/E564; the new piece size, latency and CPU on a real Virus)
 - **Hardware:** no

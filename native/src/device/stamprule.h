@@ -220,7 +220,8 @@ inline int experimental_lead(int block, int virus_rate)
 }
 
 // The safety net (0.8.35): a stamp from the timeline can lie in the past when the host hands over a block late. The
-// original cannot have that (it stamps from the Virus' position now, E364); here a stamp keeps at least min_ahead
+// original stamps from a host-driven position too (its input converter's read position, E598 correcting E364); a hard
+// reset of that converter beyond 1024 frames of fill keeps its stamps ~2560 frames ahead. Here a stamp keeps min_ahead
 // frames past the newest ring frame, and stamps never go backwards (a stamp behind the DSP's newest one can raise
 // a Sync Information Event, E251) - except for a jump of a second or more (a new timeline after a reconnect).
 struct StampFloor {

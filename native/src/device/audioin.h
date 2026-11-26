@@ -1,8 +1,9 @@
 // audioin.h - the Virus' audio (USB 1 / USB 2) from the TI Revive broker's ring (vtiaudioshm.h). The broker streams
 // once its owner asked for it (Broker::audio); the synth is the clock master, so the reader keeps a fixed distance
-// behind the newest frame and corrects drift by dropping/repeating single frames (read()); the plug-in reads
+// behind the newest frame and corrects drift by dropping/repeating single frames, crossfaded (read()); the plug-in reads
 // stamp-aligned positions (read_at()) and resamples itself at host rates other than 44.1 kHz.
 #pragma once
+#include "crossfade.h"
 #include <string>
 #include <cstdint>
 
@@ -73,6 +74,8 @@ private:
     std::string usb_serial_;
     std::string open_note_;
     int64_t pos_ = -1, drops_ = 0;
+    Crossfade xf_;                    // read(): a drift step or re-anchor fades from the old position (R5-3)
+    float xf_buf_[6][Crossfade::LEN]; // the old position's frames, per channel
     int64_t rate_gen_seen_ = -1; // -1: not looked at since open
 };
 

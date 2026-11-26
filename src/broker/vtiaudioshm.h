@@ -19,6 +19,12 @@
 #define VTI_AUDIO_RING 16384 // frames per ring (power of 2, ~370 ms at 44.1 kHz)
 #define VTI_AUDIO_IN_CH 6    // device order (E082): 0/1 analog inputs (ASIO In 1/2), 2/3 USB 1, 4/5 USB 2
 #define VTI_AUDIO_OUT_CH 2
+// Both brokers append the IN stream in pieces of VTI_AUDIO_NP USB packets (1 ms each: 4 ms = 176/177 frames at 44.1
+// kHz) with VTI_AUDIO_NR reads queued (80 ms against a held thread). The original gets 128-frame blocks and reads 512
+// behind the newest frame (E402); whole 10 ms pieces (441 frames) took about half of that margin as a sawtooth (R5-1,
+// E599). 4-packet reads streamed cleanly on WinUSB in E076; E077's 4 ms failure was the packet-offset bug
+#define VTI_AUDIO_NP 4
+#define VTI_AUDIO_NR 20
 
 typedef struct {
     uint32_t magic, version, rate, in_ch, out_ch, ring_frames;

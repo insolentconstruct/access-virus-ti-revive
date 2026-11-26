@@ -133,7 +133,7 @@ static void blog(const char *fmt, ...)
 }
 
 // Queue one message (header + a + b). On overflow the client is dropped instead of blocking the caller.
-// Called by vua_run's streaming thread for every completed IN read (~441 frames per 10 ms).
+// Called by vua_run's streaming thread for every completed IN read (VTI_AUDIO_NP ms: ~176 frames per 4 ms).
 static void audio_in(const int16_t *pcm, uint32_t frames, void *user)
 {
     (void)user;

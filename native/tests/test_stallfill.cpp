@@ -84,6 +84,40 @@ TEST(stallfill_loss_after_long_drift_is_not_counted_with_the_drift)
     CHECK(filled >= 110 && filled <= 130); // 200 - 80 queued
 }
 
+// R5-1: the broker's transfers are 4 ms now (VTI_AUDIO_NP), so the limit is 3 transfers = 12 ms instead of 30. A thread
+// woken up to 3 ms late at random still fills nothing in an hour, and a real loss is still found once
+TEST(stallfill_4_ms_transfers_with_late_wakeups)
+{
+    vti_stallfill s = VTI_STALLFILL_INIT(4);
+    double t = 1000;
+    uint64_t delivered = 0, filled = 0;
+    uint32_t rnd = 1;
+    auto steady = [&](long transfers) {
+        for (long i = 0; i < transfers; i++) {
+            t += 4.0 * (1.0 + 22e-6);
+            rnd = rnd * 1664525u + 1013904223u;
+            uint64_t g = vti_stallfill_step(&s, t + (rnd >> 8) % 3000 / 1000.0, delivered);
+            filled += g;
+            delivered += g + 4;
+        }
+    };
+    steady(3600L * 250);
+    CHECK(filled == 0);
+    // 500 ms with nothing: 20 transfers of 4 ms were queued, so 420 ms were really lost
+    t += 500;
+    for (int i = 0; i < 20; i++) {
+        uint64_t g = vti_stallfill_step(&s, t, delivered);
+        filled += g;
+        delivered += g + 4;
+        t += 0.05;
+    }
+    steady(500);
+    CHECK(filled >= 405 && filled <= 430);
+    const uint64_t once = filled;
+    steady(60L * 250);
+    CHECK(filled == once);
+}
+
 TEST(stallfill_start_counts_the_first_transfer)
 {
     vti_stallfill s = VTI_STALLFILL_INIT(10);

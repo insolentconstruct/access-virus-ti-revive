@@ -2,6 +2,9 @@
 // only, the tests run them everywhere.
 #pragma once
 #include <cstdint>
+extern "C" {
+#include "vtiaudioshm.h"
+}
 
 namespace vti {
 
@@ -17,5 +20,11 @@ inline int16_t asio_out16(int32_t s)
     const int64_t v = ((int64_t)s + 32768) >> 16;
     return (int16_t)(v > 32767 ? 32767 : v);
 }
+
+// the input latency reported to the host (R5-5): a buffer's first frame is `buffer` frames old once the buffer is complete,
+// and its last frame came in one USB packet (1 ms) and then waited in the broker for the rest of its piece (0 to
+// VTI_AUDIO_NP packets, half of that on average): buffer + (VTI_AUDIO_NP / 2 + 1) ms of frames. Inferred from the path,
+// not measured (a loopback test through the Virus would tell); 4 ms pieces at 256: 388 (44.1 kHz), 400 (48 kHz)
+inline long asio_in_latency(long buffer, int rate) { return buffer + (long)(VTI_AUDIO_NP + 2) * rate / 2000; }
 
 } // namespace vti

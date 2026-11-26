@@ -282,7 +282,7 @@ public:
         if (!inited_)
             return ASE_NotPresent;
         long bs = bufsize_ > 0 ? bufsize_ : 256;
-        *in = bs;                         // a block is handed over once it is complete
+        *in = vti::asio_in_latency(bs, audio_.rate()); // the buffer and the USB path before it (asioclock.h)
         *out = bs + OUT_PREFILL + 2 * (audio_.rate() == 48000 ? 48 : 44); // + the broker's prefill, two USB packets
         return ASE_OK;
     }
@@ -412,7 +412,7 @@ private:
     long index_ = 0;
     int64_t pos_ = -1; // next ring frame handed to the host
 
-    // the clock: the broker signals every block it received from the Virus (~441 frames / 10 ms); each complete
+    // the clock: the broker signals every block it received from the Virus (~176 frames / 4 ms); each complete
     // buffer of new frames becomes one buffer switch. Outputs are queued towards the synth right after it.
     void clock(unsigned run)
     {

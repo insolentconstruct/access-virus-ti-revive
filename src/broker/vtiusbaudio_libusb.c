@@ -10,6 +10,7 @@
 // Rate following (design-rate.md step 3): the stream runs at 44.1 or 48 kHz; vla_switch_rate() changes it in the
 // driver's order (ratesw.h) without releasing the interfaces (a release would hand them back to snd-usb-audio).
 #include "vtiusbaudio_libusb.h"
+#include "vtiaudioshm.h"
 #include "stallfill.h"
 #include "firstmute.h"
 #include "pktstat.h"
@@ -26,9 +27,9 @@
 #define OUT_CH 2
 #define IN_PKT 592  // wMaxPacketSize EP 0x82
 #define OUT_PKT 200 // wMaxPacketSize EP 0x01
-#define NP 10       // packets (ms) per transfer
-#define NR 8        // IN transfers in flight (80 ms)
-#define NW 16       // OUT transfers
+#define NP VTI_AUDIO_NP // packets (ms) per transfer = per delivery into the ring (vtiaudioshm.h, R5-1)
+#define NR VTI_AUDIO_NR // IN transfers in flight (80 ms)
+#define NW (160 / NP) // OUT transfers: 160 ms, room for every IN transfer's mirror after a held thread
 #define OUT_LEAD 12 // OUT packets queued before the first IN packet
 
 extern void (*vti_log)(const char *fmt, ...);
@@ -292,7 +293,7 @@ static int stream_start(void)
             in_ok++;
     }
     unsigned lead[NP];
-    for (int done = 0; done < OUT_LEAD;) { // OUT lead-in with the nominal pattern (the first IN packets come 10 ms
+    for (int done = 0; done < OUT_LEAD;) { // OUT lead-in with the nominal pattern (the first IN packets come NP ms
         int n = OUT_LEAD - done < NP ? OUT_LEAD - done : NP; // later), then every IN packet is mirrored
         for (int k = 0; k < n; k++)
             lead[k] = vti_pkt_nominal(S.rate, S.pattern++);

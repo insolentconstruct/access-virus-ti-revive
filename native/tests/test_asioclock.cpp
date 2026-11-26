@@ -27,3 +27,14 @@ TEST(asioclock_sample_conversion)
     for (int s = -32768; s < 32768; s += 257)
         CHECK_EQ(asio_out16(asio_in32((int16_t)s)), s); // round trip
 }
+
+// R5-5: the input latency the driver reports. A buffer's first frame is `buffer` frames old once the buffer is complete;
+// its last frame came in one USB packet (1 ms) and then waited in the broker for the rest of its piece (0 to
+// VTI_AUDIO_NP packets, half of that on average). Before, only the buffer was reported (256 at 256; the original 392)
+TEST(asioclock_input_latency_counts_the_usb_path)
+{
+    CHECK_EQ(asio_in_latency(256, 44100), 256 + 132); // (4 / 2 + 1) packets of 44.1 frames
+    CHECK_EQ(asio_in_latency(256, 48000), 256 + 144);
+    CHECK_EQ(asio_in_latency(64, 44100), 64 + 132);
+    CHECK_EQ(asio_in_latency(2048, 48000), 2048 + 144);
+}

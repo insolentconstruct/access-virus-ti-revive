@@ -515,15 +515,12 @@ void AudioIn::read_at(float *l1, float *r1, float *l2, float *r2, int n, int64_t
 void AudioIn::read(float *l1, float *r1, float *l2, float *r2, int n, int latency, float *l3, float *r3)
 {
     const bool third = l3 && r3;
-    auto silence = [&](int from) {
-        for (int i = from; i < n; i++) {
+    if (!streaming()) {
+        for (int i = 0; i < n; i++) {
             l1[i] = r1[i] = l2[i] = r2[i] = 0;
             if (third)
                 l3[i] = r3[i] = 0;
         }
-    };
-    if (!streaming()) {
-        silence(0);
         return;
     }
     // a target the ring holds with 1024 frames to spare (blocks above 5376 frames: 2 * n + 256 did not fit), and at
@@ -531,6 +528,7 @@ void AudioIn::read(float *l1, float *r1, float *l2, float *r2, int n, int latenc
     latency = std::max(n, std::min(latency, VTI_AUDIO_RING - n - 1024));
     int64_t newest = load_acquire(&shm_->in_frames);
     int64_t fill = newest - pos_;
+    const int64_t was = pos_; // where this block would go on: a move away from it fades in (R5-3)
     // (re)anchor when starting, after an underrun or when far behind (DAW stalled): far = a quarter ring beyond the
     // target and one block, or so close to the ring size that the synth would overwrite what this block reads. Half
     // the ring was the limit before: with 4096-frame blocks the target alone (2 * 4096 + 256) exceeded it and every
@@ -540,24 +538,37 @@ void AudioIn::read(float *l1, float *r1, float *l2, float *r2, int n, int latenc
         if (pos_ >= 0)
             drops_++;
         pos_ = newest - latency;
-        fill = latency;
+    } else if (!xf_.active()) {
+        // drift: one frame per crossfade at most (a step per block restarted the fade half-way below 128-frame
+        // blocks), keeps the distance within +-128 frames of the target
+        if (fill > latency + 128)
+            pos_++;
+        else if (fill < latency - 128)
+            pos_--;
     }
-    // drift: one frame per block at most, keeps the distance within +-128 frames of the target
-    int step_back = 0;
-    if (fill > latency + 128)
-        pos_++;
-    else if (fill < latency - 128)
-        step_back = 1;
-    const float k = 1.0f / 32768.0f;
-    const int16_t *in = shm_->in;
-    for (int i = 0; i < n; i++) {
-        int64_t f = pos_ + i - (step_back && i > 0 ? 1 : 0);
-        const int16_t *fr = in + (f & (VTI_AUDIO_RING - 1)) * VTI_AUDIO_IN_CH;
-        l1[i] = fr[2] * k, r1[i] = fr[3] * k, l2[i] = fr[4] * k, r2[i] = fr[5] * k;
-        if (third)
-            l3[i] = fr[0] * k, r3[i] = fr[1] * k;
+    if (pos_ != was) {
+        if (was < 0)
+            xf_.stop();
+        else
+            xf_.start(pos_ - was);
     }
-    pos_ += n - step_back;
+    read_at(l1, r1, l2, r2, n, pos_, l3, r3);
+    // a hard skip or repeat was a tick per step (~4 a second at 90 ppm): fade from the old position, as the stamp-aligned
+    // path does (E579, E589); hard only when the old audio is no longer in the ring (a long stall)
+    if (const int k = xf_.frames(n)) {
+        const int64_t old = pos_ - xf_.delta();
+        if (!Crossfade::readable(old, k, newest, VTI_AUDIO_RING))
+            xf_.stop();
+        else {
+            float(*b)[Crossfade::LEN] = xf_buf_;
+            read_at(b[0], b[1], b[2], b[3], k, old, third ? b[4] : nullptr, third ? b[5] : nullptr);
+            float *dst[6] = {l1, r1, l2, r2, l3, r3};
+            for (int c = 0; c < (third ? 6 : 4); c++)
+                xf_.mix(dst[c], b[c], k);
+            xf_.advance(k);
+        }
+    }
+    pos_ += n;
 }
 
 void AudioIn::read_raw_at(int16_t *dst, int n, int64_t pos) const

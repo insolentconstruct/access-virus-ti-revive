@@ -646,7 +646,7 @@ static volatile int64_t g_in_last, g_in_gap_max, g_tick_last, g_tick_gap_max; //
 static void audio_in(const int16_t *pcm, uint32_t frames, void *user) // libusb event thread
 {
     (void)user;
-    if (g_verbose) { // gaps between USB blocks (normally 10 ms)
+    if (g_verbose) { // gaps between USB blocks (normally VTI_AUDIO_NP = 4 ms)
         int64_t t = mono_100ns();
         if (g_in_last && t - g_in_last > g_in_gap_max)
             g_in_gap_max = t - g_in_last;
