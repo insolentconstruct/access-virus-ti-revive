@@ -108,7 +108,7 @@ unplug step on the Access driver, Mac "Virus TI MIDI" played through, Keyboard/P
    identical (E161, index 210167a). Round build stays installed; NEXT: the user's own tests (DAW smoke, TI2 items
    below; asked 2026-11-26), then CI build + hil-win in the win11 VM. REAPER smoke: ok, incl. the user's Virus
    off/on while playing (E603: back in ~20 s, no drops after it).
-   CI test build 45879876669 (7747749) started; checklist scripts/checklists/round-0.8.44.json published as
+   CI 45879876669 failed (test_broker -O3 fortify truncation, fixed in the test); checklist scripts/checklists/round-0.8.44.json published as
    https://claude.ai/artifact/FhiP1yThnqamYEPb36HBig (marks in rounds/0.8.44/marks).
    OWED before the release (ask the user first, rule 2, no flood): hil.sh + hil-win at blocks 32-512 both rates
    (T14 NP 4 = top risk); win11 VM (T5 writes, T17 overlapped reads, T6/T7 protocol, B4-B6/D17 pipe security);
