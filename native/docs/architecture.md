@@ -51,7 +51,10 @@ Access is installed or registered. These are the files it loads:
 - **Single dumps:** 524 bytes, decoded to and updated from parameter values. Checksums sit at bytes 265 and 522.
 - **Upgrader:** brings older dumps (format versions 1–12, Virus C 267-byte dumps) to the current layout, ported
   from the original.
-- **`init_messages()`:** the original's start-up sequence (global init, parameter init), byte-identical to it.
+- **`init_messages()`:** the original's start-up sequence (global init, parameter init) with its fixed multi
+  unchanged. The original writes the parts' Detune and Output Select into that multi at connect, so the sequence is
+  byte-identical only while they are the defaults; a project with other values gets the patched multi with its state
+  records (`startup_multi()`, R8-2).
 - **Automation:** `automation.xml` maps (parameter, part) to a VST parameter ID.
 
 ### UI: `src/editor/*` and `plugin/source/viruseditor.*`
@@ -170,7 +173,10 @@ Access is installed or registered. These are the files it loads:
   Revive)" open with it: Windows/Linux the wrapper's id (the original's with byte 15 XOR 0x5A), macOS the bridge's id.
   `moduleinfo.json` declares the other ids compatible (the original Access plug-in, the other platform's, the test
   builds'; VST 3.7.5+ hosts). The project state format is the original's: a state saved by the original (= what the
-  wrapper and the bridge store) loads unchanged, and `getState` returns it byte-identical.
+  wrapper and the bridge store) loads, and `getState` returns it in the same format, though not byte-identical:
+  System Clock globals are dropped (E445), single dumps are marked "eLIB" and upgraded, Input/Atomizer records
+  removed, a Snow keeps 4 parts, edited parts and the Virus slot record are written (docs/formats.md). A state that
+  does not parse is saved back unchanged until something is edited (R8-5).
 
 ## 3. Platforms
 

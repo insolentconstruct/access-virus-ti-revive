@@ -18,7 +18,12 @@ TEST(container_round_trip)
 TEST(container_damaged)
 {
     auto d = build_container({{1, 2, 3}, {4, 5, 6, 7}});
-    CHECK(parse_container(Bytes(d.begin(), d.end() - 2)).size() == 1); // a truncated last record is dropped
+    // R8-5: a declared total longer than the data loads nothing, like the original (0x180060080)
+    CHECK(parse_container(Bytes(d.begin(), d.end() - 2)).empty());
+    Bytes cut = d; // a record longer than the rest of the total: the records before it stay
+    cut[7] -= 2;
+    cut.resize(cut.size() - 2);
+    CHECK(parse_container(cut).size() == 1);
     Bytes bad = d;
     bad[0] = 'X';
     CHECK(parse_container(bad).empty());
@@ -166,4 +171,152 @@ TEST(state_values_the_state_lacks_are_kept)
     CHECK_EQ(next[-1]["Global/Clock"], 2);  // not in the state: kept
     CHECK_EQ(next[-1]["Global/Tempo"], 120); // in the state: the state wins
     CHECK_EQ(next[0]["Osc/Shape"], 64);
+}
+
+// R8-5: little-endian lengths (record and total) when the big-endian value has one of its top 10 bits set
+TEST(container_little_endian_lengths)
+{
+    Bytes d = {'M', 'I', 'D', 'I', 11, 0, 0, 0, 3, 0, 0, 0, 0xB0, 7, 100, 0, 0, 0, 0};
+    auto recs = parse_container(d);
+    CHECK_EQ(recs.size(), 2u);
+    CHECK(recs[0] == Bytes({0xB0, 7, 100}));
+    CHECK(recs[1].empty());
+    d[4] = 12; // total one longer than the data: nothing
+    CHECK(parse_container(d).empty());
+}
+
+static Bytes single(int part, int origin)
+{
+    Bytes m(524, 0);
+    m[0] = 0xF0, m[1] = 0x00, m[2] = 0x20, m[3] = 0x33, m[4] = 0x01, m[5] = 0x10, m[6] = 0x10, m[8] = (uint8_t)part;
+    m[9] = 12, m[10] = 0, m[11] = 2, m[12] = (uint8_t)origin, m[523] = 0xF7;
+    return m;
+}
+
+// R8-4: every single dump of a project is marked "eLIB" (byte 10 = 0x20) with both checksums recomputed
+TEST(state_project_dumps_marked_elib)
+{
+    std::vector<Bytes> recs = {{}, single(0, 4), single(3, 7), {0xB0, 7, 100}};
+    CHECK_EQ(mark_project_dumps(recs), 2);
+    for (int i : {1, 2}) {
+        CHECK_EQ(recs[i][10], 0x20);
+        unsigned a = 0;
+        for (int b = 5; b < 265; b++)
+            a += recs[i][b];
+        CHECK_EQ(recs[i][265], a & 0x7F);
+        for (int b = 265; b < 522; b++)
+            a += recs[i][b];
+        CHECK_EQ(recs[i][522], a & 0x7F);
+    }
+    CHECK(recs[3] == Bytes({0xB0, 7, 100}));
+}
+
+// R8-6: the original removes page 0x6F parameter 0x7E (Input/Atomizer) records at load
+TEST(state_input_atomizer_records_dropped)
+{
+    std::vector<Bytes> recs = {{0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x6F, 0x02, 0x7E, 0x01, 0xF7},
+                               {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x6F, 0x02, 0x7D, 0x01, 0xF7},
+                               {0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x72, 0x02, 0x7E, 0x01, 0xF7}};
+    CHECK_EQ(drop_input_atomizer(recs), 1);
+    CHECK_EQ(recs.size(), 2u);
+    CHECK_EQ(recs[0][8], 0x7D);
+    CHECK_EQ(recs[1][6], 0x72);
+}
+
+// R8-3: a Snow keeps the dumps and channel messages of its 4 parts only
+TEST(state_snow_keeps_four_parts)
+{
+    std::vector<Bytes> recs = {{}};
+    for (int p = 0; p < 16; p++)
+        recs.push_back(single(p, 0));
+    for (int ch = 0; ch < 16; ch++)
+        recs.push_back({(uint8_t)(0xB0 | ch), 7, 100});
+    recs.push_back({0xF0, 0x00, 0x20, 0x33, 0x01, 0x10, 0x73, 0x00, 0x2D, 0x02, 0xF7}); // a global stays
+    CHECK_EQ(keep_parts(recs, 4), 24);
+    CHECK_EQ(recs.size(), 1u + 4 + 4 + 1);
+    for (int p = 0; p < 4; p++)
+        CHECK(is_part_dump(recs[1 + p], p));
+    CHECK_EQ(recs[8][0], 0xB3);
+    CHECK_EQ(recs[9][6], 0x73);
+    CHECK_EQ(keep_parts(recs, 16), 0);
+    // round trip: what a Snow saves loads back with the same 4 parts
+    CHECK(parse_container(build_container(recs)) == recs);
+}
+
+static Bytes multi(uint8_t fill)
+{
+    Bytes m(267, fill);
+    m[0] = 0xF0, m[1] = 0x00, m[2] = 0x20, m[3] = 0x33, m[4] = 0x01, m[5] = 0x10, m[6] = 0x11, m[7] = 0, m[8] = 0;
+    m[266] = 0xF7;
+    return m;
+}
+
+// R8-2: the start-up multi gets the project's Detune (137+p) and Output Select (185+p), like 0x180070520
+TEST(state_startup_multi_takes_detune_and_output)
+{
+    Bytes fixed = multi(0x40);
+    unsigned a = 0;
+    for (int b = 5; b < 265; b++)
+        a += fixed[b];
+    fixed[265] = a & 0x7F;
+    Bytes stored = multi(0x11);
+    stored[265] = 0; // the original's state keeps the multi without its checksum
+    CHECK(startup_multi(fixed, fixed) == fixed);
+    CHECK(startup_multi(fixed, Bytes{0xF0, 0xF7}) == fixed);
+    auto m = startup_multi(fixed, stored);
+    for (int b = 0; b < 267; b++) {
+        const bool taken = (b >= 137 && b < 153) || (b >= 185 && b < 201);
+        if (b != 265)
+            CHECK_EQ(m[b], taken ? 0x11 : fixed[b]);
+    }
+    a = 0;
+    for (int b = 5; b < 265; b++)
+        a += m[b];
+    CHECK_EQ(m[265], a & 0x7F);
+}
+
+// R8-2: the editor shows the stored multi's Detune and Output Select (names from the model's template)
+TEST(state_multi_routing_values)
+{
+    MidiMessage t;
+    auto add = [&](int index, const char *path, int part) {
+        MessageByte b;
+        b.index = index, b.content = path, b.part = part;
+        t.bytes.push_back(b);
+    };
+    add(121, "Multi Part Parameter/Transpose", 0);
+    add(137, "Multi Part Parameter/Detune", 0);
+    add(138, "Multi Part Parameter/Detune", 1);
+    add(185, "Multi Part Parameter/Output Select Control2", 0);
+    add(185, "Multi Part Parameter/Output Select Control3", 0);
+    Bytes stored = multi(0);
+    stored[121] = 70, stored[137] = 3, stored[138] = 5, stored[185] = 2;
+    std::map<int, std::map<std::string, int>> parts;
+    multi_routing_values(t, stored, parts);
+    CHECK_EQ(parts[0]["Multi Part Parameter/Detune"], 3);
+    CHECK_EQ(parts[1]["Multi Part Parameter/Detune"], 5);
+    CHECK_EQ(parts[0]["Multi Part Parameter/Output Select Control2"], 2);
+    CHECK_EQ(parts[0]["Multi Part Parameter/Output Select Control3"], 2);
+    CHECK(!parts[0].count("Multi Part Parameter/Transpose")); // not restored at start-up by the original either
+    parts.clear();
+    multi_routing_values(t, Bytes(10, 0), parts);
+    CHECK(parts.empty());
+}
+
+// R8-5: a project that does not parse is saved back unchanged until the instance's state changes
+TEST(state_unread_project_kept)
+{
+    Bytes raw = {'M', 'I', 'D', 'I', 0, 0, 0, 50, 1, 2};
+    std::vector<Bytes> now = {{}, {0xB0, 7, 100}};
+    UnreadState u;
+    CHECK(!u.saved(now));
+    u.keep(raw, now);
+    CHECK(u.saved(now) && *u.saved(now) == raw);
+    auto edited = now;
+    edited[1][2] = 90;
+    CHECK(!u.saved(edited));
+    u.clear();
+    CHECK(!u.saved(now));
+    u.keep({}, now); // nothing came: nothing to keep
+    CHECK(!u.saved(now));
 }

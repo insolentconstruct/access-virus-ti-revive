@@ -65,6 +65,7 @@
 #include "model/sysinfo.h"
 #include "model/remotetemplates.h"
 #include "model/sectionlock.h"
+#include "model/state.h"
 #include "model/rambackup.h"
 #include "model/undohistory.h"
 #include "model/comparestate.h"
@@ -893,7 +894,10 @@ private:
     std::mutex pending_mu_;
     std::vector<std::pair<Steinberg::Vst::ParamID, double>> pending_; // device -> host, handed over in process()
     const MidiMessage *single_template_ = nullptr;
+    const MidiMessage *multi_template_ = nullptr; // VirusTI_MultiDump: the stored multi's Detune/Output Select (R8-2)
+    int parts_ = 16; // the device type's parts: the Snow saves and sends 4 like the original (R8-3)
     std::vector<std::vector<uint8_t>> state_; // the state records (start-up messages), see formats.md
+    UnreadState unread_; // under state_mu_: a project setState could not parse, saved back unchanged (R8-5)
     std::mutex state_mu_;
     std::unique_ptr<DeviceOut> out_;
     int block_ = 512;

@@ -1435,6 +1435,8 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         return kResultOk;
     }
     single_template_ = dev_.message("VirusTI_Singledump");
+    multi_template_ = dev_.message("VirusTI_MultiDump");
+    parts_ = std::max(1, std::min(16, df.parts));
     ui_state_["VirusControl/InitialSyncProgress"] = 127; // exist before the sync thread updates them
     ui_state_["VirusControl/RecallProgress"] = 127;
     load_banks();
@@ -1446,7 +1448,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
     else
         fprintf(stderr, "Virus TI native: no editor (%s)\n", err.c_str());
     // a new instance's state like the original's: empty record, the fixed multi, 16 parts = the init patch,
-    // Output Control 2/3 globals, 14 controllers x 16 channels (formats.md)
+    // Output Control 2/3 globals, 14 controllers x 16 channels (formats.md); a Snow 4 parts and 4 channels (R8-3)
     auto multi = files->init_multi();
     auto init = files->init_single();
     if (single_template_ && init.size() == 524) { // which parameters a part's single dump carries
@@ -1468,7 +1470,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         std::fill(smulti.begin() + 25, smulti.begin() + 41, 0);
         smulti[265] = 0;
         default_.push_back(smulti);
-        for (int p = 0; p < 16; p++) {
+        for (int p = 0; p < parts_; p++) {
             auto d = init;
             d[7] = 0, d[8] = (uint8_t)p;
             BankDrop::checksums(d);
@@ -1479,7 +1481,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         static const uint8_t ccs[14][2] = {{1, 0},  {2, 0},   {3, 0},  {4, 0},  {6, 0},  {7, 100}, {8, 64},
                                            {9, 0},  {11, 127}, {12, 0}, {13, 0}, {14, 0}, {15, 0},   {16, 0}};
         for (auto &cc : ccs)
-            for (int ch = 0; ch < 16; ch++)
+            for (int ch = 0; ch < parts_; ch++)
                 default_.push_back({(uint8_t)(0xB0 | ch), cc[0], cc[1]});
     }
     // the part dumps in the current format (E174: the Virus would convert old ones and reset the newer fields)
@@ -5718,6 +5720,8 @@ void VirusPlugin::apply_state_to_params(int stored)
     {
         std::lock_guard<std::mutex> lk(state_mu_);
         for (auto &r : state_) {
+            if (multi_template_) // the stored multi's Detune/Output Select; later page-0x72 records win (R8-2)
+                multi_routing_values(*multi_template_, r, parts);
             bool dump = false;
             for (int p = 0; p < 16; p++)
                 if (is_part_dump(r, p)) {
@@ -5777,15 +5781,23 @@ void VirusPlugin::send_state()
         return;
     std::lock_guard<std::mutex> lk(state_mu_);
     std::vector<std::vector<uint8_t>> recs;
-    for (auto &r : state_)
-        if (!r.empty() && !(r.size() > 2 && r[0] == 0xF0 && r[1] == 0x7D) && // not our editor-only records
-            !(!init_multi_.empty() && r.size() > 6 && r[0] == 0xF0 && r[6] == 0x11)) { // nor the stored multi: the
-            // start-up messages send the fixed table unchanged, like the original (E321)
+    for (auto &r : state_) {
+        // R8-2: the stored multi is not sent; like the original at connect (0x180070520) the fixed start-up table
+        // goes out with the project's per-part Detune and Output Select, again here only when they differ from it
+        // (the start-up messages sent the table unchanged, E321), so a default project sends what it did before
+        if (!init_multi_.empty() && r.size() > 6 && r[0] == 0xF0 && r[6] == 0x11) {
+            if (auto m = startup_multi(init_multi_, r); m != init_multi_)
+                recs.push_back(std::move(m));
+            continue;
+        }
+        if (!r.empty() && r[0] != 0xFF && // not the original's Parameter Mapping record (R8-6), no MIDI
+            !(r.size() > 2 && r[0] == 0xF0 && r[1] == 0x7D)) { // nor our editor-only records
             recs.push_back(r);
             auto &m = recs.back(); // a project's USB IO configuration: this computer's setting wins
             if (m.size() == 11 && m[0] == 0xF0 && m[6] == 0x73 && m[7] == 0x00 && m[8] == 0x09)
                 m[9] = (uint8_t)usb_io_.load();
         }
+    }
     const int n = (int)recs.size();
     const int dropped = out_->send_state(std::move(recs));
     out_->log("Virus TI native: state sent (%d messages, part 1 \"%s\", device %s)%s\n", n, part1_name(state_).c_str(),
@@ -5804,8 +5816,28 @@ tresult PLUGIN_API VirusPlugin::setState(IBStream *state)
     if (out_)
         out_->log("Virus TI native: setState %zu bytes, %zu records, part 1 \"%s\"\n", d.size(), recs.size(),
                   part1_name(recs).c_str());
-    if (recs.empty())
+    if (recs.empty()) {
+        // R8-5: unreadable (truncated, damaged): the next save writes it back as it came instead of our state, until
+        // something is edited
+        std::lock_guard<std::mutex> lk(state_mu_);
+        unread_.keep(d, state_.empty() ? default_ : state_);
+        if (out_ && !d.empty())
+            out_->log("Virus TI native: the project's state could not be read: nothing loaded, saved back unchanged "
+                      "until something is edited\n");
         return kResultFalse;
+    }
+    if (std::any_of(recs.begin(), recs.end(), [](const std::vector<uint8_t> &r) { return !r.empty() && r[0] == 0xFF; }) &&
+        out_) // R8-6: kept in the project, never sent; our automation follows automation.xml's fixed ids
+        out_->log("Virus TI native: the project holds the original's Parameter Mapping record: not used, its "
+                  "automation may move other parameters here\n");
+    // R8-6: Input/Atomizer records, removed at load like the original
+    if (int atom = drop_input_atomizer(recs); atom && out_)
+        out_->log("Virus TI native: %d Input/Atomizer record(s) in the project ignored, like the original\n", atom);
+    // R8-3: a Snow has 4 parts: no dumps or controllers for parts it does not have
+    if (int other = parts_ < 16 ? keep_parts(recs, parts_) : 0; other && out_)
+        out_->log("Virus TI native: %d record(s) for parts above %d ignored\n", other, parts_);
+    // R8-4: a project's patches are marked as not from a bank of the Virus, with fresh checksums, like the original
+    mark_project_dumps(recs);
     // a project saved by 0.8.38 or older may hold the Virus' report of its rate: sent back it switched the Virus' clock
     // at every load (E445). Gone here, so the next save is clean too
     if (int clock = drop_system_clock_globals(recs); clock && out_)
@@ -5839,6 +5871,7 @@ tresult PLUGIN_API VirusPlugin::setState(IBStream *state)
         std::lock_guard<std::mutex> lk(state_mu_);
         state_ = std::move(recs);
         state_index_data_ = nullptr; // a new list can reuse the old address with the same size (audit #21)
+        unread_.clear();
     }
     state_loaded_ = true;
     unlock_all_parts(); // a project brings no locks: the original clears them at every project load (E378)
@@ -5868,6 +5901,10 @@ tresult PLUGIN_API VirusPlugin::getState(IBStream *state)
     {
         std::lock_guard<std::mutex> lk(state_mu_);
         auto recs = state_.empty() ? default_ : state_;
+        if (const std::vector<uint8_t> *raw = edited.empty() ? unread_.saved(recs) : nullptr)
+            recs.clear(), d = *raw; // R8-5: the unreadable project as it came
+        else if (parts_ < 16)
+            keep_parts(recs, parts_); // R8-3: also what a Snow got from the host since
         for (auto &r : recs)
             for (auto &e : edited)
                 if (is_part_dump(r, e.first))
@@ -5882,7 +5919,8 @@ tresult PLUGIN_API VirusPlugin::getState(IBStream *state)
                    recs.end());
         if (const int s = out_ ? vti::slot_to_save(out_->found_slot(), out_->preferred_slot()) : 0) // audit 2026-11-18 #2
             recs.push_back(editor_record(VIRUS_SLOT_RECORD, 0, s));
-        d = build_container(recs);
+        if (d.empty())
+            d = build_container(recs);
     }
     int32 done = 0;
     return state->write(d.data(), (int32)d.size(), &done);

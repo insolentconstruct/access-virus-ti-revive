@@ -6255,3 +6255,36 @@ stream restarts (before this change too; not run, open).
 - **Method:** code review; unit tests (vtitests, vlatests, Linux); a stub test of the Windows stream under Wine (scratch, not in the repo); the Linux and Windows brokers built (make, mingw)
 - **Confidence:** HIGH (E077's cause, our code: unit tests) / MED (Windows stream: stub test only) / open (that the sawtooth drives E465/E564; the new piece size, latency and CPU on a real Virus)
 - **Hardware:** no
+
+### E600
+
+How the original loads and saves a project's state, and TI Revive's port (fix item T15, research R8-2 to R8-6 and R8-8
+of 2026-11-26). Original, static analysis of Virus Control.dll 5.1.7 x64 (REA/Ghidra): (1) the container parser
+0x180060080 clears the queue, reads the total and each record length big-endian, or little-endian when the big-endian
+value has one of its top 10 bits set; a total longer than the data loads nothing; a record longer than the rest of the
+total stops the parse (the records before it are already queued). (2) setChunk 0x180079b50: a 0xFF record goes to the
+automation slot map (0x1800add00) and is removed; every 524-byte record that starts F0 00 20 33 01 xx 10 gets byte 10 =
+0x20 ("eLIB", E369) and then the format upgrade 0x1800a0c00, which recomputes the checksums; an 11-byte record with
+F0 at 0, 0x6F at 6 and 0x7E at 8 (page D 126, Input/Atomizer, E276) is removed; everything else, the stored multi
+included, goes into the start-up queue unchanged; F0 7D records are not filtered. (3) research R8, not re-checked here:
+getChunk writes as many single dumps and controller lists as the device type has parts (type table 0x1801c52f0: 16 TI,
+4 Snow), and at connect 0x180070520 writes the model's per-part Detune (multi byte 137+p) and Output Select (185+p,
+"Control2", or "Control3" when the USB IO configuration is not 0) into the fixed start-up multi before sending it.
+TI Revive before: big-endian only and a truncated container accepted; single dumps kept their saved origin bytes; 6F/7E
+records sent; the Snow class saved and sent 16 parts and 224 controllers; the stored multi was neither shown nor sent,
+so an original project's per-part routing and detune were lost; a state that did not parse left the default to be
+saved over it. TI Revive now (round 0.8.44): parse_container with the same length rules; setState drops 6F/7E records,
+keeps a Snow's records to parts 1-4 (also getState and the default state: 4 dumps, 56 controllers), marks every single
+dump eLIB with fresh checksums, logs a 0xFF record (kept in the project, never sent; automation follows automation.xml);
+the editor shows the stored multi's Detune and Output Select (later page-0x72 records win), and send_state sends the
+fixed start-up multi with them (startup_multi) in the stored multi's place when it differs from the fixed table, so a
+default project sends exactly what it did before; a state that does not parse is saved back unchanged until the
+instance's records change. Form chosen for the multi: the original's patched start-up table, not page-0x72 records and
+never parameters 0-3 (E209). It goes out a second time after the start-up messages because ours queues those before the
+host's setState (inferred from the code order, not traced on the wire).
+
+- **Date:** 2026-11-26
+- **Pointer:** Virus Control.dll 5.1.7 x64 0x180060080, 0x180079b50, 0x1800a0c00, 0x180070520, 0x1801c52f0; native/src/model/state.{h,cpp} (parse_container, mark_project_dumps, drop_input_atomizer, keep_parts, startup_multi, multi_routing_values, UnreadState); native/plugin/source/virusplugin.cpp (setState, getState, send_state, apply_state_to_params, default state); native/tests/test_state.cpp; native/docs/formats.md, architecture.md; work/research-2026-11-26 R8; E209, E221, E276, E361, E369
+- **Method:** static analysis (REA/Ghidra 12.1.4 on the user's own file: 0x180060080 and 0x180079b50 re-read for this entry); unit tests (vtitests, Linux)
+- **Confidence:** HIGH (the parse, eLIB and 6F/7E rules: decompiled code) / MED (the Snow's 4 parts and the connect-time multi patch: research R8, not re-read) / open (the effect on a Virus: no routed original project and no Snow tested)
+- **Hardware:** no
