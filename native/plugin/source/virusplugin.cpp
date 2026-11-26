@@ -1630,6 +1630,18 @@ bool VirusPlugin::panic()
     return true;
 }
 
+// pedal up and all notes off on the channels with a held key or pedal only (heldnotes.h, E373 - REAPER deactivates
+// at every Play); out_ connected
+int VirusPlugin::release_held_notes()
+{
+    uint8_t rel[32][3];
+    const int n = held_notes_.release(rel);
+    for (int i = 0; i < n; i++)
+        out_->send({rel[i][0], rel[i][1], rel[i][2]});
+    out_->pedals_up.store(true, std::memory_order_relaxed);
+    return n;
+}
+
 tresult PLUGIN_API VirusPlugin::setActive(TBool state)
 {
     if (state && out_)
@@ -1638,13 +1650,8 @@ tresult PLUGIN_API VirusPlugin::setActive(TBool state)
         reactivated_.store(true, std::memory_order_relaxed); // REAPER: before every Play, then its burst (E351)
     if (out_)
         out_->log("Virus TI native: setActive(%d), state loaded %d\n", (int)state, (int)state_loaded_);
-    if (!state && out_ && out_->connected()) { // nothing keeps sounding after the plug-in stops (removed, closed):
-        // only what is still held (heldnotes.h, E373 - REAPER deactivates at every Play)
-        uint8_t rel[32][3];
-        const int n = held_notes_.release(rel);
-        for (int i = 0; i < n; i++)
-            out_->send({rel[i][0], rel[i][1], rel[i][2]});
-        out_->pedals_up.store(true, std::memory_order_relaxed);
+    if (!state && out_ && out_->connected()) { // nothing keeps sounding after the plug-in stops (removed, closed)
+        const int n = release_held_notes();
         for (int i = 0; n > 0 && i < 50 && out_->busy(); i++) // at most 32 messages, a few ms; at most 250 ms
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -2344,6 +2351,10 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             return true;
         });
     if (data.inputEvents && out_) {
+        // the Virus is still busy with the start-up messages and the state, or with a project loaded while running
+        // (R8-1): note-ons would be late and land under patches that change
+        const bool hold_ons =
+            starting_.load(std::memory_order_relaxed) || state_hold_.holding(out_->busy(), now_ms());
         for (int32 i = 0; i < data.inputEvents->getEventCount(); i++) {
             Event e;
             if (data.inputEvents->getEvent(i, e) != kResultOk)
@@ -2360,8 +2371,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
                 r.playing = host_playing_.load(std::memory_order_relaxed);
                 note_probe_.push(r);
             }
-            if (e.type == Event::kNoteOnEvent && starting_.load(std::memory_order_relaxed))
-                continue; // the Virus is still busy with the start-up messages and the state (notes would be late)
+            if (e.type == Event::kNoteOnEvent && hold_ons)
+                continue;
             if (e.type == Event::kNoteOnEvent) {
                 last_note_ms_.store(now_ms(), std::memory_order_relaxed);
                 uint8_t m[3] = {(uint8_t)(0x90 | (e.noteOn.channel & 15)), note7(e.noteOn.pitch),
@@ -5641,7 +5652,15 @@ tresult PLUGIN_API VirusPlugin::setState(IBStream *state)
     state_loaded_ = true;
     unlock_all_parts(); // a project brings no locks: the original clears them at every project load (E378)
     apply_state_to_params();
+    // loaded while running (REAPER undo, preset swaps; R8-1): what sounds stops in front of the new patches, and
+    // note-ons wait until they are out, like the original (E161). Not connected: the start-up's hold covers it
+    const bool running = out_ && out_->connected() && active_;
+    if (running && release_held_notes() > 0)
+        out_->log("Virus TI native: held notes released for the loaded project (R8-1)\n");
     send_state();
+    if (state_hold_.start(running, now_ms()))
+        out_->log("Virus TI native: note-ons held until the project is sent (at most %lld ms)\n",
+                  (long long)StateHold::LIMIT_MS);
     return kResultOk;
 }
 

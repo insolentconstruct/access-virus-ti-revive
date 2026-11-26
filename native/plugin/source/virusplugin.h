@@ -39,6 +39,7 @@
 #include "device/offlinepace.h"
 #include "device/blockevents.h"
 #include "device/heldnotes.h"
+#include "device/statehold.h"
 #include "device/awayqueue.h"
 #include "device/outputdelay.h"
 #include "device/timelinefollow.h"
@@ -990,6 +991,8 @@ private:
     std::string dm_output_path(int which) const;
     bool od_changes_only_ = false; // outdelay-changes.on: not all 16 at every Play/Stop (E373)
     HeldNotes held_notes_;          // process() records, setActive(false) releases (heldnotes.h)
+    StateHold state_hold_;          // setState while running: note-ons wait for the state (statehold.h, R8-1)
+    int release_held_notes(); // setActive(false), setState while running: only what is still held; how many sent
     std::chrono::steady_clock::time_point od_next_{};
     int part_output(int part);
     void send_output_delays();
