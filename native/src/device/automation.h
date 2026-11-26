@@ -25,6 +25,7 @@ public:
     }
     // per block: budget for `samples` at `sample_rate`, up to the burst size
     void refill(int samples, double sample_rate) { budget_ = std::min(burst_, budget_ + rate_ * samples / sample_rate); }
+    void clear_budget() { budget_ = 0; } // another sender has the rate meanwhile (idleedits.h): no burst after it
     // sends waiting parameters while budget and `max` last: send(id) returns true if a message went out (costs one
     // unit of budget), false for a parameter that is no longer waiting. Returns the number sent.
     template <class Send> int drain(int max, Send &&send)

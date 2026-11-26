@@ -13,6 +13,7 @@
 #include "editor/infopage.h"
 #include "editor/setuptips.h"
 #include "device/automation.h"
+#include "device/idleedits.h"
 #include "device/broker.h"
 #include "device/keepalive.h"
 #include "device/markerscan.h"
@@ -131,6 +132,11 @@ public:
     {
         return loaded_parts_.load(std::memory_order_relaxed) ? loaded_parts_.exchange(0, std::memory_order_acq_rel) : 0;
     }
+    // the worker's idle hook, the same for the editor edits it sends while the host does not process (T13)
+    uint32_t take_loaded_idle()
+    {
+        return loaded_idle_.load(std::memory_order_relaxed) ? loaded_idle_.exchange(0, std::memory_order_acq_rel) : 0;
+    }
     // after a block's send_rt calls: wakes the worker (no lock; one notify per block instead of a 1 ms poll)
     void wake_rt() { cv_.notify_one(); }
     std::atomic<int64_t> timeline{-1};
@@ -169,6 +175,7 @@ public:
     bool other_owner() const; // another instance of this process talks to another Virus (#50: show the numbers)
     // process(): the DAW processed this instance (a block with samples, steady ms); #51: the Virus goes to the played one
     void note_processed(int64_t ms);
+    int64_t processed_ms() const { return processed_ms_.load(std::memory_order_relaxed); } // -1 = none yet
     int preferred_slot() const { return slot_pref_.load(); }
     // the slot where a Virus answered this instance (0 = none yet, or given up): what a project keeps
     int found_slot() const { return found_slot_.load(); }
@@ -368,6 +375,7 @@ private:
     DumpPacer dump_;            // a single dump on cable 3 in pieces, events between them on cable 5 (E270)
     HeldParams held_;           // automation that fell into a dump, sent when it is out (E274, R4-3); under mu_
     std::atomic<uint32_t> loaded_parts_{0}; // parts whose single dump was queued since process() last looked (R7-3)
+    std::atomic<uint32_t> loaded_idle_{0};  // the same since the worker's idle hook last looked (T13)
     void part_dump_queued(const std::vector<uint8_t> &m); // under mu_
     std::atomic<bool> dump_pending_{false}; // the dump counts as queued (busy()) until its last piece is written
     SendBudget budget_; // bytes per second towards the DSP's 2046-byte stamp queue (E261)
@@ -736,6 +744,9 @@ private:
     // Virus' audio until a power cycle - changes are coalesced per parameter and sent at <= AUTOMATION_RATE/s
     static constexpr double AUTOMATION_RATE = 250; // 1000/s still hung together with 2750 notes/s
     AutomationQueue automation_{AUTOMATION_RATE};
+    // editor edits of automatable parameters while the host does not call process() (T13, R7-4): the worker sends them
+    IdleEdits idle_edits_{AUTOMATION_RATE};
+    void send_idle_edits(); // worker, idle hook
     MappedPending mapped_; // bend, aftertouch, controllers from the host: the same budget (audit 2026-11-17 #4)
     PedalSwitch pedals_;   // CC 64..69 skip that budget: switches, sent on a flip only
     uint64_t block_no_ = 0;

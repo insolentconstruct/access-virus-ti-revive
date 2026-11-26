@@ -344,8 +344,10 @@ void DeviceOut::part_dump_queued(const std::vector<uint8_t> &m)
     if (p < 0)
         return;
     held_.drop_part(p);
-    if (p < 16)
+    if (p < 16) {
         loaded_parts_.fetch_or(1u << p, std::memory_order_acq_rel);
+        loaded_idle_.fetch_or(1u << p, std::memory_order_acq_rel);
+    }
 }
 
 // The broker connection is lost (a failed write, or the broker went away; review 2026-10-19 H3: the second case was
@@ -1572,6 +1574,7 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
                       bus, n_in, ch, lay / 2 % 2, lay % 2);
         }
         drain_param_updates();
+        send_idle_edits();
         load_reported_presets();
         send_output_delays();
         report_offline();
@@ -2187,6 +2190,7 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             }
         }
     } process_timer{this, data.numSamples};
+    const int64_t prev_block = out_ ? out_->processed_ms() : -1; // before this one: the echo window of idle_edits_ (T13)
     if (out_ && data.numSamples > 0) // #51: which instance the DAW plays (a flush with no samples does not count)
         out_->note_processed(
             std::chrono::duration_cast<std::chrono::milliseconds>(process_timer.t0.time_since_epoch()).count());
@@ -2449,6 +2453,8 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
             int value = (int)std::lround(v * 127); // the original's automation scale (docs/formats.md)
             if (const Parameter *p = dev_.find(it->second.path))
                 value = std::min(std::max(value, p->min), p->max);
+            if (idle_edits_.from_host(id, value, prev_block)) // an editor edit the worker sent while we were idle (T13)
+                continue;
             // coalesce: only the latest value per parameter waits for the budget below
             if (it->second.pending >= 0 || automation_.push(id))
                 it->second.pending = value;
@@ -2902,6 +2908,24 @@ void VirusPlugin::drain_param_updates()
     }
 }
 
+// T13 (R7-4): the editor's edits of automatable parameters while the host calls no process(): the same message as
+// process() builds, as an unstamped queued message (no timeline without blocks), held while a dump request is open (T9)
+// and dropped for a part loaded meanwhile (R7-3); queued messages wait for a dump in pieces (T10)
+void VirusPlugin::send_idle_edits()
+{
+    idle_edits_.drop_parts(out_->take_loaded_idle());
+    idle_edits_.pump(now_ms(), out_->processed_ms(), sync_ && sync_->request_open(), [this](uint32_t id, int value) {
+        auto it = params_.find(id);
+        if (it == params_.end())
+            return false;
+        auto msg = dev_.encode(it->second.path, value, it->second.part);
+        if (msg.empty())
+            return false;
+        out_->send(msg);
+        return true;
+    });
+}
+
 IPlugView *PLUGIN_API VirusPlugin::createView(FIDString name)
 {
     if (FIDStringsEqual(name, ViewType::kEditor) && files_ && cond_)
@@ -3351,6 +3375,9 @@ void VirusPlugin::ui_set(const std::string &path, int part, int value)
         }
     auto id = ids_.find({path, part});
     if (id != ids_.end()) { // automatable: through the host, which hands it to process()
+        // and from the worker if the host does not call process() (T13); a standard controller survives a load (R7-3)
+        if (auto pm = params_.find(id->second); pm != params_.end())
+            idle_edits_.edit(id->second, value, pm->second.standard ? -1 : pm->second.part, now_ms());
         setParamNormalized(id->second, value / 127.0);
         edit_gestures_.edit( // one gesture per drag, else begin + perform + end (editgestures.h)
             id->second, value / 127.0, [this](uint32_t i) { beginEdit(i); },
