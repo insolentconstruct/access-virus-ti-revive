@@ -242,6 +242,7 @@ void DeviceOut::send(std::vector<uint8_t> msg, uint8_t cable, bool keep)
         return;
     }
     std::lock_guard<std::mutex> lk(mu_);
+    part_dump_queued(msg);
     queue_.push_back({std::move(msg), false, cable, keep});
     queued_++;
     cv_.notify_one();
@@ -258,11 +259,26 @@ int DeviceOut::send_state(std::vector<std::vector<uint8_t>> records)
     queue_.erase(std::remove_if(queue_.begin(), queue_.end(), [](const Queued &q) { return q.state; }), queue_.end());
     int dropped = (int)(before - queue_.size());
     queued_ -= dropped;
-    for (auto &r : records)
+    for (auto &r : records) {
+        part_dump_queued(r);
         queue_.push_back({std::move(r), true});
+    }
     queued_ += (int)records.size();
     cv_.notify_one();
     return dropped;
+}
+
+// R7-3: a part's single dump is queued (a patch load, a state): its edits from before, still held for a running dump
+// or waiting in process(), would go out after the new patch and overwrite it. The original clears the part's waiting
+// slots at its dump (0x18007aa50). Edits from now on survive (requeue_held puts them behind the dump).
+void DeviceOut::part_dump_queued(const std::vector<uint8_t> &m)
+{
+    const int p = dump_part(m);
+    if (p < 0)
+        return;
+    held_.drop_part(p);
+    if (p < 16)
+        loaded_parts_.fetch_or(1u << p, std::memory_order_acq_rel);
 }
 
 // The broker connection is lost (a failed write, or the broker went away; review 2026-10-19 H3: the second case was
@@ -892,7 +908,8 @@ void DeviceOut::run()
                         held_.add(msg);
                         msg.clear();
                         stamp = -1;
-                    }
+                    } else
+                        queued_ -= drop_superseded(queue_, msg); // a held older value must not follow it
                 } else if (!queue_.empty()) {
                     rt_run_.turn();
                     msg = std::move(queue_.front().msg);
@@ -1123,13 +1140,11 @@ void DeviceOut::run()
                 ack_end_ = end;
                 count_written();
             }
-            if (piece_last && !held_.empty()) { // automation held during the dump goes first now (cable 2)
-                auto held = held_.take();
+            if (piece_last) { // automation held during the dump goes first now (cable 2), behind its part's next dump
                 std::lock_guard<std::mutex> lk(mu_);
-                for (auto it = held.rbegin(); it != held.rend(); ++it) {
-                    queue_.push_front({std::move(*it), false, CABLE_PLUGIN});
-                    queued_++;
-                }
+                queued_ += requeue_held(queue_, held_.take(), [](std::vector<uint8_t> &&m) {
+                    return Queued{std::move(m), false, CABLE_PLUGIN, false, true};
+                });
             }
             if (!wok)
                 lose_broker();
@@ -1218,6 +1233,7 @@ void DeviceOut::run()
                     held_.add(msg);
                     continue;
                 }
+                queued_ -= drop_superseded(queue_, msg); // a held older value must not follow it
                 pack(msg, st, sl_live);
             }
         }
@@ -1380,6 +1396,9 @@ tresult PLUGIN_API VirusPlugin::initialize(FUnknown *context)
         snprintf(units, sizeof units, "Part %02d/", e.part);
         parameters.addParameter(UString128(title), UString128(units), 0, 0.0, ParameterInfo::kCanAutomate, e.id);
         params_[(ParamID)e.id] = {e.path, e.part - 1};
+        uint8_t m[16]; // its transport: a standard controller survives a patch load (R7-3)
+        const size_t n = dev_.encode_into(e.path, 0, e.part - 1, m, sizeof m);
+        params_[(ParamID)e.id].standard = n == 3 && (m[0] & 0xF0) == 0xB0 && standard_controller(m[1]);
         ids_[{e.path, e.part - 1}] = (ParamID)e.id;
     }
     for (int ch = 0; ch < 16; ch++) {
@@ -2286,6 +2305,14 @@ tresult PLUGIN_API VirusPlugin::process(ProcessData &data)
         out_->live_ratio.store(ratio, std::memory_order_relaxed);
         // a live stamp counts from the newest frame: the timeline is S and the kept rest (E589) behind it
         out_->live_s.store(S + (int)tl_follow_.rest(), std::memory_order_relaxed);
+    }
+    // R7-3: a part's single dump was queued (patch load, state): what still waits of it from before goes, else it would
+    // overwrite the new patch; before this block's changes, which came after the load and stay
+    if (const uint32_t loaded = out_ ? out_->take_loaded_parts() : 0) {
+        drop_pending(params_, loaded);
+        for (int ch = 0; ch < 16; ch++)
+            if (loaded >> ch & 1)
+                mapped_.drop_loaded(ch);
     }
     if (data.inputParameterChanges && out_) {
         for (int32 i = 0; i < data.inputParameterChanges->getParameterCount(); i++) {

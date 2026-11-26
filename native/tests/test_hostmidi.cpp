@@ -136,3 +136,29 @@ TEST(hostmidi_pedals_go_at_once_but_only_on_a_flip)
         sent += p.flips(2, 64, (i * 127 / 125) % 128);
     CHECK(sent >= 20 && sent <= 25);
 }
+
+// R7-3: a part's single dump was queued (a patch load, a state): the controllers still waiting on its channel go, the
+// new patch would get the old values on top; like the original's slot clear, the standard controllers (not in the
+// patch: mod wheel, breath, volume, expression, the pedals 64-66), aftertouch and bend stay, as do other channels
+TEST(hostmidi_a_load_drops_the_waiting_controllers_of_its_channel)
+{
+    CHECK(standard_controller(0) && standard_controller(4) && !standard_controller(5) && standard_controller(6));
+    CHECK(standard_controller(9) && !standard_controller(10) && standard_controller(11) && standard_controller(16));
+    CHECK(!standard_controller(17) && !standard_controller(63) && standard_controller(64) && standard_controller(66));
+    CHECK(!standard_controller(67) && !standard_controller(119));
+    MappedPending p;
+    const uint8_t cut[3] = {0xB3, 40, 1}, mod[3] = {0xB3, 1, 2}, at[2] = {0xD3, 3}, bend[3] = {0xE3, 0, 64},
+                  other[3] = {0xB4, 40, 5};
+    p.set(3, 40, cut, 3, 0, 0);
+    p.set(3, 1, mod, 3, 0, 0);
+    p.set(3, 128, at, 2, 0, 0);
+    p.set(3, 129, bend, 3, 0, 0);
+    p.set(4, 40, other, 3, 0, 0);
+    p.drop_loaded(3);
+    MappedPending::Slot s;
+    CHECK(!p.take(3, 40, s));
+    CHECK(p.take(3, 1, s) && p.take(3, 128, s) && p.take(3, 129, s) && p.take(4, 40, s));
+    CHECK(p.set(3, 40, cut, 3, 0, 0)); // free again: a change after the load is queued anew
+    p.drop_loaded(16);                 // out of range: nothing
+    CHECK(p.take(3, 40, s));
+}

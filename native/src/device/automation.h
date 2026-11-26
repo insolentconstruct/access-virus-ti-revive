@@ -49,4 +49,20 @@ private:
     int head_ = 0, count_ = 0;
 };
 
+// R7-3: single dumps of `parts` (bit per part 0..15) were queued: the values still waiting for the budget, or held
+// while a dump request is open (T9), would go out after the new patch and overwrite it - they go, as in the
+// original's slot clear (0x18007aa50); standard controllers stay. The map's values have part, pending (-1 = none)
+// and standard. The ids stay in the queue: drain skips them without budget. Returns how many went.
+template <class Map> int drop_pending(Map &params, uint32_t parts)
+{
+    int n = 0;
+    for (auto &kv : params)
+        if (kv.second.pending >= 0 && !kv.second.standard && kv.second.part >= 0 && kv.second.part < 16 &&
+            (parts >> kv.second.part & 1)) {
+            kv.second.pending = -1;
+            n++;
+        }
+    return n;
+}
+
 } // namespace vti

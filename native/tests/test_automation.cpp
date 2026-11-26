@@ -145,3 +145,26 @@ TEST(automation_full_queue_refuses)
     q->drain(1, [&](uint32_t id) { first = id; return true; });
     CHECK_EQ(first, 0u); // the oldest is still there
 }
+
+// R7-3: values still waiting for the budget (or held while a dump request is open, T9) from before a part's single
+// dump was queued would overwrite the new patch: they go; the standard controllers and other parts stay
+TEST(automation_a_load_drops_the_waiting_values_of_its_parts)
+{
+    struct P {
+        int part, pending;
+        bool standard;
+    };
+    std::map<uint32_t, P> params = {{1, {0, 10, false}}, {2, {0, 20, true}}, {3, {1, 30, false}},
+                                    {4, {2, 40, false}}, {5, {0, -1, false}}};
+    CHECK(drop_pending(params, (1u << 0) | (1u << 2)) == 2);
+    CHECK(params[1].pending == -1 && params[4].pending == -1);
+    CHECK(params[2].pending == 20 && params[3].pending == 30 && params[5].pending == -1);
+    CHECK(drop_pending(params, 0) == 0);
+    // the queue still holds the dropped ids: drain skips them without spending budget, a new change queues anew
+    Sim s;
+    s.change(7, 1);
+    s.pending[7] = -1; // dropped
+    s.change(7, 2);    // not waiting any more: queued again
+    s.block();
+    CHECK(s.total == 1 && s.last_sent[7] == 2 && s.q->waiting() == 0);
+}

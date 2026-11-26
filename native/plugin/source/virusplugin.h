@@ -119,6 +119,12 @@ public:
         if (note_off)
             rt_lost_off_.store(true, std::memory_order_relaxed);
     }
+    // process(), at the block start: the parts (bit 0 = part 1) whose single dump was queued since the last call; their
+    // edits still waiting from before go (R7-3)
+    uint32_t take_loaded_parts()
+    {
+        return loaded_parts_.load(std::memory_order_relaxed) ? loaded_parts_.exchange(0, std::memory_order_acq_rel) : 0;
+    }
     // after a block's send_rt calls: wakes the worker (no lock; one notify per block instead of a 1 ms poll)
     void wake_rt() { cv_.notify_one(); }
     std::atomic<int64_t> timeline{-1};
@@ -324,6 +330,7 @@ private:
         bool state;        // part of a state upload (send_state)
         uint8_t cable = 2; // USB-MIDI cable
         bool keep = false; // kept while a Virus this instance had is away (awayqueue.h)
+        bool held = false; // held during a dump and put back (requeue_held): a newer value drops it (drop_superseded)
     };
     std::deque<Queued> queue_;
     std::atomic<int> queued_{0};
@@ -352,7 +359,9 @@ private:
     std::atomic<size_t> rt_w_{0}, rt_r_{0};
     EventRun rt_run_; // real-time messages sent in a row, the queue's turn after 8 (worker thread, dumppacer.h)
     DumpPacer dump_;            // a single dump on cable 3 in pieces, events between them on cable 5 (E270)
-    HeldParams held_;           // automation that fell into a dump, sent when it is out (E274)
+    HeldParams held_;           // automation that fell into a dump, sent when it is out (E274, R4-3); under mu_
+    std::atomic<uint32_t> loaded_parts_{0}; // parts whose single dump was queued since process() last looked (R7-3)
+    void part_dump_queued(const std::vector<uint8_t> &m); // under mu_
     std::atomic<bool> dump_pending_{false}; // the dump counts as queued (busy()) until its last piece is written
     SendBudget budget_; // bytes per second towards the DSP's 2046-byte stamp queue (E261)
     std::atomic<int> blocked_{0}; // messages rule 2 forbids, dropped (sendguard.h); logged by the worker
@@ -707,6 +716,7 @@ private:
         std::string path;
         int part = 0; // 0-based
         int pending = -1; // automation throttle (audio thread): the latest value waiting to be sent
+        bool standard = false; // sent as a standard controller (hostmidi.h): survives a patch load (R7-3)
     };
     // automation budget: a flood of parameter messages (stress test: 32 lanes per block, ~2750/s) hangs the
     // Virus' audio until a power cycle - changes are coalesced per parameter and sent at <= AUTOMATION_RATE/s

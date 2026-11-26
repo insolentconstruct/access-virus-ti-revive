@@ -65,6 +65,14 @@ template <class Emit> double clock_ticks(double next, double end, double per_tic
 // messages 120..127 (all sound off, reset, all notes off, ...) stay unmapped: the plug-in sends those itself.
 inline bool mapped_controller(int ctl) { return (ctl >= 0 && ctl < 120) || ctl == 128 || ctl == 129; }
 
+// The controllers a part's new patch does not set (bank select, mod wheel, breath, foot, data, volume, balance,
+// expression, 12-16, the pedals 64-66; the state keeps 1-4, 6-9, 11-16 per channel, docs/formats.md): what waits of
+// them survives a patch load, like the original's slot clear at a part dump (R7-3, 0x18007aa50)
+inline bool standard_controller(int cc)
+{
+    return (cc >= 0 && cc <= 4) || (cc >= 6 && cc <= 9) || (cc >= 11 && cc <= 16) || (cc >= 64 && cc <= 66);
+}
+
 // the MIDI message of mapped controller ctl on channel ch (0..15) at value v01; returns its length (0: none)
 inline size_t mapped_message(int ch, int ctl, double v01, uint8_t *m)
 {
@@ -102,6 +110,16 @@ struct MappedPending {
         std::memcpy(s.m, m, n);
         s.n = (uint8_t)n, s.offset = offset, s.block = block;
         return fresh;
+    }
+    // R7-3: a single dump of part ch was queued: the controllers still waiting on its channel would overwrite the new
+    // patch; the standard controllers, aftertouch and bend stay. The ids stay queued and drain skips them for free
+    void drop_loaded(int ch)
+    {
+        if (ch < 0 || ch > 15)
+            return;
+        for (int ctl = 0; ctl < 128; ctl++)
+            if (!standard_controller(ctl))
+                slot_[ch][ctl].n = 0;
     }
     bool take(int ch, int ctl, Slot &out)
     {
